@@ -132,6 +132,7 @@ class ZendureDevice(EntityDevice):
         self.charge_limit: int = 0
         self.charge_optimal: int = 0
         self.charge_start: int = 0
+        self.charge_max_limit_cap: int = 0
         self.discharge_limit: int = 0
         self.discharge_optimal: int = 0
         self.discharge_start: int = 0
@@ -150,6 +151,9 @@ class ZendureDevice(EntityDevice):
         )
         self.limitInput = ZendureNumber(
             self, "inputLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER
+        )
+        self.chargeMaxLimit = ZendureNumber(
+            self, "chargeMaxLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER
         )
         self.minSoc = ZendureNumber(self, "minSoc", self.entityWrite, None, "%", "soc", 100, 0, NumberMode.SLIDER, 10)
         self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 100, 0, NumberMode.SLIDER, 10)
@@ -204,7 +208,10 @@ class ZendureDevice(EntityDevice):
             self.charge_limit = charge
             self.charge_optimal = charge // 4
             self.charge_start = charge // 10
+            if self.charge_max_limit_cap == 0:
+                self.charge_max_limit_cap = abs(charge)
             self.limitInput.update_range(0, abs(charge))
+            self.chargeMaxLimit.update_range(0, self.charge_max_limit_cap)
 
             self.discharge_limit = discharge
             self.discharge_optimal = discharge // 4
