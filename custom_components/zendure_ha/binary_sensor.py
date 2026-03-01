@@ -40,13 +40,17 @@ class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride
         self._attr_is_on = initial_state
         self._value_template: Template | None = template
 
+    _FALSY = frozenset({"0", "no", "false", "off", "none", ""})  # conversion required for local MQTT
+
     def update_value(self, value: Any) -> bool:
         try:
-            is_on = bool(
-                int(self._value_template.async_render_with_possible_json_value(value, None)) != 0
-                if self._value_template is not None
-                else int(value) != 0
-            )
+            if self._value_template is not None:
+                is_on = int(self._value_template.async_render_with_possible_json_value(value, None)) != 0
+            elif isinstance(value, str):
+                s = value.lower()
+                is_on = s not in self._FALSY and not s.startswith("not_")
+            else:
+                is_on = int(value) != 0
 
             if self._attr_is_on == is_on:
                 return False

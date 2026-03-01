@@ -1,0 +1,1122 @@
+asyncapi: 3.1.0
+info:
+  title: Zendure SolarFlow 800 Pro MQTT API
+  version: 1.0.23 1-1
+  description: Auto-generated from local MQTT broker, amended with manual exploration.
+defaultContentType: text/plain
+channels:
+  batterySocLevelAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/socLevel/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryStateAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/state/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryPowerAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/power/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryMaxTempAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/maxTemp/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batterySocLevel:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_socLevel'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '60'
+  batteryState:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_state'
+    messages:
+      msg:
+        payload:
+          type: string
+          oneOf:
+            - const: standby
+            - const: 
+          example: standby
+  batteryPower:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_power'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  batteryMaxTemp:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_maxTemp'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '21.0'
+  batteryTotalVolAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/totalVol/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryBatcurAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/batcur/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryMaxVolAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/maxVol/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryMinVolAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/minVol/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  batteryTotalVol:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_totalVol'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '49.1'
+  batteryBatcur:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_batcur'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0.0'
+  batteryMaxVol:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_maxVol'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '3.27'
+  batteryMinVol:
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_minVol'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '3.27'
+  batterySoftVersionAvailability:
+    address: 'Zendure/sensor/{batterySerialNo}/softVersion/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceHeatStateAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/heatState/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  devicePackInputPowerAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/packInputPower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceOutputPackPowerAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/outputPackPower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  'batterySoftVersion':
+    address: 'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_softVersion'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: 1.0.27
+  deviceHeatState:
+    address: 'Zendure/sensor/{deviceSerialNo}/heatState'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: not_heating
+  devicePackInputPower:
+    address: 'Zendure/sensor/{deviceSerialNo}/packInputPower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceOutputPackPower:
+    address: 'Zendure/sensor/{deviceSerialNo}/outputPackPower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceOutputHomePowerAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/outputHomePower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceRemainOutTimeAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/remainOutTime/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  devicePackStateAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/packState/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  devicePackNumAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/packNum/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceOutputHomePower:
+    address: 'Zendure/sensor/{deviceSerialNo}/outputHomePower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceRemainOutTime:
+    address: 'Zendure/sensor/{deviceSerialNo}/remainOutTime'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '59940'
+  devicePackState:
+    address: 'Zendure/sensor/{deviceSerialNo}/packState'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: standby
+  devicePackNum:
+    address: 'Zendure/sensor/{deviceSerialNo}/packNum'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '1'
+  deviceElectricLevelAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/electricLevel/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceGridInputPowerAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/gridInputPower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSolarInputPowerAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarInputPower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSolarPower1Availability:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower1/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceElectricLevel:
+    address: 'Zendure/sensor/{deviceSerialNo}/electricLevel'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '60'
+  deviceGridInputPower:
+    address: 'Zendure/sensor/{deviceSerialNo}/gridInputPower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceSolarInputPower:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarInputPower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceSolarPower1:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower1'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceSolarPower2Availability:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower2/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSolarPower3Availability:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower3/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSolarPower4Availability:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower4/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  devicePassAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/pass/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSolarPower2:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower2'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceSolarPower3:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower3'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceSolarPower4:
+    address: 'Zendure/sensor/{deviceSerialNo}/solarPower4'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  devicePass:
+    address: 'Zendure/sensor/{deviceSerialNo}/pass'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: 'no'
+  deviceReverseStateAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/reverseState/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSocStatusAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/socStatus/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceHyperTmpAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/hyperTmp/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceGridOffPowerAvailability:
+    address: 'Zendure/sensor/{deviceSerialNo}/gridOffPower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceReverseState:
+    address: 'Zendure/sensor/{deviceSerialNo}/reverseState'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: 'no'
+  deviceSocStatus:
+    address: 'Zendure/sensor/{deviceSerialNo}/socStatus'
+    messages:
+      msg:
+        payload:
+          type: string
+          oneOf:
+            - const: Operation
+            - const: Auto-Calibration
+  deviceHyperTmp:
+    address: 'Zendure/sensor/{deviceSerialNo}/hyperTmp'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '21.0'
+  deviceGridOffPower:
+    address: 'Zendure/sensor/{deviceSerialNo}/gridOffPower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceLampSwitchAvailability:
+    address: 'Zendure/switch/{deviceSerialNo}/lampSwitch/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSmartModeAvailability:
+    address: 'Zendure/switch/{deviceSerialNo}/smartMode/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceAcModeAvailability:
+    address: 'Zendure/select/{deviceSerialNo}/acMode/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceGridReverseAvailability:
+    address: 'Zendure/select/{deviceSerialNo}/gridReverse/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceLampSwitch:
+    address: 'Zendure/switch/{deviceSerialNo}/lampSwitch'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/BinaryOnOff'
+  deviceLampSwitchSet:
+    address: 'Zendure/switch/{deviceSerialNo}/lampSwitch/set'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/BinaryOnOff'
+  deviceSmartMode:
+    address: 'Zendure/switch/{deviceSerialNo}/smartMode'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/BinaryOnOff'
+  deviceSmartModeSet:
+    address: 'Zendure/switch/{deviceSerialNo}/smartMode/set'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/BinaryOnOff'
+  deviceAcMode:
+    address: 'Zendure/select/{deviceSerialNo}/acMode'
+    description: Operation mode of the device AC grid connection
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AcMode'
+  deviceAcModeSet:
+    address: 'Zendure/select/{deviceSerialNo}/acMode/set'
+    description: Operation mode of the device AC grid connection (set)
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AcMode'
+  deviceGridReverse:
+    address: 'Zendure/select/{deviceSerialNo}/gridReverse'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/GridReverse'
+  deviceGridReverseSet:
+    address: 'Zendure/select/{deviceSerialNo}/gridReverse/set'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/GridReverse'
+  deviceGridOffModeAvailability:
+    address: 'Zendure/select/{deviceSerialNo}/gridOffMode/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceSocSetAvailability:
+    address: 'Zendure/number/{deviceSerialNo}/socSet/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceMinSocAvailability:
+    address: 'Zendure/number/{deviceSerialNo}/minSoc/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceInverseMaxPowerAvailability:
+    address: 'Zendure/number/{deviceSerialNo}/inverseMaxPower/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceGridOffMode:
+    address: 'Zendure/select/{deviceSerialNo}/gridOffMode'
+    description: Mode of the offgrid-socket.
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/GridOffMode'
+
+  deviceGridOffModeSet:
+    address: 'Zendure/select/{deviceSerialNo}/gridOffMode/set'
+    description: Mode of the offgrid-socket (set)
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/GridOffMode'
+
+  deviceSocSet:
+    address: 'Zendure/number/{deviceSerialNo}/socSet'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '100'
+  deviceSocSetSet:
+    address: 'Zendure/number/{deviceSerialNo}/socSet/set'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '100'
+  deviceMinSoc:
+    address: 'Zendure/number/{deviceSerialNo}/minSoc'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '30'
+  deviceMinSocSet:
+    address: 'Zendure/number/{deviceSerialNo}/minSoc/set'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '30'
+  deviceInverseMaxPower:
+    address: 'Zendure/number/{deviceSerialNo}/inverseMaxPower'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '800'
+  deviceInverseMaxPowerSet:
+    address: 'Zendure/number/{deviceSerialNo}/inverseMaxPower/set'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '800'
+  deviceOutputLimitAvailability:
+    address: 'Zendure/number/{deviceSerialNo}/outputLimit/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceInputLimitAvailability:
+    address: 'Zendure/number/{deviceSerialNo}/inputLimit/availability'
+    messages:
+      msg:
+        payload:
+          $ref: '#/components/schemas/AvailabilityOnline'
+  deviceOutputLimit:
+    address: 'Zendure/number/{deviceSerialNo}/outputLimit'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceOutputLimitSet:
+    address: 'Zendure/number/{deviceSerialNo}/outputLimit/set'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceInputLimit:
+    address: 'Zendure/number/{deviceSerialNo}/inputLimit'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+  deviceInputLimitSet:
+    address: 'Zendure/number/{deviceSerialNo}/inputLimit/set'
+    messages:
+      msg:
+        payload:
+          type: string
+          example: '0'
+operations:
+  'Zendure/sensor/{batterySerialNo}/socLevel/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batterySocLevelAvailability'
+    messages:
+      - $ref: '#/channels/batterySocLevelAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/state/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryStateAvailability'
+    messages:
+      - $ref: '#/channels/batteryStateAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/power/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryPowerAvailability'
+    messages:
+      - $ref: '#/channels/batteryPowerAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/maxTemp/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryMaxTempAvailability'
+    messages:
+      - $ref: '#/channels/batteryMaxTempAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_socLevel.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batterySocLevel'
+    messages:
+      - $ref: '#/channels/batterySocLevel/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_state.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryState'
+    messages:
+      - $ref: '#/channels/batteryState/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_power.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryPower'
+    messages:
+      - $ref: '#/channels/batteryPower/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_maxTemp.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryMaxTemp'
+    messages:
+      - $ref: '#/channels/batteryMaxTemp/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/totalVol/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryTotalVolAvailability'
+    messages:
+      - $ref: '#/channels/batteryTotalVolAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/batcur/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryBatcurAvailability'
+    messages:
+      - $ref: '#/channels/batteryBatcurAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/maxVol/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryMaxVolAvailability'
+    messages:
+      - $ref: '#/channels/batteryMaxVolAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/minVol/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryMinVolAvailability'
+    messages:
+      - $ref: '#/channels/batteryMinVolAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_totalVol.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryTotalVol'
+    messages:
+      - $ref: '#/channels/batteryTotalVol/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_batcur.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryBatcur'
+    messages:
+      - $ref: '#/channels/batteryBatcur/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_maxVol.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryMaxVol'
+    messages:
+      - $ref: '#/channels/batteryMaxVol/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_minVol.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batteryMinVol'
+    messages:
+      - $ref: '#/channels/batteryMinVol/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/softVersion/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batterySoftVersionAvailability'
+    messages:
+      - $ref: '#/channels/batterySoftVersionAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/heatState/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceHeatStateAvailability'
+    messages:
+      - $ref: '#/channels/deviceHeatStateAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/packInputPower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePackInputPowerAvailability'
+    messages:
+      - $ref: '#/channels/devicePackInputPowerAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/outputPackPower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceOutputPackPowerAvailability'
+    messages:
+      - $ref: '#/channels/deviceOutputPackPowerAvailability/messages/msg'
+  'Zendure/sensor/{batterySerialNo}/{batterySerialNo}_softVersion.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/batterySoftVersion'
+    messages:
+      - $ref: '#/channels/batterySoftVersion/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/heatState.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceHeatState'
+    messages:
+      - $ref: '#/channels/deviceHeatState/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/packInputPower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePackInputPower'
+    messages:
+      - $ref: '#/channels/devicePackInputPower/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/outputPackPower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceOutputPackPower'
+    messages:
+      - $ref: '#/channels/deviceOutputPackPower/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/outputHomePower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceOutputHomePowerAvailability'
+    messages:
+      - $ref: '#/channels/deviceOutputHomePowerAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/remainOutTime/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceRemainOutTimeAvailability'
+    messages:
+      - $ref: '#/channels/deviceRemainOutTimeAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/packState/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePackStateAvailability'
+    messages:
+      - $ref: '#/channels/devicePackStateAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/packNum/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePackNumAvailability'
+    messages:
+      - $ref: '#/channels/devicePackNumAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/outputHomePower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceOutputHomePower'
+    messages:
+      - $ref: '#/channels/deviceOutputHomePower/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/remainOutTime.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceRemainOutTime'
+    messages:
+      - $ref: '#/channels/deviceRemainOutTime/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/packState.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePackState'
+    messages:
+      - $ref: '#/channels/devicePackState/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/packNum.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePackNum'
+    messages:
+      - $ref: '#/channels/devicePackNum/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/electricLevel/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceElectricLevelAvailability'
+    messages:
+      - $ref: '#/channels/deviceElectricLevelAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/gridInputPower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridInputPowerAvailability'
+    messages:
+      - $ref: '#/channels/deviceGridInputPowerAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarInputPower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarInputPowerAvailability'
+    messages:
+      - $ref: '#/channels/deviceSolarInputPowerAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower1/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower1Availability'
+    messages:
+      - $ref: '#/channels/deviceSolarPower1Availability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/electricLevel.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceElectricLevel'
+    messages:
+      - $ref: '#/channels/deviceElectricLevel/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/gridInputPower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridInputPower'
+    messages:
+      - $ref: '#/channels/deviceGridInputPower/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarInputPower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarInputPower'
+    messages:
+      - $ref: '#/channels/deviceSolarInputPower/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower1.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower1'
+    messages:
+      - $ref: '#/channels/deviceSolarPower1/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower2/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower2Availability'
+    messages:
+      - $ref: '#/channels/deviceSolarPower2Availability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower3/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower3Availability'
+    messages:
+      - $ref: '#/channels/deviceSolarPower3Availability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower4/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower4Availability'
+    messages:
+      - $ref: '#/channels/deviceSolarPower4Availability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/pass/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePassAvailability'
+    messages:
+      - $ref: '#/channels/devicePassAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower2.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower2'
+    messages:
+      - $ref: '#/channels/deviceSolarPower2/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower3.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower3'
+    messages:
+      - $ref: '#/channels/deviceSolarPower3/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/solarPower4.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSolarPower4'
+    messages:
+      - $ref: '#/channels/deviceSolarPower4/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/pass.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/devicePass'
+    messages:
+      - $ref: '#/channels/devicePass/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/reverseState/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceReverseStateAvailability'
+    messages:
+      - $ref: '#/channels/deviceReverseStateAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/socStatus/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSocStatusAvailability'
+    messages:
+      - $ref: '#/channels/deviceSocStatusAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/hyperTmp/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceHyperTmpAvailability'
+    messages:
+      - $ref: '#/channels/deviceHyperTmpAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/gridOffPower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridOffPowerAvailability'
+    messages:
+      - $ref: '#/channels/deviceGridOffPowerAvailability/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/reverseState.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceReverseState'
+    messages:
+      - $ref: '#/channels/deviceReverseState/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/socStatus.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSocStatus'
+    messages:
+      - $ref: '#/channels/deviceSocStatus/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/hyperTmp.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceHyperTmp'
+    messages:
+      - $ref: '#/channels/deviceHyperTmp/messages/msg'
+  'Zendure/sensor/{deviceSerialNo}/gridOffPower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridOffPower'
+    messages:
+      - $ref: '#/channels/deviceGridOffPower/messages/msg'
+  'Zendure/switch/{deviceSerialNo}/lampSwitch/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceLampSwitchAvailability'
+    messages:
+      - $ref: '#/channels/deviceLampSwitchAvailability/messages/msg'
+  'Zendure/switch/{deviceSerialNo}/smartMode/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSmartModeAvailability'
+    messages:
+      - $ref: '#/channels/deviceSmartModeAvailability/messages/msg'
+  'Zendure/select/{deviceSerialNo}/acMode/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceAcModeAvailability'
+    messages:
+      - $ref: '#/channels/deviceAcModeAvailability/messages/msg'
+  'Zendure/select/{deviceSerialNo}/gridReverse/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridReverseAvailability'
+    messages:
+      - $ref: '#/channels/deviceGridReverseAvailability/messages/msg'
+  'Zendure/switch/{deviceSerialNo}/lampSwitch.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceLampSwitch'
+    messages:
+      - $ref: '#/channels/deviceLampSwitch/messages/msg'
+  'Zendure/switch/{deviceSerialNo}/lampSwitch.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceLampSwitchSet'
+    messages:
+      - $ref: '#/channels/deviceLampSwitchSet/messages/msg'
+  'Zendure/switch/{deviceSerialNo}/smartMode.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSmartMode'
+    messages:
+      - $ref: '#/channels/deviceSmartMode/messages/msg'
+  'Zendure/switch/{deviceSerialNo}/smartMode.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceSmartModeSet'
+    messages:
+      - $ref: '#/channels/deviceSmartModeSet/messages/msg'
+  'Zendure/select/{deviceSerialNo}/acMode.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceAcMode'
+    messages:
+      - $ref: '#/channels/deviceAcMode/messages/msg'
+  'Zendure/select/{deviceSerialNo}/acMode.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceAcModeSet'
+    messages:
+      - $ref: '#/channels/deviceAcModeSet/messages/msg'
+  'Zendure/select/{deviceSerialNo}/gridReverse.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridReverse'
+    messages:
+      - $ref: '#/channels/deviceGridReverse/messages/msg'
+  'Zendure/select/{deviceSerialNo}/gridReverse.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceGridReverseSet'
+    messages:
+      - $ref: '#/channels/deviceGridReverseSet/messages/msg'
+  'Zendure/select/{deviceSerialNo}/gridOffMode/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridOffModeAvailability'
+    messages:
+      - $ref: '#/channels/deviceGridOffModeAvailability/messages/msg'
+  'Zendure/number/{deviceSerialNo}/socSet/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSocSetAvailability'
+    messages:
+      - $ref: '#/channels/deviceSocSetAvailability/messages/msg'
+  'Zendure/number/{deviceSerialNo}/minSoc/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceMinSocAvailability'
+    messages:
+      - $ref: '#/channels/deviceMinSocAvailability/messages/msg'
+  'Zendure/number/{deviceSerialNo}/inverseMaxPower/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceInverseMaxPowerAvailability'
+    messages:
+      - $ref: '#/channels/deviceInverseMaxPowerAvailability/messages/msg'
+  'Zendure/select/{deviceSerialNo}/gridOffMode.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceGridOffMode'
+    messages:
+      - $ref: '#/channels/deviceGridOffMode/messages/msg'
+  'Zendure/select/{deviceSerialNo}/gridOffMode.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceGridOffModeSet'
+    messages:
+      - $ref: '#/channels/deviceGridOffModeSet/messages/msg'
+  'Zendure/number/{deviceSerialNo}/socSet.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceSocSet'
+    messages:
+      - $ref: '#/channels/deviceSocSet/messages/msg'
+  'Zendure/number/{deviceSerialNo}/socSet.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceSocSetSet'
+    messages:
+      - $ref: '#/channels/deviceSocSetSet/messages/msg'
+  'Zendure/number/{deviceSerialNo}/minSoc.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceMinSoc'
+    messages:
+      - $ref: '#/channels/deviceMinSoc/messages/msg'
+  'Zendure/number/{deviceSerialNo}/minSoc.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceMinSocSet'
+    messages:
+      - $ref: '#/channels/deviceMinSocSet/messages/msg'
+  'Zendure/number/{deviceSerialNo}/inverseMaxPower.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceInverseMaxPower'
+    messages:
+      - $ref: '#/channels/deviceInverseMaxPower/messages/msg'
+  'Zendure/number/{deviceSerialNo}/inverseMaxPower.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceInverseMaxPowerSet'
+    messages:
+      - $ref: '#/channels/deviceInverseMaxPowerSet/messages/msg'
+  'Zendure/number/{deviceSerialNo}/outputLimit/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceOutputLimitAvailability'
+    messages:
+      - $ref: '#/channels/deviceOutputLimitAvailability/messages/msg'
+  'Zendure/number/{deviceSerialNo}/inputLimit/availability.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceInputLimitAvailability'
+    messages:
+      - $ref: '#/channels/deviceInputLimitAvailability/messages/msg'
+  'Zendure/number/{deviceSerialNo}/outputLimit.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceOutputLimit'
+    messages:
+      - $ref: '#/channels/deviceOutputLimit/messages/msg'
+  'Zendure/number/{deviceSerialNo}/outputLimit.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceOutputLimitSet'
+    messages:
+      - $ref: '#/channels/deviceOutputLimitSet/messages/msg'
+  'Zendure/number/{deviceSerialNo}/inputLimit.subscribe':
+    action: receive
+    channel:
+      $ref: '#/channels/deviceInputLimit'
+    messages:
+      - $ref: '#/channels/deviceInputLimit/messages/msg'
+  'Zendure/number/{deviceSerialNo}/inputLimit.publish':
+    action: send
+    channel:
+      $ref: '#/channels/deviceInputLimitSet'
+    messages:
+      - $ref: '#/channels/deviceInputLimitSet/messages/msg'
+
+components:
+  schemas:
+    AvailabilityOnline:
+      type: string
+      enum:
+        - online
+    BinaryOnOff:
+      type: string
+      enum:
+        - ON
+        - OFF
+    AcMode:
+      type: string
+      oneOf:
+        - const: Input mode
+          description: device can load power from the grid
+        - const: Output mode
+          description: device can send power to the grid
+    GridReverse:
+      type: string
+      oneOf:
+        - const: Allow backflow
+        - const: Disallow backflow
+    GridOffMode:
+      type: string
+      oneOf:
+        - const: Normal mode
+          description: socket is active (inverter running)
+        - const: Economic mode
+          description: socket is active for ? minutes
+        - const: OFF
+          description: socket is off

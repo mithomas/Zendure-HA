@@ -5,13 +5,14 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.zendure_ha.device import ZendureZenSdk
+from custom_components.zendure_ha.device import ZendureZenSdk, ZendureZenSDKWithLocalMQTT
 from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSensor
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class SolarFlow800(ZendureZenSdk):
+
     def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
         """Initialise SolarFlow800."""
         super().__init__(hass, deviceId, prodName, definition["productModel"], definition)
@@ -20,6 +21,7 @@ class SolarFlow800(ZendureZenSdk):
 
 
 class SolarFlow800Plus(ZendureZenSdk):
+
     def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
         """Initialise SolarFlow800Plus."""
         super().__init__(hass, deviceId, prodName, definition["productModel"], definition)
@@ -27,7 +29,8 @@ class SolarFlow800Plus(ZendureZenSdk):
         self.maxSolar = -1500
 
 
-class SolarFlow800Pro(ZendureZenSdk):
+class SolarFlow800Pro(ZendureZenSDKWithLocalMQTT):
+
     def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
         """Initialise SolarFlow800Pro."""
         super().__init__(hass, deviceId, prodName, definition["productModel"], definition)

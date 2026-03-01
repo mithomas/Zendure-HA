@@ -25,6 +25,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 from paho.mqtt import client as mqtt_client
+from stringcase import camelcase
 
 from .binary_sensor import ZendureBinarySensor
 from .button import ZendureButton
@@ -33,6 +34,7 @@ from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureRestoreSensor, ZendureSensor
+from .switch import ZendureSwitch
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -945,6 +947,243 @@ class ZendureZenSdk(ZendureDevice):
             )
             return False
         return True
+
+
+class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
+    """Hybrid mode: local MQTT for reads/writes with ZenSDK HTTP fallback."""
+
+    _http_only_entities: set[str] = {"Fanmode", "Fanspeed", "chargeMaxLimit"}
+    _mqtt_select_mappings: dict[str, dict[int, str]] = {
+        "gridOffMode": {0: "Normal mode", 1: "Economic mode", 2: "OFF"},
+        "acMode": {1: "Input mode", 2: "Output mode"},
+        "gridReverse": {1: "Allow backflow", 2: "Disallow backflow"},
+    }
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        deviceId: str,
+        name: str,
+        model: str,
+        definition: dict[str, str],
+        parent: str | None = None,
+    ) -> None:
+        """Initialize the hybrid local-MQTT device variant."""
+        # Initialize before super().__init__ because restore callbacks may invoke mqttSelect early.
+        self._mqtt_subscribed = False
+        self._mqtt_entities_received: set[str] = set()
+        super().__init__(hass, deviceId, name, model, definition, parent)
+        self.connection.setDict(
+            {
+                ConnectionMode.CLOUD: "cloud",
+                ConnectionMode.ZENSDK: "zenSDK",
+                ConnectionMode.ZENSDK_WITH_LOCAL_MQTT: "localMqtt+zenSDK",
+            }
+        )
+
+    async def mqttSelect(self, select: Any, value: Any) -> None:
+        from .api import Api
+
+        self._mqtt_entities_received.clear()
+        Api.update_cloud_mqtt_state()
+        if select.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+            Api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
+            Api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
+            self.mqtt = None
+            if Api.mqttLocal.is_connected() and not self._mqtt_subscribed:
+                Api.mqttLocal.subscribe("Zendure/+/+/+")
+                self._mqtt_subscribed = True
+        else:
+            self._mqtt_subscribed = False
+            await super().mqttSelect(select, value)
+
+    async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
+        from .api import Api
+
+        if entity.translation_key is None:
+            _LOGGER.error(
+                "Entity %s has no translation_key, cannot write property %s",
+                entity.name,
+                self.name,
+            )
+            return
+
+        property_name = camelcase(entity.translation_key)
+
+        if (
+            self.connection.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT
+            and property_name not in self._http_only_entities
+        ):
+            if isinstance(entity, ZendureSwitch):
+                entity_type = "switch"
+            elif isinstance(entity, ZendureSelect):
+                entity_type = "select"
+                mapping = self._mqtt_select_mappings.get(property_name)
+                if mapping and value in mapping:
+                    value = mapping[value]
+            elif isinstance(entity, ZendureNumber):
+                entity_type = "number"
+                value = int(value) // entity.factor
+            else:
+                entity_type = "sensor"
+
+            topic = f"Zendure/{entity_type}/{self.snNumber}/{property_name}/set"
+            mqtt_value = self._format_mqtt_value(entity_type, value)
+            Api.mqttLocal.publish(topic, mqtt_value)
+            _LOGGER.info("Writing via MQTT %s %s => %s", self.name, topic, mqtt_value)
+            return
+
+        await super().entityWrite(entity, value)
+
+    def localMqttMessage(self, entity_type: str, entity_name: str, value: str) -> bool:
+        try:
+            if entity_name.endswith(("/availability", "/set")):
+                return True
+
+            parsed_value = self._parse_mqtt_value(entity_type, value)
+            if entity_name in {"socStatus", "socState", "packState"} and isinstance(parsed_value, str):
+                parsed_value = {
+                    "idle": 0,
+                    "standby": 0,
+                    "charging": 1,
+                    "discharging": 2,
+                }.get(parsed_value.strip().lower(), parsed_value)
+            if isinstance(entity := self.entities.get(entity_name), ZendureNumber):
+                parsed_value = parsed_value * entity.factor
+            elif (spec := self.createEntity.get(entity_name)) is not None and (
+                spec if isinstance(spec, str) else spec[0]
+            ) == "°C":
+                # MQTT sends temperature already in °C; reverse the Kelvin template so it round-trips correctly
+                parsed_value = float(parsed_value) * 10 + 2731
+            self._mqtt_entities_received.add(entity_name)
+            self.entityUpdate(entity_name, parsed_value)
+            self.lastseen = datetime.now() + timedelta(minutes=5)
+            self.setStatus()
+        except Exception as e:
+            _LOGGER.error(
+                "Error handling local MQTT message for %s: %s=%s, error: %s",
+                self.name,
+                entity_name,
+                value,
+                e,
+            )
+            return False
+        else:
+            return True
+
+    def handleLocalMqttMessage(self, client: Any, entity_type: str, entity_name: str, value: str) -> None:
+        """Handle local MQTT entity updates on Home Assistant loop."""
+        if self.localMqttMessage(entity_type, entity_name, value) and self.mqtt != client:
+            self.mqtt = client
+            self.setStatus()
+
+    def localMqttBatteryMessage(self, battery_id: str, entity_name: str, value: str) -> bool:
+        try:
+            if entity_name.endswith(("/availability", "/set")):
+                return True
+
+            actual_entity_name = entity_name
+            if entity_name.startswith(f"{battery_id}_"):
+                actual_entity_name = entity_name[len(battery_id) + 1 :]
+
+            if (battery := self.batteries.get(battery_id, None)) is None:
+                self.batteries[battery_id] = ZendureBattery(self.hass, battery_id, self)
+                self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
+                self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
+                battery = self.batteries[battery_id]
+
+            if battery is not None:
+                parsed_value = self._parse_mqtt_value("sensor", value)
+                if actual_entity_name == "state" and isinstance(parsed_value, str):
+                    parsed_value = {
+                        "standby": 0,
+                        "charging": 1,
+                        "discharging": 2,
+                    }.get(parsed_value.strip().lower(), parsed_value)
+                battery.entityUpdate(actual_entity_name, parsed_value)
+        except Exception as e:
+            _LOGGER.error(
+                "Error handling local MQTT battery message: %s/%s=%s, error: %s",
+                battery_id,
+                entity_name,
+                value,
+                e,
+            )
+            return False
+        else:
+            return True
+
+    def handleLocalMqttBatteryMessage(self, battery_id: str, entity_name: str, value: str) -> None:
+        """Handle local MQTT battery updates on Home Assistant loop."""
+        self.localMqttBatteryMessage(battery_id, entity_name, value)
+
+    def _parse_mqtt_value(self, entity_type: str, value: str) -> Any:
+        if entity_type == "switch":
+            return 1 if value.upper() in ("ON", "1", "TRUE", "YES") else 0
+        try:
+            if "." in value:
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+
+    def _format_mqtt_value(self, entity_type: str, value: Any) -> str:
+        if entity_type == "switch":
+            return "ON" if value in (1, True, "1", "on", "ON") else "OFF"
+        return str(value)
+
+    async def dataRefresh(self, update_count: int) -> None:
+        if self.connection.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+            await self._refresh_http_report()
+            return
+        await super().dataRefresh(update_count)
+
+    async def power_get(self) -> bool:
+        if self.connection.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+            if not self._mqtt_entities_received:
+                await self._refresh_http_report()
+        elif self.connection.value != ConnectionMode.CLOUD:
+            await self._refresh_http_report()
+
+        return await ZendureDevice.power_get(self)
+
+    async def doCommand(self, command: Any) -> None:
+        from .api import Api
+
+        if self.connection.value != ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+            await super().doCommand(command)
+            return
+
+        props = command.get("properties")
+        if not props:
+            await self.httpPost("properties/write", command)
+            return
+
+        http_props: dict[str, Any] = {}
+        for prop_name, prop_value in props.items():
+            if prop_name in self._http_only_entities:
+                http_props[prop_name] = prop_value
+                continue
+
+            entity = self.entities.get(prop_name)
+            if isinstance(entity, ZendureSwitch):
+                entity_type = "switch"
+            elif isinstance(entity, ZendureSelect):
+                entity_type = "select"
+            else:
+                entity_type = "number"
+
+            if entity_type == "select":
+                mapping = self._mqtt_select_mappings.get(prop_name)
+                if mapping and prop_value in mapping:
+                    prop_value = mapping[prop_value]
+
+            topic = f"Zendure/{entity_type}/{self.snNumber}/{prop_name}/set"
+            mqtt_value = self._format_mqtt_value(entity_type, prop_value)
+            Api.mqttLocal.publish(topic, mqtt_value)
+
+        if http_props:
+            await self.httpPost("properties/write", {"properties": http_props})
 
 
 @dataclass

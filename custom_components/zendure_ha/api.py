@@ -21,6 +21,7 @@ from paho.mqtt import client as mqtt_client
 from paho.mqtt import enums as mqtt_enums
 
 from .const import (
+    ConnectionMode,
     CONF_APPTOKEN,
     CONF_HAKEY,
     CONF_MQTTLOG,
@@ -259,6 +260,14 @@ class Api:
                     client.subscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
                     Api.mqttCloud.unsubscribe(f"/{device.prodkey}/{device.deviceId}/#")
                     Api.mqttCloud.unsubscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
+        elif userdata == "local":
+            for device in self.devices.values():
+                if device.connection.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+                    client.subscribe(f"Zendure/+/{device.deviceId}/+")
+                    client.subscribe(f"Zendure/+/{device.snNumber}/+")
+                else:
+                    client.subscribe(f"/{device.prodkey}/{device.deviceId}/#")
+                    client.subscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
         else:
             for device in self.devices.values():
                 if device.connection.value == ConnectionMode.CLOUD:
@@ -314,6 +323,11 @@ class Api:
         if msg.payload is None or not msg.payload or len(self.devices) == 0:
             return
         try:
+            topics = msg.topic.split("/")
+            if topics[0] == "Zendure" and len(topics) >= 4:
+                self._handleLocalMqttMessage(client, msg, topics)
+                return
+
             topics = msg.topic.split("/", 3)
 
             # Validate topic format before accessing indices
@@ -356,6 +370,60 @@ class Api:
 
         except Exception:
             _LOGGER.exception("Unexpected error in MQTT local message handler")
+
+    def _handleLocalMqttMessage(self, client: Any, msg: Any, topics: list[str]) -> None:
+        """Handle Zendure-style local MQTT messages."""
+        try:
+            entity_type = topics[1]
+            device_or_battery_id = topics[2]
+            entity_name = "/".join(topics[3:])
+
+            try:
+                value = msg.payload.decode().strip()
+            except UnicodeDecodeError as err:
+                _LOGGER.error("Failed to decode Zendure MQTT payload: %s", err)
+                return
+
+            if self.mqttLogging:
+                _LOGGER.debug("Zendure topic: %s => %s", msg.topic, value)
+
+            device = self.devices.get(device_or_battery_id)
+            if device is None:
+                for dev in self.devices.values():
+                    if dev.snNumber == device_or_battery_id:
+                        device = dev
+                        break
+
+            if device is not None:
+                if device.connection.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+                    device.hass.add_job(
+                        device.handleLocalMqttMessage,  # pyright: ignore[reportAttributeAccessIssue]
+                        client,
+                        entity_type,
+                        entity_name,
+                        value,
+                    )
+                return
+
+            for dev in self.devices.values():
+                if device_or_battery_id in dev.batteries:
+                    if dev.connection.value == ConnectionMode.ZENSDK_WITH_LOCAL_MQTT:
+                        dev.hass.add_job(
+                            dev.handleLocalMqttBatteryMessage,  # pyright: ignore[reportAttributeAccessIssue]
+                            device_or_battery_id,
+                            entity_name,
+                            value,
+                        )
+                    return
+
+            _LOGGER.warning(
+                "Unknown Zendure local MQTT message for %s: %s; the device may still be setting up in the integration",
+                device_or_battery_id,
+                msg.topic,
+            )
+
+        except Exception:
+            _LOGGER.exception("Unexpected error in Zendure MQTT message handler")
 
     def mqttMsgDevice(self, _client: Any, _userdata: Any, msg: Any) -> None:
         if msg.payload is None or not msg.payload:

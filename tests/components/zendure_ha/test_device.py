@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
-from custom_components.zendure_ha.const import ConnectionMode
+from custom_components.zendure_ha.const import AcMode, ConnectionMode
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 
@@ -22,6 +22,26 @@ def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
     device.byPass.update_value(1)
 
     assert device.byPass.is_on is True
+
+
+async def test_sf800_pro_power_charge_sets_ac_input_mode_and_charge_limits(hass):
+    """Charging an SF800 Pro should switch it into AC input mode with the requested limit."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro",
+        device_name="sf800 pro",
+        product_model="SolarFlow 800 Pro",
+        ac_mode=AcMode.OUTPUT,
+        input_limit=0,
+        output_limit=0,
+    )
+    with patch.object(device, "doCommand", AsyncMock()) as mock_do_command:
+        await device.power_charge(-300)
+
+    mock_do_command.assert_awaited_once_with(
+        {"properties": {"smartMode": 1, "acMode": 1, "outputLimit": 0, "inputLimit": 300}}
+    )
 
 
 class TestZenSdkDataRefresh:
