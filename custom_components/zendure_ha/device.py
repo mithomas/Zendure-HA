@@ -413,6 +413,7 @@ class ZendureDevice(EntityDevice):
         from .api import Api
 
         self.mqtt = None
+        Api.update_cloud_mqtt_state()
         if self.lastseen != datetime.min:
             if self.connection.value == ConnectionMode.CLOUD:
                 await self.bleMqtt(Api.mqttCloud)
@@ -762,6 +763,7 @@ class ZendureZenSdk(ZendureDevice):
         from .api import Api
 
         self.mqtt = None
+        Api.update_cloud_mqtt_state()
         match select.value:
             case ConnectionMode.CLOUD:
                 Api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")

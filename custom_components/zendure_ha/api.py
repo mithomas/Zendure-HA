@@ -86,9 +86,14 @@ class Api:
     localPassword: str = ""
     wifipsw: str = ""
     wifissid: str = ""
+    cloudUser: str = ""
+    cloudPassword: str = ""
+    instance: Api | None = None
+    cloudConnecting: bool = False
 
     def Init(self, data: Mapping[str, Any], mqtt: Mapping[str, Any]) -> None:
         """Initialize Zendure Api."""
+        Api.instance = self
         Api.mqttLogging = data.get(CONF_MQTTLOG, False)
         Api.mqttCloud.__init__(
             mqtt_enums.CallbackAPIVersion.VERSION2,
@@ -99,7 +104,8 @@ class Api:
         )
         url = mqtt["url"]
         Api.cloudServer, Api.cloudPort = url.rsplit(":", 1) if ":" in url else (url, "1883")
-        self.mqttInit(Api.mqttCloud, Api.cloudServer, Api.cloudPort, mqtt["username"], mqtt["password"])
+        Api.cloudUser = mqtt["username"]
+        Api.cloudPassword = mqtt["password"]
 
         # Get wifi settings
         Api.wifissid = data.get(CONF_WIFISSID, "")
@@ -116,6 +122,23 @@ class Api:
                 mqtt_enums.CallbackAPIVersion.VERSION2, clientId, True, "local", mqtt_enums.MQTTProtocolVersion.MQTTv31
             )
             self.mqttInit(self.mqttLocal, Api.localServer, Api.localPort, Api.localUser, Api.localPassword)
+
+        # Only keep cloud MQTT connected when at least one device is in cloud mode.
+        Api.update_cloud_mqtt_state()
+
+    @classmethod
+    def has_cloud_devices(cls) -> bool:
+        """Check if any configured device currently uses cloud mode."""
+        return any(device.connection.value == ConnectionMode.CLOUD for device in cls.devices.values())
+
+    @classmethod
+    def update_cloud_mqtt_state(cls) -> None:
+        """Connect/disconnect cloud MQTT client based on active device modes."""
+        if cls.has_cloud_devices():
+            if not cls.mqttCloud.is_connected() and not cls.cloudConnecting and cls.instance is not None:
+                cls.instance.mqttInit(cls.mqttCloud, cls.cloudServer, cls.cloudPort, cls.cloudUser, cls.cloudPassword)
+        elif cls.mqttCloud.is_connected():
+            cls.mqttCloud.disconnect()
 
     @staticmethod
     async def Connect(hass: HomeAssistant, data: dict[str, Any], reload: bool) -> dict[str, Any] | None:
@@ -206,6 +229,8 @@ class Api:
 
     def mqttInit(self, client: mqtt_client.Client, srv: str, port: str, user: str, psw: str) -> None:
         try:
+            if client == self.mqttCloud:
+                Api.cloudConnecting = True
             client.on_connect = self.mqttConnect
             client.on_disconnect = self.mqttDisconnect
             client.on_message = (
@@ -220,10 +245,14 @@ class Api:
             client.connect(srv, int(port))
             client.loop_start()
         except Exception as e:
+            if client == self.mqttCloud:
+                Api.cloudConnecting = False
             _LOGGER.error("Unable to connect to Zendure %s!", e)
 
     def mqttConnect(self, client: Any, userdata: Any, _flags: Any, rc: Any, _props: Any) -> None:
         _LOGGER.info("Client %s connected to MQTT broker, return code: %s", userdata, rc)
+        if client == self.mqttCloud:
+            Api.cloudConnecting = False
         if userdata == "zendure":
             for device in self.devices.values():
                 if client == device.zendure:
@@ -232,10 +261,13 @@ class Api:
                     Api.mqttCloud.unsubscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
         else:
             for device in self.devices.values():
-                client.subscribe(f"/{device.prodkey}/{device.deviceId}/#")
-                client.subscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
+                if device.connection.value == ConnectionMode.CLOUD:
+                    client.subscribe(f"/{device.prodkey}/{device.deviceId}/#")
+                    client.subscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
 
     def mqttDisconnect(self, _client: Any, userdata: Any, _flags: Any, rc: Any, _props: Any) -> None:
+        if userdata == "cloud":
+            Api.cloudConnecting = False
         _LOGGER.info("Client %s disconnected to MQTT broker, return code: %s", userdata, rc)
 
     def mqttMsgCloud(self, client: Any, _userdata: Any, msg: Any) -> None:
