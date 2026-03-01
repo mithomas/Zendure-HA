@@ -408,6 +408,9 @@
     "ac_switch": {
       "name": "AC-uitgang"
     },
+    "smart_mode": {
+      "name": "Slimme modus"
+    },
     "fanmode": {
       "name": "Slimme Koelventilator"
     }

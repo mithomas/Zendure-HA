@@ -487,6 +487,9 @@
       "buzzer_switch": {
         "name": "Bestätigungston"
       },
+      "smart_mode": {
+        "name": "Smart-Modus"
+      },
       "auto_recover": {
         "name": "Bypass-Modus zurücksetzen"
       },

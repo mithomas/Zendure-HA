@@ -182,6 +182,7 @@ class EntityDevice:
         "electricLevel": ("%", "battery"),
         "rssi": ("dBm", "signal_strength"),
         "masterSwitch": ("binary"),
+        "smartMode": ("switch"),
         "buzzerSwitch": ("switch"),
         "autoRecover": ("switch"),
         "wifiState": ("binary"),

@@ -498,6 +498,9 @@
       "buzzer_switch": {
         "name": "Buzzer"
       },
+      "smart_mode": {
+        "name": "Smart mode"
+      },
       "auto_recover": {
         "name": "Bypass-Mode Reset"
       },

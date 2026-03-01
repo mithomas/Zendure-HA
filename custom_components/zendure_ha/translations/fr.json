@@ -459,6 +459,9 @@
       "buzzer_switch": {
         "name": "Buzzer"
       },
+      "smart_mode": {
+        "name": "Mode intelligent"
+      },
       "auto_recover": {
         "name": "Reset mode dérivation ( bypass )"
       },
