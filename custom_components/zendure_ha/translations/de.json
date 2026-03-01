@@ -393,7 +393,9 @@
         "name": "Verbindungsart",
         "state": {
           "local": "Lokal",
-          "cloud": "Cloud"
+          "cloud": "Cloud",
+          "zenSDK": "ZenSDK",
+          "localMqtt+zenSDK": "Lokales MQTT + ZenSDK"
         }
       },
       "ble_adapter": {

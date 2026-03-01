@@ -361,6 +361,15 @@
           "fast": "Snel"
         }
       }
+    },
+    "connection": {
+      "name": "Verbindingsmodus",
+      "state": {
+        "local": "Lokaal",
+        "cloud": "Cloud",
+        "zenSDK": "ZenSDK",
+        "localMqtt+zenSDK": "Lokale MQTT + ZenSDK"
+      }
     }
   },
   "switch": {

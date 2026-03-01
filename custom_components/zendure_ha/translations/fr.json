@@ -365,7 +365,9 @@
         "name": "Mode de connexion",
         "state": {
           "local": "Local",
-          "cloud": "Cloud"
+          "cloud": "Cloud",
+          "zenSDK": "ZenSDK",
+          "localMqtt+zenSDK": "MQTT local + ZenSDK"
         }
       },
       "ble_adapter": {

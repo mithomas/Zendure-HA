@@ -28,7 +28,7 @@ from paho.mqtt import client as mqtt_client
 
 from .binary_sensor import ZendureBinarySensor
 from .button import ZendureButton
-from .const import DeviceState, SmartMode
+from .const import ConnectionMode, DeviceState, SmartMode
 from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -224,7 +224,7 @@ class ZendureDevice(EntityDevice):
                 self.connectionStatus.update_value(2)
             elif self.fuseGroup.value == 0:
                 self.connectionStatus.update_value(3)
-            elif self.connection.value == SmartMode.ZENSDK:
+            elif self.connection.value == ConnectionMode.ZENSDK:
                 self.connectionStatus.update_value(12)
             elif self.mqtt is not None and self.mqtt.host == Api.localServer:
                 self.connectionStatus.update_value(11)
@@ -414,9 +414,9 @@ class ZendureDevice(EntityDevice):
 
         self.mqtt = None
         if self.lastseen != datetime.min:
-            if self.connection.value == 0:
+            if self.connection.value == ConnectionMode.CLOUD:
                 await self.bleMqtt(Api.mqttCloud)
-            elif self.connection.value == 1:
+            elif self.connection.value == ConnectionMode.LOCAL:
                 await self.bleMqtt(Api.mqttLocal)
 
         _LOGGER.debug("Mqtt selected %s", self.name)
@@ -693,7 +693,13 @@ class ZendureLegacy(ZendureDevice):
     ) -> None:
         """Initialize Device."""
         super().__init__(hass, deviceId, name, model, definition, parent)
-        self.connection = ZendureRestoreSelect(self, "connection", {0: "cloud", 1: "local"}, self.mqttSelect, 0)
+        self.connection = ZendureRestoreSelect(
+            self,
+            "connection",
+            {ConnectionMode.CLOUD: "cloud", ConnectionMode.LOCAL: "local"},
+            self.mqttSelect,
+            ConnectionMode.CLOUD,
+        )
         self.mqttReset = ZendureButton(self, "mqttReset", self.button_press)
         self.bleAdapter = ZendureRestoreSelect(self, "bleAdapter", self.ble_adapter_options(), self.bleAdapterSelect, 0)
 
@@ -708,7 +714,7 @@ class ZendureLegacy(ZendureDevice):
         match button.translation_key:
             case "mqtt_reset":
                 _LOGGER.info("Resetting MQTT for %s", self.name)
-                await self.bleMqtt(Api.mqttCloud if self.connection.value == 0 else Api.mqttLocal)
+                await self.bleMqtt(Api.mqttCloud if self.connection.value == ConnectionMode.CLOUD else Api.mqttLocal)
 
     async def dataRefresh(self, _update_count: int) -> None:
         """Refresh the device data."""
@@ -743,7 +749,13 @@ class ZendureZenSdk(ZendureDevice):
         """Initialize Device."""
         self.session = async_get_clientsession(hass, verify_ssl=False)
         super().__init__(hass, deviceId, name, model, definition, parent)
-        self.connection = ZendureRestoreSelect(self, "connection", {0: "cloud", 2: "zenSDK"}, self.mqttSelect, 0)
+        self.connection = ZendureRestoreSelect(
+            self,
+            "connection",
+            {ConnectionMode.CLOUD: "cloud", ConnectionMode.ZENSDK: "zenSDK"},
+            self.mqttSelect,
+            ConnectionMode.CLOUD,
+        )
         self.httpid = 0
 
     async def mqttSelect(self, select: Any, _value: Any) -> None:
@@ -751,11 +763,11 @@ class ZendureZenSdk(ZendureDevice):
 
         self.mqtt = None
         match select.value:
-            case 0:
+            case ConnectionMode.CLOUD:
                 Api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
                 Api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
 
-            case 2:
+            case ConnectionMode.ZENSDK:
                 Api.mqttCloud.unsubscribe(f"/{self.prodkey}/{self.deviceId}/#")
                 Api.mqttCloud.unsubscribe(f"iot/{self.prodkey}/{self.deviceId}/#")
 
@@ -766,7 +778,7 @@ class ZendureZenSdk(ZendureDevice):
             _LOGGER.error("Entity %s has no translation_key, cannot write property %s", entity.name, self.name)
             return
 
-        if self.online and self.connection.value == 0:
+        if self.online and self.connection.value == ConnectionMode.CLOUD:
             await super().entityWrite(entity, value)
         else:
             _LOGGER.info("Writing property %s %s => %s", self.name, entity.propertyName, value)
@@ -779,7 +791,7 @@ class ZendureZenSdk(ZendureDevice):
 
     async def power_get(self) -> bool:
         """Get the current power."""
-        if self.connection.value != 0:
+        if self.connection.value != ConnectionMode.CLOUD:
             json = await self.httpGet("properties/report")
             await self.mqttProperties(json)
 
@@ -840,7 +852,7 @@ class ZendureZenSdk(ZendureDevice):
         )
 
     async def doCommand(self, command: Any) -> None:
-        if self.connection.value != 0:
+        if self.connection.value != ConnectionMode.CLOUD:
             await self.httpPost("properties/write", command)
         else:
             self.mqttPublish(self.topic_write, command, self.mqtt)

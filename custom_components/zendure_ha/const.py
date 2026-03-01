@@ -1,7 +1,7 @@
 """Constants for Zendure."""
 
 from datetime import timedelta
-from enum import Enum
+from enum import Enum, IntEnum
 
 DOMAIN = "zendure_ha"
 
@@ -51,10 +51,16 @@ class ManagerState(Enum):
     OFF = 3
 
 
+class ConnectionMode(IntEnum):
+    CLOUD = 0
+    LOCAL = 1
+    ZENSDK = 2
+    ZENSDK_WITH_LOCAL_MQTT = 3
+
+
 class SmartMode:
     SOCFULL = 1
     SOCEMPTY = 2
-    ZENSDK = 2
     CONNECTED = 10
 
     TIMEFAST = 2.2  # Fast update interval after significant change
