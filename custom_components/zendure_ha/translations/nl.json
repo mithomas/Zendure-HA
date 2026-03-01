@@ -129,6 +129,24 @@
       "aggr_solar": {
         "name": "Totale Zonne-energie"
       },
+      "aggr_solar1": {
+        "name": "PV1 Totale Zonne-energie"
+      },
+      "aggr_solar2": {
+        "name": "PV2 Totale Zonne-energie"
+      },
+      "aggr_solar3": {
+        "name": "PV3 Totale Zonne-energie"
+      },
+      "aggr_solar4": {
+        "name": "PV4 Totale Zonne-energie"
+      },
+      "aggr_solar5": {
+        "name": "PV5 Totale Zonne-energie"
+      },
+      "aggr_solar6": {
+        "name": "PV6 Totale Zonne-energie"
+      },
       "plug_state": {
         "name": "Off-grid stekkerdoos",
         "state": {

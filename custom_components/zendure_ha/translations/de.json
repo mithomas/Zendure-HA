@@ -135,6 +135,24 @@
       "aggr_solar": {
         "name": "Gesamte Solarenergie"
       },
+      "aggr_solar1": {
+        "name": "PV1 Solar-Energie erzeugt"
+      },
+      "aggr_solar2": {
+        "name": "PV2 Solar-Energie erzeugt"
+      },
+      "aggr_solar3": {
+        "name": "PV3 Solar-Energie erzeugt"
+      },
+      "aggr_solar4": {
+        "name": "PV4 Solar-Energie erzeugt"
+      },
+      "aggr_solar5": {
+        "name": "PV5 Solar-Energie erzeugt"
+      },
+      "aggr_solar6": {
+        "name": "PV6 Solar-Energie erzeugt"
+      },
       "aggr_grid_input_power": {
         "name": "Gesamte Netzenergie"
       },

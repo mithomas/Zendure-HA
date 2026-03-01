@@ -256,6 +256,11 @@ class ZendureDevice(EntityDevice):
                         self.aggrCharge.aggregate(dt_util.now(), 0)
                         self.aggrDischarge.aggregate(dt_util.now(), value)
                         self.batInOut.update_value(self.batteryOutput.asInt - self.batteryInput.asInt)
+                    case "solarPower1" | "solarPower2" | "solarPower3" | "solarPower4" | "solarPower5" | "solarPower6":
+                        pv_num = key[10:]
+                        aggr_entity = self.entities.get(f"aggrSolar{pv_num}")
+                        if isinstance(aggr_entity, ZendureRestoreSensor):
+                            aggr_entity.aggregate(dt_util.now(), value)
                     case "solarInputPower":
                         self.aggrSolar.aggregate(dt_util.now(), value)
                     case "gridInputPower":

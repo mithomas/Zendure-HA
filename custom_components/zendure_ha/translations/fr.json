@@ -133,6 +133,24 @@
       "aggr_solar": {
         "name": "Total solaire"
       },
+      "aggr_solar1": {
+        "name": "PV1 Total solaire"
+      },
+      "aggr_solar2": {
+        "name": "PV2 Total solaire"
+      },
+      "aggr_solar3": {
+        "name": "PV3 Total solaire"
+      },
+      "aggr_solar4": {
+        "name": "PV4 Total solaire"
+      },
+      "aggr_solar5": {
+        "name": "PV5 Total solaire"
+      },
+      "aggr_solar6": {
+        "name": "PV6 Total solaire"
+      },
       "plug_state": {
         "name": "Multiprise hors réseau",
         "state": {

@@ -325,7 +325,7 @@ class EntityDevice:
     def entityUpdate(self, key: Any, value: Any) -> bool:
         from .binary_sensor import ZendureBinarySensor
         from .select import ZendureSelect
-        from .sensor import ZendureCalcSensor, ZendureSensor
+        from .sensor import ZendureCalcSensor, ZendureRestoreSensor, ZendureSensor
         from .switch import ZendureSwitch
 
         # check if entity is already created
@@ -336,6 +336,18 @@ class EntityDevice:
                         entity = ZendureSensor(self, key, None, "W", "power", "measurement", None)
                         if len(info) >= 3:
                             entity.icon = info[2]
+                        if key.startswith("solarPower") and key[10:].isdigit():
+                            aggr_key = f"aggrSolar{key[10:]}"
+                            if self.entities.get(aggr_key) is None:
+                                ZendureRestoreSensor(
+                                    self,
+                                    aggr_key,
+                                    None,
+                                    "kWh",
+                                    "energy",
+                                    "total_increasing",
+                                    2,
+                                )
                     case "V":
                         factor = int(info[2]) if len(info) > CONST_FACTOR else 1
                         entity = ZendureSensor(self, key, None, "V", "voltage", "measurement", 2, factor)
