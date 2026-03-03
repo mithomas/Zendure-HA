@@ -45,6 +45,7 @@ fixture-parentheses = false
 "tests/**/*.py" = [
     "ANN001",
     "ANN201",
+    "D403",
     "E501",
     "S101",
     "SLF001",

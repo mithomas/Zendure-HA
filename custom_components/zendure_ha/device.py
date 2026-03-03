@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, ServerDisconnectedError
 from bleak import BleakClient
 from bleak.exc import BleakError
 
@@ -37,6 +37,7 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 _LOGGER = logging.getLogger(__name__)
 
 CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
+CONST_HEADER_CLOSE = {**CONST_HEADER, "Connection": "close"}
 CONST_TIMEOUT = ClientTimeout(total=4)
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 
@@ -749,6 +750,8 @@ class ZendureZenSdk(ZendureDevice):
     ) -> None:
         """Initialize Device."""
         self.session = async_get_clientsession(hass, verify_ssl=False)
+        self._http_failures = 0
+        self._http_block_until = datetime.min
         super().__init__(hass, deviceId, name, model, definition, parent)
         self.connection = ZendureRestoreSelect(
             self,
@@ -863,27 +866,71 @@ class ZendureZenSdk(ZendureDevice):
             self.mqttPublish(self.topic_write, command, self.mqtt)
 
     async def httpGet(self, url: str, key: str | None = None) -> dict[str, Any]:
+        if datetime.now() < self._http_block_until:
+            return {}
         try:
             url = f"http://{self.ipAddress}/{url}"
-            response = await self.session.get(url, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
+            headers = CONST_HEADER_CLOSE if self._http_failures > 0 else CONST_HEADER
+            response = await self.session.get(url, headers=headers, timeout=CONST_TIMEOUT)
+            response.raise_for_status()
             payload = json.loads(await response.text())
             self.lastseen = datetime.now()
+            self._http_failures = 0
+            self._http_block_until = datetime.min
             return payload if key is None else payload.get(key, {})
         except Exception as e:
-            _LOGGER.error("%s for %s during httpGet%s", type(e).__name__, self.name, f": {e}" if str(e) else "!")
-            self.lastseen = datetime.min
+            self._http_failures += 1
+            if self._http_failures >= 3:
+                delay = min(80, 5 * (2 ** min(4, self._http_failures - 3)))
+                self._http_block_until = datetime.now() + timedelta(seconds=delay)
+                self.lastseen = datetime.min
+            log = (
+                _LOGGER.info
+                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError))
+                else _LOGGER.error
+            )
+            log(
+                "%s for %s during httpGet%s [failures=%s, retry_after=%s]",
+                type(e).__name__,
+                self.name,
+                f": {e}" if str(e) else "!",
+                self._http_failures,
+                self._http_block_until if self._http_block_until != datetime.min else "immediate",
+            )
         return {}
 
     async def httpPost(self, url: str, command: Any) -> bool:
+        if datetime.now() < self._http_block_until:
+            return False
         try:
             self.httpid += 1
             command["id"] = self.httpid
             command["sn"] = self.snNumber
             url = f"http://{self.ipAddress}/{url}"
-            await self.session.post(url, json=command, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
+            headers = CONST_HEADER_CLOSE if self._http_failures > 0 else CONST_HEADER
+            response = await self.session.post(url, json=command, headers=headers, timeout=CONST_TIMEOUT)
+            response.raise_for_status()
+            self._http_failures = 0
+            self._http_block_until = datetime.min
         except Exception as e:
-            _LOGGER.error("%s for %s during httpPost%s", type(e).__name__, self.name, f": {e}" if str(e) else "!")
-            self.lastseen = datetime.min
+            self._http_failures += 1
+            if self._http_failures >= 3:
+                delay = min(80, 5 * (2 ** min(4, self._http_failures - 3)))
+                self._http_block_until = datetime.now() + timedelta(seconds=delay)
+                self.lastseen = datetime.min
+            log = (
+                _LOGGER.info
+                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError))
+                else _LOGGER.error
+            )
+            log(
+                "%s for %s during httpPost%s [failures=%s, retry_after=%s]",
+                type(e).__name__,
+                self.name,
+                f": {e}" if str(e) else "!",
+                self._http_failures,
+                self._http_block_until if self._http_block_until != datetime.min else "immediate",
+            )
             return False
         return True
 
