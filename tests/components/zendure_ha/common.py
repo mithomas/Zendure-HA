@@ -2,29 +2,33 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from homeassistant.components.number import NumberMode
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.zendure_ha import manager as manager_module
 from custom_components.zendure_ha.const import (
     CONF_APPTOKEN,
     CONF_MQTTLOCAL,
     CONF_MQTTLOG,
     CONF_P1METER,
     DOMAIN,
-    DeviceState,
+    AcMode,
+    ManagerMode,
 )
 from custom_components.zendure_ha.device import ZendureDevice
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800
 from custom_components.zendure_ha.fusegroup import FuseGroup
 from custom_components.zendure_ha.manager import ZendureManager
 from custom_components.zendure_ha.number import ZendureRestoreNumber
+from custom_components.zendure_ha.select import ZendureRestoreSelect
 from custom_components.zendure_ha.sensor import ZendureSensor
+
+PRIMARY_DEVICE_DISABLED = getattr(manager_module, "PRIMARY_DEVICE_DISABLED", "__disabled__")
 
 
 def config_entry_data() -> dict[str, Any]:
@@ -73,6 +77,13 @@ def make_device(
     reserve: int = 10,
     soc_set: int = 80,
     kwh: float = 2.0,
+    ac_mode: int = AcMode.INPUT,
+    input_limit: float | None = None,
+    output_limit: float | None = None,
+    home_input: int = 0,
+    home_output: int = 0,
+    battery_input: int = 0,
+    battery_output: int = 0,
 ) -> ZendureDevice:
     """Create a real device instance with a stable online baseline."""
     definition = make_device_definition(
@@ -98,11 +109,16 @@ def make_device(
     device.minSoc._attr_native_value = min_soc
     device.socReserve._attr_native_value = reserve
     device.socSet._attr_native_value = soc_set
+    device.acMode.update_value(ac_mode)
     device.electricLevel.update_value(level)
-    device.homeInput.update_value(0)
-    device.homeOutput.update_value(0)
-    device.batteryInput.update_value(0)
-    device.batteryOutput.update_value(0)
+    device.homeInput.update_value(home_input)
+    device.homeOutput.update_value(home_output)
+    device.batteryInput.update_value(battery_input)
+    device.batteryOutput.update_value(battery_output)
+    if input_limit is not None:
+        device.limitInput.update_value(input_limit)
+    if output_limit is not None:
+        device.limitOutput.update_value(output_limit)
     device.lastseen = datetime.now() + timedelta(minutes=5)
     device.kWh = kwh
     device.totalKwh.update_value(kwh)
@@ -111,10 +127,29 @@ def make_device(
     return device
 
 
-def make_manager(hass: HomeAssistant) -> ZendureManager:
+def make_manager(
+    hass: HomeAssistant,
+    *,
+    devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
+    operation: ManagerMode = ManagerMode.OFF,
+    manual_power: float = 0,
+    discharge_recovery_margin: float = 0,
+    primary_device_id: str | None = None,
+    charge_time: datetime | None = None,
+    charge_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
+    discharge_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
+    idle_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
+) -> ZendureManager:
     """Create a manager instance with the entities needed by the tests."""
     entry = make_config_entry()
     manager = ZendureManager(hass, entry)
+    manager.primarydevice = ZendureRestoreSelect(
+        manager,
+        "primary_device",
+        {PRIMARY_DEVICE_DISABLED: "none"},
+        manager.update_primary_device,
+        PRIMARY_DEVICE_DISABLED,
+    )
     manager.operationstate = ZendureSensor(manager, "operation_state")
     manager.manualpower = ZendureRestoreNumber(
         manager,
@@ -128,22 +163,39 @@ def make_manager(hass: HomeAssistant) -> ZendureManager:
         NumberMode.BOX,
         True,
     )
-    if hasattr(manager, "_refresh_discharge_recovery_margin"):
-        manager.discharge_recovery_margin = ZendureRestoreNumber(
-            manager,
-            "discharge_recovery_margin",
-            manager._refresh_discharge_recovery_margin,
-            None,
-            "%",
-            "soc",
-            100,
-            0,
-            NumberMode.BOX,
-            True,
-        )
+    refresh_recovery_margin = getattr(manager, "_refresh_discharge_recovery_margin", None)
+    manager.discharge_recovery_margin = ZendureRestoreNumber(
+        manager,
+        "discharge_recovery_margin",
+        refresh_recovery_margin,
+        None,
+        "%",
+        "soc",
+        100,
+        0,
+        NumberMode.BOX,
+        True,
+    )
     manager.availableKwh = ZendureSensor(manager, "available_kwh", None, "kWh", "energy", None, 1)
     manager.totalKwh = ZendureSensor(manager, "total_kwh", None, "kWh", "energy", None, 2)
     manager.power = ZendureSensor(manager, "power", None, "W", "power", "measurement", 0)
+    manager.operation = operation
+    manager.manualpower._attr_native_value = manual_power
+    manager.discharge_recovery_margin._attr_native_value = discharge_recovery_margin
+    if charge_time is not None:
+        manager.charge_time = charge_time
+    if devices is not None:
+        attach_devices(manager, *devices)
+    if primary_device_id is not None:
+        manager.primarydevice.update_value(primary_device_id)
+    if charge_devices is not None:
+        manager.charge = list(charge_devices)
+    if discharge_devices is not None:
+        manager.discharge = list(discharge_devices)
+    if idle_devices is not None:
+        manager.idle = list(idle_devices)
+    if devices is not None and discharge_recovery_margin and refresh_recovery_margin is not None:
+        refresh_recovery_margin(None, None)
     return manager
 
 
@@ -155,6 +207,7 @@ def attach_devices(manager: ZendureManager, *devices: ZendureDevice) -> None:
     )
     for device in devices:
         device.on_available_kwh_changed = manager.refresh_available_kwh
+    manager.refresh_primary_device_options()
     manager.refresh_available_kwh()
 
 

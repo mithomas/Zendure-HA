@@ -337,13 +337,6 @@
           "group3600": "Zekeringgroep max. 3600w"
         }
       },
-      "connection": {
-        "name": "Verbindingsmodus",
-        "state": {
-          "local": "Lokaal",
-          "cloud": "Cloud"
-        }
-      },
       "ble_adapter": {
         "name": "BLE-adapter",
         "state": {
@@ -358,7 +351,17 @@
           "smart": "Slimme Matching",
           "smart_discharging": "Slim ontladen",
           "smart_charging": "Slim opladen",
-          "store_solar": "Zonne-energie opslaan"
+          "store_solar": "Zonne-energie opslaan",
+          "manual_primary_aware": "Handmatig vermogen (Primair-bewust)",
+          "smart_primary_aware": "Slimme Matching (Primair-bewust)",
+          "smart_discharging_primary_aware": "Slim ontladen (Primair-bewust)",
+          "smart_charging_primary_aware": "Slim opladen (Primair-bewust)"
+        }
+      },
+      "primary_device": {
+        "name": "Primair apparaat",
+        "state": {
+          "none": "Uitgeschakeld"
         }
       },
       "pass_mode": {

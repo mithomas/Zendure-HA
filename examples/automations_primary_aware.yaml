@@ -1,0 +1,196 @@
+# Example automations for a two-system setup with primary-aware manager modes.
+#
+# Replace the placeholder entity ids and select options with the ids from your
+# Home Assistant instance before using these automations.
+
+automation:
+  - alias: "Zendure Manager - Set default primary-aware smart mode on startup"
+    id: zendure_manager_set_default_primary_aware_smart_mode_on_startup
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_primary_aware
+
+  - alias: "Zendure Manager - Switch primary to WZ when WZ PV dominates"
+    id: zendure_manager_switch_primary_to_wz_when_wz_pv_dominates
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.wz_solar_input_power')|float(0) > 120 and
+             states('sensor.wz_solar_input_power')|float(0) -
+             states('sensor.k_solar_input_power')|float(0) > 150 }}
+        for: "00:05:00"
+    conditions:
+      - alias: "WZ is still above its reserve SoC"
+        condition: template
+        value_template: >
+          {{ states('sensor.wz_electric_level')|float(0) >
+             states('number.wz_reserve_soc')|float(0) }}
+      - alias: "Both systems are not already at reserve"
+        condition: template
+        value_template: >
+          {{ not (
+             states('sensor.wz_electric_level')|float(0) <= states('number.wz_reserve_soc')|float(0) and
+             states('sensor.k_electric_level')|float(0) <= states('number.k_reserve_soc')|float(0)
+          ) }}
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_primary_device
+        data:
+          option: WZ
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_primary_aware
+
+  - alias: "Zendure Manager - Switch primary to K when K PV dominates"
+    id: zendure_manager_switch_primary_to_k_when_k_pv_dominates
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.k_solar_input_power')|float(0) > 120 and
+             states('sensor.k_solar_input_power')|float(0) -
+             states('sensor.wz_solar_input_power')|float(0) > 150 }}
+        for: "00:05:00"
+    conditions:
+      - alias: "K is still above its reserve SoC"
+        condition: template
+        value_template: >
+          {{ states('sensor.k_electric_level')|float(0) >
+             states('number.k_reserve_soc')|float(0) }}
+      - alias: "Both systems are not already at reserve"
+        condition: template
+        value_template: >
+          {{ not (
+             states('sensor.wz_electric_level')|float(0) <= states('number.wz_reserve_soc')|float(0) and
+             states('sensor.k_electric_level')|float(0) <= states('number.k_reserve_soc')|float(0)
+          ) }}
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_primary_device
+        data:
+          option: K
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_primary_aware
+
+  - alias: "Zendure Manager - Prefer WZ after sundown when WZ is above reserve"
+    id: zendure_manager_prefer_wz_after_sundown_when_wz_is_above_reserve
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.wz_solar_input_power')|float(0) < 40 and
+             states('sensor.k_solar_input_power')|float(0) < 40 }}
+        for: "00:10:00"
+    conditions:
+      - alias: "WZ is still above its reserve SoC"
+        condition: template
+        value_template: >
+          {{ states('sensor.wz_electric_level')|float(0) >
+             states('number.wz_reserve_soc')|float(0) }}
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_primary_device
+        data:
+          option: WZ
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_primary_aware
+
+  - alias: "Zendure Manager - Hand off from WZ to K when WZ reaches reserve"
+    id: zendure_manager_hand_off_from_wz_to_k_when_wz_reaches_reserve
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.wz_electric_level')|float(0) <=
+             states('number.wz_reserve_soc')|float(0) }}
+        for: "00:02:00"
+    conditions:
+      - alias: "WZ is currently selected as primary"
+        condition: state
+        entity_id: select.zendure_manager_primary_device
+        state: WZ
+      - alias: "K still has usable reserve margin"
+        condition: template
+        value_template: >
+          {{ states('sensor.k_electric_level')|float(0) >
+             states('number.k_reserve_soc')|float(0) }}
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_primary_device
+        data:
+          option: K
+
+  - alias: "Zendure Manager - Hand off from K to WZ when K reaches reserve"
+    id: zendure_manager_hand_off_from_k_to_wz_when_k_reaches_reserve
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.k_electric_level')|float(0) <=
+             states('number.k_reserve_soc')|float(0) }}
+        for: "00:02:00"
+    conditions:
+      - alias: "K is currently selected as primary"
+        condition: state
+        entity_id: select.zendure_manager_primary_device
+        state: K
+      - alias: "WZ still has usable reserve margin"
+        condition: template
+        value_template: >
+          {{ states('sensor.wz_electric_level')|float(0) >
+             states('number.wz_reserve_soc')|float(0) }}
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_primary_device
+        data:
+          option: WZ
+
+  - alias: "Zendure Manager - Protect reserves when both systems are at reserve"
+    id: zendure_manager_protect_reserves_when_both_systems_are_at_reserve
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.wz_electric_level')|float(0) <= states('number.wz_reserve_soc')|float(0) and
+             states('sensor.k_electric_level')|float(0) <= states('number.k_reserve_soc')|float(0) }}
+        for: "00:03:00"
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_charging_primary_aware
+
+  - alias: "Zendure Manager - Resume smart matching when one system is back above reserve"
+    id: zendure_manager_resume_smart_matching_when_one_system_is_back_above_reserve
+    triggers:
+      - trigger: template
+        value_template: >
+          {{ states('sensor.wz_electric_level')|float(0) > states('number.wz_reserve_soc')|float(0) or
+             states('sensor.k_electric_level')|float(0) > states('number.k_reserve_soc')|float(0) }}
+        for: "00:05:00"
+    conditions:
+      - alias: "Manager is currently in reserve-protection charging mode"
+        condition: state
+        entity_id: select.zendure_manager_operation
+        state: smart_charging_primary_aware
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_primary_aware

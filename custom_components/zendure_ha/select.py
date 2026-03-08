@@ -36,30 +36,38 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
         uniqueid: str,
         options: dict[Any, str],
         onchanged: Callable | None,
-        current: int | None = None,
+        current: Any | None = None,
     ) -> None:
         """Initialize a select entity."""
         super().__init__(device, uniqueid, "select")
         self.entity_description = SelectEntityDescription(key=uniqueid, name=uniqueid)
         self._options = options
         self._attr_options = list(options.values())
-        if current:
+        self._selected_key = current if current in options else None
+        if current and current in options:
             self._attr_current_option = options[current]
         else:
+            self._selected_key = next(iter(options), None)
             self._attr_current_option = self._attr_options[0]
         self.onchanged = onchanged
 
     def setDict(self, options: dict[Any, str]) -> None:
         """Set the options for the select entity."""
+        current_value = self.value
         self._options = options
         self._attr_options = list(options.values())
-        if self._attr_current_option not in self._attr_options:
+        if current_value in options:
+            self._selected_key = current_value
+            self._attr_current_option = options[current_value]
+        elif self._attr_current_option not in self._attr_options:
+            self._selected_key = next(iter(options), None)
             self._attr_current_option = self._attr_options[0]
         self.write_ha_state()
 
     def setList(self, options: list[str]) -> None:
         """Set the options for the select entity."""
         self._options = None
+        self._selected_key = None
         self._attr_options = options
         if self._attr_current_option not in self._attr_options:
             self._attr_current_option = self._attr_options[0]
@@ -72,7 +80,8 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
 
             if self._options is not None:
                 new_value = self._options[value]
-                if new_value != self._attr_current_option:
+                if value != self._selected_key or new_value != self._attr_current_option:
+                    self._selected_key = value
                     self._attr_current_option = new_value
                     self.write_ha_state()
 
@@ -83,6 +92,10 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
     async def async_select_option(self, option: str) -> None:
         """Update the current selected option."""
         self._attr_current_option = option
+        if self._options is not None and not (
+            self._selected_key in self._options and self._options[self._selected_key] == option
+        ):
+            self._selected_key = next((key for key, value in self._options.items() if value == option), None)
         value = self.value
         if self.onchanged:
             if asyncio.iscoroutinefunction(self.onchanged):
@@ -94,10 +107,19 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
     @property
     def value(self) -> Any:
         if self._options is not None:
+            if self._selected_key in self._options:
+                return self._selected_key
             for key, value in self._options.items():
                 if value == self._attr_current_option:
+                    self._selected_key = key
                     return key
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Store the stable select key for restore-safe option updates."""
+        value = self._selected_key if self._options is not None else None
+        return None if value is None else {"selected_key": value}
 
 
 class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -109,9 +131,9 @@ class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverrid
         self,
         device: EntityDevice,
         uniqueid: str,
-        options: dict[int, str],
+        options: dict[Any, str],
         onchanged: Callable | None,
-        current: int | None = None,
+        current: Any | None = None,
     ) -> None:
         """Initialize a select entity."""
         super().__init__(device, uniqueid, options, onchanged, current)
@@ -120,8 +142,15 @@ class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverrid
         """Handle entity which will be added."""
         await super().async_added_to_hass()
         if state := await self.async_get_last_state():
-            self._attr_current_option = state.state
+            selected_key = state.attributes.get("selected_key")
+            if self._options is not None and selected_key in self._options:
+                self._selected_key = selected_key
+                self._attr_current_option = self._options[selected_key]
+            else:
+                self._selected_key = None
+                self._attr_current_option = state.state
         else:
+            self._selected_key = next(iter(self._options), None) if self._options is not None else None
             self._attr_current_option = self._attr_options[0]
 
         # do the onchanged callback

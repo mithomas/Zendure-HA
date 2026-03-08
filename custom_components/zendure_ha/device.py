@@ -747,6 +747,21 @@ class ZendureDevice(EntityDevice):
         """Set the power off."""
 
     @property
+    def supports_bypass(self) -> bool:
+        """Return whether the device supports explicit bypass mode."""
+        return False
+
+    @property
+    def can_bypass(self) -> bool:
+        """Return whether the device can enter bypass right now."""
+        return self.supports_bypass and self.state == DeviceState.SOCFULL
+
+    async def power_bypass(self) -> int:
+        """Put the device into explicit bypass mode."""
+        await self.power_off()
+        return 0
+
+    @property
     def online(self) -> bool:
         """Check if device is online."""
         return self.connectionStatus.asInt >= SmartMode.CONNECTED

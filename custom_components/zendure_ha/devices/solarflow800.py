@@ -43,3 +43,13 @@ class SolarFlow800Pro(ZendureZenSDKWithLocalMQTT):
     def pwr_offgrid(self) -> int:
         """Get the offgrid power."""
         return self.offGrid.asInt
+
+    @property
+    def supports_bypass(self) -> bool:
+        """Return whether the device supports explicit bypass mode."""
+        return True
+
+    async def power_bypass(self) -> int:
+        """Put the SF800 Pro into explicit bypass mode."""
+        await self.doCommand({"properties": {"smartMode": 0, "acMode": 1, "outputLimit": 0, "inputLimit": 0}})
+        return 0

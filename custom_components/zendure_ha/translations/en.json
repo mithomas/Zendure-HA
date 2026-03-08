@@ -447,7 +447,17 @@
           "smart": "Smart Matching",
           "smart_discharging": "Smart discharge only",
           "smart_charging": "Smart charge only",
-          "store_solar": "Store Solar"
+          "store_solar": "Store Solar",
+          "manual_primary_aware": "Manual Power (Primary-aware)",
+          "smart_primary_aware": "Smart Matching (Primary-aware)",
+          "smart_discharging_primary_aware": "Smart discharge only (Primary-aware)",
+          "smart_charging_primary_aware": "Smart charge only (Primary-aware)"
+        }
+      },
+      "primary_device": {
+        "name": "Primary Device",
+        "state": {
+          "none": "Disabled"
         }
       },
       "pass_mode": {
