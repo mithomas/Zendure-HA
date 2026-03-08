@@ -21,7 +21,6 @@ from paho.mqtt import client as mqtt_client
 from paho.mqtt import enums as mqtt_enums
 
 from .const import (
-    ConnectionMode,
     CONF_APPTOKEN,
     CONF_HAKEY,
     CONF_MQTTLOG,
@@ -32,6 +31,7 @@ from .const import (
     CONF_WIFIPSW,
     CONF_WIFISSID,
     DOMAIN,
+    ConnectionMode,
 )
 from .device import ZendureDevice
 from .devices.ace1500 import ACE1500

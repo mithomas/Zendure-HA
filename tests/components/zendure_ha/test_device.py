@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import pytest
+
 from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
-from custom_components.zendure_ha.const import AcMode, ConnectionMode
+from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SmartMode
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 
@@ -22,6 +24,75 @@ def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
     device.byPass.update_value(1)
 
     assert device.byPass.is_on is True
+
+
+@pytest.mark.parametrize(
+    ("min_soc", "reserve", "expected"),
+    [
+        (5, 0, 5),
+        (5, 10, 10),
+        (20, 10, 20),
+    ],
+)
+def test_discharge_floor_soc_uses_max_of_min_soc_and_reserve(hass, min_soc, reserve, expected):
+    """Reserve-aware floor calculations should always use the higher threshold."""
+    device = make_device(hass, min_soc=min_soc, reserve=reserve)
+
+    assert device.discharge_floor_soc() == expected
+
+
+@pytest.mark.parametrize(
+    ("level", "min_soc", "reserve", "kwh", "expected_available"),
+    [
+        (30, 10, 5, 2.0, 0.4),
+        (30, 5, 10, 2.0, 0.4),
+        (8, 10, 5, 2.0, -0.04),
+    ],
+)
+def test_available_kwh_uses_reserve_aware_floor(hass, level, min_soc, reserve, kwh, expected_available):
+    """Available energy should use the higher of min SoC and reserve as its baseline."""
+    device = make_device(
+        hass,
+        level=level,
+        min_soc=min_soc,
+        reserve=reserve,
+        kwh=kwh,
+    )
+
+    device.refresh_discharge_state()
+
+    assert device.availableKwh.asNumber == pytest.approx(expected_available)
+    assert device.actualKwh == pytest.approx(expected_available)
+
+
+@pytest.mark.parametrize(
+    ("level", "min_soc", "reserve", "soc_limit", "expected_state"),
+    [
+        (4, 5, 10, 0, DeviceState.SOCEMPTY),
+        (5, 5, 10, 0, DeviceState.SOCEMPTY),
+        (6, 5, 10, 0, DeviceState.SOCRESERVE),
+        (10, 5, 10, 0, DeviceState.SOCRESERVE),
+        (11, 5, 10, 0, DeviceState.INACTIVE),
+        (8, 10, 5, 0, DeviceState.SOCEMPTY),
+        (8, 5, 10, SmartMode.SOCEMPTY, DeviceState.SOCEMPTY),
+    ],
+)
+def test_device_state_distinguishes_empty_from_reserve_floor(
+    hass,
+    level,
+    min_soc,
+    reserve,
+    soc_limit,
+    expected_state,
+):
+    """Device state should expose reserve-band SoC separately from empty SoC."""
+    device = make_device(hass, level=20, min_soc=min_soc, reserve=reserve, soc_set=100)
+    device.socLimit.update_value(soc_limit)
+    device.electricLevel.update_value(level)
+
+    device.refresh_discharge_state()
+
+    assert device.state is expected_state
 
 
 async def test_sf800_pro_power_charge_sets_ac_input_mode_and_charge_limits(hass):

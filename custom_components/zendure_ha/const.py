@@ -33,6 +33,7 @@ class DeviceState(Enum):
     INACTIVE = 2
     SOCFULL = 3
     ACTIVE = 4
+    SOCRESERVE = 6
 
 
 class ManagerMode(Enum):

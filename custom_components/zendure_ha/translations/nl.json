@@ -95,6 +95,9 @@
       "min_soc": {
         "name": "SOC Minimaal"
       },
+      "soc_reserve": {
+        "name": "Reserve-SOC"
+      },
       "soc_set": {
         "name": "SOC Maximaal"
       }

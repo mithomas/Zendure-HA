@@ -83,6 +83,7 @@ async def async_remove_config_entry_device(
     for d in manager.devices:
         if d.name == device_entry.name:
             manager.devices.remove(d)
+            manager.refresh_available_kwh()
             return True
 
         if (
@@ -90,6 +91,9 @@ async def async_remove_config_entry_device(
             and (bat := next((b for b in d.batteries.values() if b.name == device_entry.name), None)) is not None
         ):
             d.batteries.pop(bat.deviceId)
+            d.kWh = sum(0 if b is None else b.kWh for b in d.batteries.values())
+            d.totalKwh.update_value(d.kWh)
+            d.refresh_discharge_state()
             return True
 
     return True

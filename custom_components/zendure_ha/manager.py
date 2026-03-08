@@ -46,6 +46,11 @@ SCAN_INTERVAL = timedelta(seconds=60)
 
 _LOGGER = logging.getLogger(__name__)
 
+EMPTY_SOC_STATES = {
+    DeviceState.SOCEMPTY,
+    DeviceState.SOCRESERVE,
+}
+
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
 
 
@@ -200,6 +205,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 _LOGGER.error(traceback.format_exc())
 
         self.devices = list(Api.devices.values())
+        for device in self.devices:
+            device.on_available_kwh_changed = self.refresh_available_kwh
+        self.refresh_available_kwh()
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
         # initialize the api & p1 meter
@@ -680,6 +688,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     break
             self.pwr_low: int = 0
 
+    def refresh_available_kwh(self) -> None:
+        """Refresh the manager aggregate for currently online device energy."""
+        self.availableKwh.update_value(
+            sum(max(0, device.actualKwh) for device in self.devices if device.state != DeviceState.OFFLINE)
+        )
+
+    def _collect_discharge_candidates(
+        self, active_devices: list[ZendureDevice], idle_devices: list[ZendureDevice]
+    ) -> list[ZendureDevice]:
+        """Return discharge candidates, including idle devices with PV pass-through power."""
+        produced_candidates = [device for device in idle_devices if -device.pwr_produced > 0]
+        return produced_candidates + active_devices
+
     async def power_discharge(self, setpoint: int) -> None:
         """Discharge devices."""
         _LOGGER.info("Discharge => setpoint %sW", setpoint)
@@ -744,7 +765,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if dev_start > 0 and len(self.idle) > 0:
             self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
             for d in self.idle:
-                if d.state != DeviceState.SOCEMPTY:
+                if d.state not in EMPTY_SOC_STATES:
                     await d.power_discharge(SmartMode.POWER_START)
                     if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                         break

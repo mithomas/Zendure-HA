@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -31,7 +32,7 @@ from .binary_sensor import ZendureBinarySensor
 from .button import ZendureButton
 from .const import ConnectionMode, DeviceState, SmartMode
 from .entity import EntityDevice, EntityZendure
-from .number import ZendureNumber
+from .number import ZendureNumber, ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureRestoreSensor, ZendureSensor
 from .switch import ZendureSwitch
@@ -142,9 +143,15 @@ class ZendureDevice(EntityDevice):
         self.pwr_max: int = 0
         self.pwr_produced: int = 0
         self.actualKwh: float = 0.0
+        self.on_available_kwh_changed: Callable[[], None] | None = None
         self.state: DeviceState = DeviceState.OFFLINE
 
         self.create_entities()
+        self.initialize_derived_state()
+
+    def initialize_derived_state(self) -> None:
+        """Initialize derived entity state after entity creation completes."""
+        self.refresh_discharge_state()
 
     def create_entities(self) -> None:
         """Create the device entities."""
@@ -157,8 +164,11 @@ class ZendureDevice(EntityDevice):
         self.chargeMaxLimit = ZendureNumber(
             self, "chargeMaxLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER
         )
-        self.minSoc = ZendureNumber(self, "minSoc", self.entityWrite, None, "%", "soc", 100, 0, NumberMode.SLIDER, 10)
-        self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 100, 0, NumberMode.SLIDER, 10)
+        self.minSoc = ZendureNumber(self, "minSoc", self.entityWrite, None, "%", "soc", 100, 5, NumberMode.SLIDER, 10)
+        self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 100, 70, NumberMode.SLIDER, 10)
+        self.socReserve = ZendureRestoreNumber(
+            self, "socReserve", self.refresh_discharge_state, None, "%", "soc", 100, 5, NumberMode.SLIDER, True
+        )
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.byPass = ZendureBinarySensor(self, "pass")
@@ -286,19 +296,80 @@ class ZendureDevice(EntityDevice):
                         self.setStatus()
                         if key == "socStatus" and self.socStatus.asInt == 0:
                             self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
-                    case "electricLevel" | "minSoc" | "socLimit":
+                    case "electricLevel" | "minSoc" | "socLimit" | "socReserve":
                         if self.electricLevel.asInt == 100:
                             self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
-                        self.availableKwh.update_value(
-                            (self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh
-                        )
+                        self.refresh_discharge_state()
         except Exception as e:
             _LOGGER.error("EntityUpdate error %s %s %s!", self.name, key, e)
             _LOGGER.error(traceback.format_exc())
 
         return changed
 
-    def calcRemainingTime(self) -> float:
+    def update_available_kwh(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
+        """Refresh the available energy sensor from the current discharge baseline."""
+        if not hasattr(self, "availableKwh") or not hasattr(self, "electricLevel") or not hasattr(self, "minSoc"):
+            return
+
+        baseline = self.available_discharge_baseline_soc(_entity, _value)
+        self.availableKwh.update_value((self.electricLevel.asNumber - baseline) / 100 * self.kWh)
+
+    def update_device_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
+        """Refresh the cached runtime state from the current device values."""
+        min_soc = self.minSoc.asNumber
+        reserve = getattr(getattr(self, "socReserve", None), "asNumber", 0)
+        # During restore, this callback can fire before self.socReserve assignment completes.
+        if (
+            _entity is not None
+            and getattr(_entity, "translation_key", None) == "soc_reserve"
+            and isinstance(_value, (int, float))
+        ):
+            reserve = _value
+        level = self.electricLevel.asNumber
+
+        if not self.online or self.socSet.asNumber == 0 or self.kWh == 0:
+            self.state = DeviceState.OFFLINE
+        elif self.socLimit.asInt == SmartMode.SOCFULL or self.electricLevel.asInt >= self.socSet.asNumber:
+            self.state = DeviceState.SOCFULL
+        elif self.socLimit.asInt == SmartMode.SOCEMPTY or level <= min_soc:
+            self.state = DeviceState.SOCEMPTY
+        elif min_soc < level <= reserve:
+            self.state = DeviceState.SOCRESERVE
+        else:
+            self.state = DeviceState.INACTIVE
+
+    def refresh_discharge_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
+        """Refresh all device-local state derived from the current discharge baseline."""
+        previous_actual_kwh = self.actualKwh
+        self.update_available_kwh(_entity, _value)
+        if hasattr(self, "remainingTime"):
+            self.remainingTime.update_value(self.calcRemainingTime(_entity, _value))
+        self.update_device_state(_entity, _value)
+        self.actualKwh = self.availableKwh.asNumber
+        if previous_actual_kwh != self.actualKwh and self.on_available_kwh_changed is not None:
+            self.on_available_kwh_changed()
+
+    def discharge_floor_soc(self, _entity: EntityZendure | None = None, _value: Any = None) -> float:
+        """Return the effective SoC floor for planned discharge."""
+        reserve = getattr(getattr(self, "socReserve", None), "asNumber", 0)
+        # During restore, this callback can fire before self.socReserve assignment completes.
+        if (
+            _entity is not None
+            and getattr(_entity, "translation_key", None) == "soc_reserve"
+            and isinstance(_value, (int, float))
+        ):
+            reserve = _value
+        return max(self.minSoc.asNumber, reserve)
+
+    def available_discharge_baseline_soc(self, _entity: EntityZendure | None = None, _value: Any = None) -> float:
+        """Return the SoC baseline that counts as available for planned discharge."""
+        return self.discharge_floor_soc(_entity, _value)
+
+    def is_discharge_blocked(self, _entity: EntityZendure | None = None, _value: Any = None) -> bool:
+        """Return whether planned battery discharge is currently blocked."""
+        return self.electricLevel.asNumber <= self.discharge_floor_soc(_entity, _value)
+
+    def calcRemainingTime(self, _entity: EntityZendure | None = None, _value: Any = None) -> float:
         """Calculate the remaining time."""
         level = self.electricLevel.asInt
         power = self.batteryOutput.asInt - self.batteryInput.asInt
@@ -310,7 +381,7 @@ class ZendureDevice(EntityDevice):
             soc = self.socSet.asNumber
             return 0 if level >= soc else min(999, self.kWh * 10 / -power * (soc - level))
 
-        soc = self.minSoc.asNumber
+        soc = self.available_discharge_baseline_soc(_entity, _value)
         return 0 if level <= soc else min(999, self.kWh * 10 / power * (level - soc))
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
@@ -382,7 +453,7 @@ class ZendureDevice(EntityDevice):
             # (covers both new batteries and potential pack changes)
             self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
             self.totalKwh.update_value(self.kWh)
-            self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
+            self.refresh_discharge_state()
 
     def mqttMessage(self, topic: str, payload: Any) -> bool:
         try:
@@ -645,16 +716,7 @@ class ZendureDevice(EntityDevice):
             self.setStatus()
 
         self.actualKwh = self.availableKwh.asNumber
-
-        if not self.online or self.socSet.asNumber == 0 or self.kWh == 0:
-            self.state = DeviceState.OFFLINE
-        elif self.socLimit.asInt == SmartMode.SOCFULL or self.electricLevel.asInt >= self.socSet.asNumber:
-            self.state = DeviceState.SOCFULL
-        elif self.socLimit.asInt == SmartMode.SOCEMPTY or self.electricLevel.asInt <= self.minSoc.asNumber:
-            self.state = DeviceState.SOCEMPTY
-        else:
-            self.state = DeviceState.INACTIVE
-
+        self.update_device_state()
         return self.state != DeviceState.OFFLINE
 
     async def charge(self, _power: int) -> int:
@@ -1089,7 +1151,7 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
             if (battery := self.batteries.get(battery_id, None)) is None:
                 self.batteries[battery_id] = ZendureBattery(self.hass, battery_id, self)
                 self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
-                self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
+                self.refresh_discharge_state()
                 battery = self.batteries[battery_id]
 
             if battery is not None:

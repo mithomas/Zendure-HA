@@ -109,6 +109,9 @@
       "min_soc": {
         "name": "SoC Minimum"
       },
+      "soc_reserve": {
+        "name": "Reserve SoC"
+      },
       "soc_set": {
         "name": "Target SoC"
       }
