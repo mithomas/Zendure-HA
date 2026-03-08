@@ -61,6 +61,7 @@ class _PowerRouteDevice:
     battery_home_output: int
     charge_floor: int
     charge_surplus: int
+    bypass_passthrough: int
     available_discharge: int
     available_discharge_with_produced: int
 
@@ -116,6 +117,18 @@ class _PowerRoutingSnapshot:
         if route.device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL} or route.device.charge_limit >= 0:
             return 0
         return min(route.produced_home, -route.device.charge_limit)
+
+    @property
+    def selected_primary_bypass_passthrough(self) -> int:
+        """Return selected-primary production already passed through explicit bypass."""
+        if not self.primary_aware or self.selected_primary is None:
+            return 0
+        if self.selected_primary not in self.discharge_devices:
+            return 0
+        route = self.route(self.selected_primary)
+        if route.device.state == DeviceState.SOCFULL:
+            return 0
+        return route.bypass_passthrough
 
     @property
     def active_primary_produced_floor(self) -> int:
@@ -622,6 +635,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
             home_output = max(0, device.homeOutput.asInt)
             produced_home = min(home_output, produced_limit)
+            bypass_passthrough = 0
+            if (
+                getattr(device, "byPass", None) is not None
+                and device.byPass.is_on
+                and home_output > 0
+                and device.pwr_produced < 0
+            ):
+                bypass_passthrough = min(home_output, -device.pwr_produced)
 
             route_devices[device] = _PowerRouteDevice(
                 device=device,
@@ -634,6 +655,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 battery_home_output=max(0, home_output - produced_home),
                 charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
                 charge_surplus=self._current_charge_surplus_limit(device),
+                bypass_passthrough=bypass_passthrough,
                 available_discharge=(
                     self._available_discharge_power(device, primary_aware=primary_aware) if primary_aware else 0
                 ),
@@ -724,6 +746,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     async def _power_discharge_primary_aware(self, device: ZendureDevice, power: int) -> int:
         """Use explicit bypass for eligible devices when a primary-aware path requests zero output."""
+        if power == 0 and getattr(device, "byPass", None) is not None and device.byPass.is_on:
+            return 0
         if power == 0 and device.can_bypass:
             return await device.power_bypass()
         return await device.power_discharge(power)
@@ -1043,16 +1067,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         }
         selected_primary = self.resolve_primary_device()
         routing = self._power_routing_snapshot(selected_primary, primary_aware=primary_aware_mode)
+        selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
+        self.discharge_bypass += selected_primary_bypass_passthrough
         active_primary_produced_floor = routing.active_primary_produced_floor
         active_non_primary_produced_floor = routing.active_non_primary_produced_floor
         active_serving_pv_floor = routing.active_serving_pv_floor
         if p1 > 0 and self.charge and routing.preserves_produced_floor:
-            self.discharge_bypass += active_serving_pv_floor
+            self.discharge_bypass += max(0, active_serving_pv_floor - selected_primary_bypass_passthrough)
 
-        # discharge_bypass accumulates the solar-only power produced by SOCFULL devices
-        # and produced pass-through during positive charge lag. Subtract it from
-        # setpoint to avoid over-discharging from grid, but clamp so setpoint never
-        # goes below 0 when p1 >= 0 and the cycle has not already entered charge mode.
+        # discharge_bypass accumulates already-served produced power from SOCFULL devices,
+        # explicit bypass, and produced pass-through during positive charge lag.
+        # Subtract it from setpoint to avoid over-discharging from grid. Clamp away a
+        # negative setpoint only when the cycle has not already entered charge mode.
         gross_discharge_setpoint = setpoint
         if self.discharge_bypass > 0:
             net_setpoint = setpoint - self.discharge_bypass

@@ -115,6 +115,26 @@ async def test_sf800_pro_power_charge_sets_ac_input_mode_and_charge_limits(hass)
     )
 
 
+async def test_sf800_pro_power_bypass_sets_ac_input_mode(hass):
+    """Bypass on an SF800 Pro should switch it into AC input mode without requesting active output power."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-bypass",
+        device_name="sf800 pro bypass",
+        product_model="SolarFlow 800 Pro",
+        ac_mode=AcMode.OUTPUT,
+        input_limit=0,
+        output_limit=0,
+    )
+    with patch.object(device, "doCommand", AsyncMock()) as mock_do_command:
+        await device.power_bypass()
+
+    mock_do_command.assert_awaited_once_with(
+        {"properties": {"smartMode": 0, "acMode": 1, "outputLimit": 0, "inputLimit": 0}}
+    )
+
+
 class TestZenSdkDataRefresh:
     """Verify ZenSDK devices poll on every coordinator cycle."""
 
