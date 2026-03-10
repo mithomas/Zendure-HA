@@ -38,7 +38,7 @@ class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride
         self.entity_description = BinarySensorEntityDescription(key=uniqueid, name=uniqueid, device_class=deviceclass)
         self._attr_is_on = False
         self._value_template: Template | None = template
-        self.add([self])
+        self.add_to_platform(self.add)
 
     def update_value(self, value: Any) -> bool:
         try:
@@ -52,8 +52,7 @@ class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride
                 return False
 
             self._attr_is_on = is_on
-            if self.hass and self.hass.loop.is_running():
-                self.schedule_update_ha_state()
+            self.write_ha_state()
         except Exception as err:
             _LOGGER.error("Error %s setting state: %s => %s", err, self._attr_unique_id, value)
 

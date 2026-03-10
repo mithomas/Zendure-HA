@@ -61,7 +61,7 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
         if state is not None:
             self._attr_native_value = state
         self.factor = factor
-        self.add([self])
+        self.add_to_platform(self.add)
 
     def update_value(self, value: Any) -> bool:
         try:
@@ -78,8 +78,7 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
 
             if self.hass and new_value != self._attr_native_value:
                 self._attr_native_value = new_value
-                if self.hass and self.hass.loop.is_running():
-                    self.schedule_update_ha_state()
+                self.write_ha_state()
                 return True
 
         except Exception as err:
@@ -164,8 +163,7 @@ class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverrid
 
         self.last_value = value
         self.lastValueUpdate = time
-        if self.hass and self.hass.loop.is_running():
-            self.schedule_update_ha_state()
+        self.write_ha_state()
 
 
 class ZendureCalcSensor(ZendureSensor):
@@ -195,8 +193,7 @@ class ZendureCalcSensor(ZendureSensor):
 
             if self.hass and new_value != self._attr_native_value and self.calculate is not None:
                 self._attr_native_value = self.calculate(new_value)
-                if self.hass and self.hass.loop.is_running():
-                    self.schedule_update_ha_state()
+                self.write_ha_state()
                 return True
 
         except Exception as err:

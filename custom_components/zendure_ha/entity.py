@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import unicodedata
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +74,30 @@ class EntityZendure(Entity):
     def update_value(self, _value: Any) -> bool:
         """Update the entity value."""
         return False
+
+    def write_ha_state(self) -> None:
+        """Write state to HA safely from any thread."""
+        if not self.hass:
+            return
+        try:
+            asyncio.get_running_loop()
+            self.async_write_ha_state()
+        except RuntimeError:
+            self.hass.loop.call_soon_threadsafe(self.async_write_ha_state)
+
+    def add_to_platform(self, add_callback: Any) -> None:
+        """Register the entity with Home Assistant, supporting async callbacks."""
+        result = add_callback([self])
+        if isawaitable(result):
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is self.device.hass.loop:
+                self.device.hass.async_create_task(result)
+            else:
+                asyncio.run_coroutine_threadsafe(result, self.device.hass.loop)
 
     @property
     def hasPlatform(self) -> bool:

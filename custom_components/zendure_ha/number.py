@@ -59,7 +59,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
         self._attr_mode = mode
         self.factor = factor
         self.doupdate = doupdate
-        self.add([self])
+        self.add_to_platform(self.add)
 
     def update_value(self, value: Any) -> bool:
         try:
@@ -76,8 +76,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
                 return False
 
             self._attr_native_value = new_value
-            if self.hass and self.hass.loop.is_running():
-                self.schedule_update_ha_state()
+            self.write_ha_state()
         except Exception as err:
             _LOGGER.error("Error %s setting state: %s => %s", err, self._attr_unique_id, value)
 
@@ -87,8 +86,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
         """Set the value."""
         if self.doupdate:
             self._attr_native_value = value
-            if self.hass and self.hass.loop.is_running():
-                self.schedule_update_ha_state()
+            self.write_ha_state()
 
         if self._onwrite is not None:
             if asyncio.iscoroutinefunction(self._onwrite):
@@ -99,8 +97,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
     def update_range(self, minimum: int, maximum: int) -> None:
         self._attr_native_min_value = minimum
         self._attr_native_max_value = maximum
-        if self.hass and self.hass.loop.is_running():
-            self.schedule_update_ha_state()
+        self.write_ha_state()
 
     @property
     def asNumber(self) -> int | float:

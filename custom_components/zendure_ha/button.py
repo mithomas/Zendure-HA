@@ -30,7 +30,7 @@ class ZendureButton(  # pyright: ignore[reportIncompatibleVariableOverride]
         super().__init__(device, uniqueid, "button")
         self.entity_description = ButtonEntityDescription(key=uniqueid, name=uniqueid)
         self._onpress = onpress
-        self.add([self])
+        self.add_to_platform(self.add)
 
     async def async_press(self) -> None:
         """Press the button."""

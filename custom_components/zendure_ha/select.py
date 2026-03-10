@@ -48,7 +48,7 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
         else:
             self._attr_current_option = self._attr_options[0]
         self.onchanged = onchanged
-        self.add([self])
+        self.add_to_platform(self.add)
 
     def setDict(self, options: dict[Any, str]) -> None:
         """Set the options for the select entity."""
@@ -56,8 +56,7 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
         self._attr_options = list(options.values())
         if self._attr_current_option not in self._attr_options:
             self._attr_current_option = self._attr_options[0]
-        if self.hass and self.hass.loop.is_running():
-            self.async_write_ha_state()
+        self.write_ha_state()
 
     def setList(self, options: list[str]) -> None:
         """Set the options for the select entity."""
@@ -65,8 +64,7 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
         self._attr_options = options
         if self._attr_current_option not in self._attr_options:
             self._attr_current_option = self._attr_options[0]
-        if self.hass and self.hass.loop.is_running():
-            self.async_write_ha_state()
+        self.write_ha_state()
 
     def update_value(self, value: Any) -> bool:
         try:
@@ -77,8 +75,7 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
                 new_value = self._options[value]
                 if new_value != self._attr_current_option:
                     self._attr_current_option = new_value
-                    if self.hass and self.hass.loop.is_running():
-                        self.schedule_update_ha_state()
+                    self.write_ha_state()
 
         except Exception as err:
             _LOGGER.error("Error %s setting state: %s => %s", err, self._attr_unique_id, value)
