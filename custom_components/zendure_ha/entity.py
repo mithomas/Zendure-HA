@@ -345,12 +345,12 @@ class EntityDevice:
             else:
                 entity = ZendureSensor(self, key)
 
-            if entity is not None and entity.platform is not None:
+            if entity is not None:
                 entity.update_value(value)
             return True
 
         # update entity state
-        if entity is not None and entity.platform and entity.state != value:
+        if entity is not None:
             return entity.update_value(value)
 
         return False

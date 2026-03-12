@@ -57,6 +57,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
         self._attr_native_max_value = maximum
         self._attr_native_min_value = minimum
         self._attr_mode = mode
+        self._attr_native_value = None
         self.factor = factor
         self.doupdate = doupdate
         self.add_to_platform(self.add)
@@ -90,7 +91,8 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
         try:
             new_value = int(parsed_value) / self.factor
 
-            if self._attr_native_value == new_value:
+            current_state = self._as_float(self.state) if self.hass else None
+            if self._attr_native_value == new_value and current_state == new_value:
                 return False
 
             self._attr_native_value = new_value
