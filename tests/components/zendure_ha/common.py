@@ -163,11 +163,10 @@ def make_manager(
         NumberMode.BOX,
         True,
     )
-    refresh_recovery_margin = getattr(manager, "_refresh_discharge_recovery_margin", None)
     manager.discharge_recovery_margin = ZendureRestoreNumber(
         manager,
         "discharge_recovery_margin",
-        refresh_recovery_margin,
+        manager._refresh_discharge_recovery_margin,
         None,
         "%",
         "soc",
@@ -194,8 +193,8 @@ def make_manager(
         manager.discharge = list(discharge_devices)
     if idle_devices is not None:
         manager.idle = list(idle_devices)
-    if devices is not None and discharge_recovery_margin and refresh_recovery_margin is not None:
-        refresh_recovery_margin(None, None)
+    if devices is not None and discharge_recovery_margin:
+        manager._refresh_discharge_recovery_margin(None, None)
     return manager
 
 

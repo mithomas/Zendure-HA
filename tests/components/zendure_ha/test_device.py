@@ -95,6 +95,139 @@ def test_device_state_distinguishes_empty_from_reserve_floor(
     assert device.state is expected_state
 
 
+@pytest.mark.parametrize(
+    ("floor", "margin", "recovery_active", "expected"),
+    [
+        (10, 5, False, 10),
+        (10, 5, True, 15),
+        (95, 10, True, 100),
+    ],
+)
+def test_available_discharge_baseline_soc_uses_margin_only_while_recovering(
+    hass,
+    floor,
+    margin,
+    recovery_active,
+    expected,
+):
+    """The recovery margin only affects the discharge baseline while active."""
+    device = make_device(hass, min_soc=floor, reserve=floor)
+    device.discharge_recovery_margin_soc = margin
+    device.discharge_recovery_active._attr_is_on = recovery_active
+
+    assert device.available_discharge_baseline_soc() == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "level",
+        "min_soc",
+        "reserve",
+        "margin",
+        "recovery_active",
+        "kwh",
+        "expected_available",
+    ),
+    [
+        (30, 5, 10, 5, False, 2.0, 0.4),
+        (30, 5, 10, 5, True, 2.0, 0.3),
+        (15, 5, 10, 5, True, 2.0, 0.0),
+        (12, 5, 10, 5, True, 2.0, -0.06),
+        (15, 10, 10, 0, True, 2.0, 0.1),
+        (97, 95, 95, 10, True, 2.0, -0.06),
+        (100, 95, 95, 10, True, 2.0, 0.0),
+    ],
+)
+def test_available_kwh_uses_recovery_baseline_when_active(
+    hass,
+    level,
+    min_soc,
+    reserve,
+    margin,
+    recovery_active,
+    kwh,
+    expected_available,
+):
+    """Available energy should use the recovery baseline once recovery is active."""
+    device = make_device(
+        hass,
+        level=level,
+        min_soc=min_soc,
+        reserve=reserve,
+        kwh=kwh,
+    )
+    device.discharge_recovery_margin_soc = margin
+    device.discharge_recovery_active._attr_is_on = recovery_active
+
+    device.refresh_discharge_state()
+
+    assert device.availableKwh.asNumber == pytest.approx(expected_available)
+    assert device.actualKwh == pytest.approx(expected_available)
+
+
+@pytest.mark.parametrize(
+    (
+        "level",
+        "min_soc",
+        "reserve",
+        "activate_margin_window",
+        "starting_recovery",
+        "expected_blocked",
+        "expected_recovery",
+        "expected_state",
+        "expected_available",
+    ),
+    [
+        (10, 10, 10, False, False, True, True, DeviceState.SOCEMPTY, -0.1),
+        (10, 5, 10, False, False, True, True, DeviceState.SOCRESERVE, -0.1),
+        (12, 10, 10, True, False, True, True, DeviceState.RESERVE_RECOVERY, -0.06),
+        (14, 10, 10, False, True, True, True, DeviceState.RESERVE_RECOVERY, -0.02),
+        (15, 10, 10, False, True, False, False, DeviceState.INACTIVE, 0.1),
+    ],
+)
+def test_recovery_window_keeps_blocking_state_and_available_energy_consistent(
+    hass,
+    level,
+    min_soc,
+    reserve,
+    activate_margin_window,
+    starting_recovery,
+    expected_blocked,
+    expected_recovery,
+    expected_state,
+    expected_available,
+):
+    """Recovery transitions should keep the derived sensors aligned with the state."""
+    device = make_device(hass, level=20, min_soc=min_soc, reserve=reserve, kwh=2.0)
+    device.discharge_recovery_margin_soc = 5
+    device.discharge_recovery_active._attr_is_on = starting_recovery
+    device.electricLevel.update_value(level)
+
+    blocked = device.is_discharge_blocked(activate_margin_window=activate_margin_window)
+
+    assert blocked is expected_blocked
+    assert device.discharge_recovery_active._attr_is_on is expected_recovery
+    assert device.state is expected_state
+    assert device.availableKwh.asNumber == pytest.approx(expected_available)
+    assert device.actualKwh == pytest.approx(expected_available)
+
+
+@pytest.mark.parametrize(
+    ("recovery_active", "expected_hours"),
+    [
+        (False, 2.0),
+        (True, 1.0),
+    ],
+)
+def test_remaining_time_uses_recovery_aware_discharge_baseline(hass, recovery_active, expected_hours):
+    """Discharge remaining time should shrink while the recovery margin is active."""
+    device = make_device(hass, level=20, min_soc=10, reserve=10, kwh=2.0, battery_input=0, battery_output=100)
+    device.discharge_recovery_margin_soc = 5
+    device.discharge_recovery_active._attr_is_on = recovery_active
+
+    assert device.calcRemainingTime() == pytest.approx(expected_hours)
+
+
 async def test_sf800_pro_power_charge_sets_ac_input_mode_and_charge_limits(hass):
     """Charging an SF800 Pro should switch it into AC input mode with the requested limit."""
     device = make_device(

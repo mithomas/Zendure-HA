@@ -66,6 +66,9 @@
       "heat_state": {
         "name": "Batterieheizung"
       },
+      "discharge_recovery_active": {
+        "name": "Entlade-Wiederherstellung aktiv"
+      },
       "rest_state": {
         "name": "Energiesparmodus"
       },
@@ -94,6 +97,9 @@
       },
       "manual_power": {
         "name": "Manuelle Leistung"
+      },
+      "discharge_recovery_margin": {
+        "name": "Entlade-Wiedereinschaltschwelle"
       },
       "min_soc": {
         "name": "SoC-Minimum"

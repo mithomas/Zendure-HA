@@ -94,6 +94,9 @@
       },
       "hems_state": {
         "name": "HEMS Active"
+      },
+      "discharge_recovery_active": {
+        "name": "Discharge Recovery Active"
       }
     },
     "number": {
@@ -105,6 +108,9 @@
       },
       "manual_power": {
         "name": "Manual Power"
+      },
+      "discharge_recovery_margin": {
+        "name": "Discharge Recovery Margin"
       },
       "min_soc": {
         "name": "SoC Minimum"

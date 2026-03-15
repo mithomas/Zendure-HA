@@ -78,6 +78,9 @@
       "heat_state": {
         "name": "batterijverwarming"
       },
+      "discharge_recovery_active": {
+        "name": "Ontlaadsherstel actief"
+      },
       "rest_state": {
         "name": "Energiebesparende modus"
       }
@@ -91,6 +94,9 @@
       },
       "manual_power": {
         "name": "Handmatig vermogen"
+      },
+      "discharge_recovery_margin": {
+        "name": "Ontlaadherstelmarge"
       },
       "min_soc": {
         "name": "SOC Minimaal"

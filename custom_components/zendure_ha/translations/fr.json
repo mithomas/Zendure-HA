@@ -82,6 +82,9 @@
       "heat_state": {
         "name": "chauffage de batterie"
       },
+      "discharge_recovery_active": {
+        "name": "Reprise de decharge active"
+      },
       "rest_state": {
         "name": "mode d'économie d'énergie"
       }
@@ -95,6 +98,9 @@
       },
       "manual_power": {
         "name": "Puissance manuelle"
+      },
+      "discharge_recovery_margin": {
+        "name": "Marge de reprise de decharge"
       },
       "min_soc": {
         "name": "SOC minimum"

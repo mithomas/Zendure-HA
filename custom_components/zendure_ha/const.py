@@ -33,6 +33,7 @@ class DeviceState(Enum):
     INACTIVE = 2
     SOCFULL = 3
     ACTIVE = 4
+    RESERVE_RECOVERY = 5
     SOCRESERVE = 6
 
 

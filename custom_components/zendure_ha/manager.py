@@ -44,6 +44,11 @@ EMPTY_SOC_STATES = {
     DeviceState.SOCRESERVE,
 }
 
+LOW_SOC_STATES = {
+    *EMPTY_SOC_STATES,
+    DeviceState.RESERVE_RECOVERY,
+}
+
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
 
 
@@ -74,8 +79,15 @@ class _PowerRouteDevice:
 
     @property
     def active_chargeable_produced_home(self) -> int:
-        """Return produced home that should be preserved as a discharge target."""
-        if not self.discharging or self.device.state in EMPTY_SOC_STATES:
+        """
+        Return produced home that should be preserved as a discharge target.
+
+        SOCEMPTY, SOCRESERVE, and RESERVE_RECOVERY devices are passing solar to
+        home but should have that solar redirected to their own battery instead;
+        their contribution must not be treated as a floor to preserve in charge
+        mode.
+        """
+        if not self.discharging or self.device.state in {DeviceState.SOCFULL, *LOW_SOC_STATES}:
             return 0
         return self.produced_home
 
@@ -88,7 +100,7 @@ class _PowerRouteDevice:
 
 @dataclass(frozen=True, slots=True)
 class _PowerRoutingSnapshot:
-    """Per-cycle routing view shared by manager power paths."""
+    """Per-cycle routing view shared by primary-aware manager paths."""
 
     selected_primary: ZendureDevice | None
     primary_aware: bool
@@ -153,7 +165,13 @@ class _PowerRoutingSnapshot:
 
     @property
     def active_chargeable_serving_pv_floor(self) -> int:
-        """Return produced home output from devices that are not blocked-low."""
+        """
+        Return produced home output from devices that are not blocked-low.
+
+        SOCEMPTY, SOCRESERVE, and RESERVE_RECOVERY devices pass solar to home
+        but should be redirected to charge their own battery; their solar floor
+        must not block the charge-mode debounce.
+        """
         return sum(
             self.route(device).active_chargeable_produced_home
             for device in self.discharge_devices
@@ -223,6 +241,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.charge_optimal = 0
         self.charge_time = datetime.max
         self.charge_last = datetime.min
+        self.charge_debounce_since: datetime | None = None
         self.charge_weight = 0
 
         self.discharge: list[ZendureDevice] = []
@@ -231,7 +250,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.discharge_limit = 0
         self.discharge_optimal = 0
         self.discharge_weight = 0
-
         self.idle: list[ZendureDevice] = []
         self.idle_lvlmax = 0
         self.idle_lvlmin = 0
@@ -304,6 +322,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.manualpower = ZendureRestoreNumber(
             self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True
         )
+        self.discharge_recovery_margin = ZendureRestoreNumber(
+            self,
+            "discharge_recovery_margin",
+            self._refresh_discharge_recovery_margin,
+            None,
+            "%",
+            "soc",
+            100,
+            0,
+            NumberMode.BOX,
+            True,
+        )
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", None, 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
@@ -323,6 +353,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # create the device and mqtt server
                 prodName = dev.get("deviceName") or prodModel
                 device = init(self.hass, deviceId, prodName, dev)
+                device.set_discharge_recovery_margin(self.discharge_recovery_margin.asNumber)
                 device.discharge_start = device.discharge_limit // 10
                 device.discharge_optimal = device.discharge_limit // 4
                 Api.devices[deviceId] = device
@@ -358,6 +389,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.devices = list(Api.devices.values())
         for device in self.devices:
             device.on_available_kwh_changed = self.refresh_available_kwh
+        self._refresh_discharge_recovery_margin(None, None)
         self.refresh_available_kwh()
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
@@ -556,9 +588,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
         return device if self._available_discharge_power(device, primary_aware=True) > 0 else None
 
-    def is_reserve_blocked(self, device: ZendureDevice) -> bool:
-        """Return whether the device should be held out of planned discharge."""
-        return device.is_discharge_blocked()
+    def _refresh_discharge_recovery_margin(self, _entity: Any, _value: Any) -> None:
+        """Propagate the configured discharge recovery margin to all devices."""
+        margin = max(0, self.discharge_recovery_margin.asNumber)
+        for device in getattr(self, "devices", []):
+            device.set_discharge_recovery_margin(margin)
+        self.refresh_available_kwh()
 
     def refresh_available_kwh(self) -> None:
         """Refresh the manager aggregate for currently online device energy."""
@@ -567,8 +602,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
 
     @staticmethod
-    def _can_discharge(device: ZendureDevice) -> bool:
-        """Return whether the device is generally eligible to discharge."""
+    def _is_discharge_capable(device: ZendureDevice) -> bool:
+        """Return whether the device is generally capable of discharging."""
         return device.state not in {DeviceState.OFFLINE, *EMPTY_SOC_STATES} and device.discharge_limit > 0
 
     def _available_discharge_power(
@@ -579,9 +614,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         allow_produced_only: bool = False,
     ) -> int:
         """Return the currently available discharge contribution for a device."""
-        if not self._can_discharge(device):
+        if not self._is_discharge_capable(device):
             return 0
-        if self.is_reserve_blocked(device):
+        if device.is_discharge_blocked():
             return (
                 self._current_produced_output_limit(device, primary_aware=primary_aware) if allow_produced_only else 0
             )
@@ -727,7 +762,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         remaining_idle: list[ZendureDevice] = []
 
         for device in idle_devices:
-            if device.state in EMPTY_SOC_STATES or (promote_idle_devices and device.state != DeviceState.SOCFULL):
+            if device.state in LOW_SOC_STATES or (promote_idle_devices and device.state != DeviceState.SOCFULL):
                 charge_devices.append(device)
             else:
                 remaining_idle.append(device)
@@ -803,7 +838,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         battery_caps: dict[ZendureDevice, int] = {}
         for d in devices:
             total_limit = self._available_discharge_power(d, primary_aware=primary_aware, allow_produced_only=True)
-            cap = 0 if self.is_reserve_blocked(d) else max(0, total_limit - targets[d])
+            cap = 0 if d.is_discharge_blocked() else max(0, total_limit - targets[d])
             battery_caps[d] = cap
             battery_limit += cap
             battery_weight += cap * d.electricLevel.asInt
@@ -1035,8 +1070,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     self.charge_optimal += d.charge_optimal
                     self.charge_weight += d.pwr_max * (100 - d.electricLevel.asInt)
                     setpoint += home
-                # SOCEMPTY means, it could not discharge the battery, but it is still
-                # possible to feed into the home using solarpower or offGrid.
+                # Low-SOC states cannot discharge the battery, but can still
+                # feed into the home using solar power or off-grid power.
                 elif (home := d.homeOutput.asInt) > 0:
                     self.discharge.append(d)
                     self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
@@ -1091,6 +1126,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and setpoint >= 0
             ):
                 setpoint = max(setpoint, gross_discharge_setpoint)
+        discharge_candidate_setpoint = setpoint
 
         # In zero/negative-p1 cycles, treat non-bypass production as extra chargeable
         # surplus when the cycle is already in surplus or the selected primary can
@@ -1101,10 +1137,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         active_non_primary_local_surplus = sum(
             routing.charge_surplus(device) for device in self.discharge if device is not selected_primary
         )
+        # Non-primary low-SOC devices whose solar exactly covers homeOutput have
+        # charge_surplus=0 but can still redirect that solar to their own battery.
         active_non_primary_empty_chargeable = sum(
             routing.chargeable_produced_home(device)
             for device in self.discharge
-            if device is not selected_primary and device.state in EMPTY_SOC_STATES
+            if device is not selected_primary and device.state in LOW_SOC_STATES
         )
         primary_keeps_local_surplus = (
             selected_charge_primary is not None
@@ -1122,6 +1160,22 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
             ):
                 setpoint = surplus_setpoint
+
+        positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
+        debounce_charge_flip = (
+            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+            and routing.active_chargeable_serving_pv_floor > 0
+            and charge_transition_would_zero
+            and setpoint < 0
+            and not positive_demand_charge_lag
+        )
+        if debounce_charge_flip:
+            if self.charge_debounce_since is None:
+                self.charge_debounce_since = time
+            if time - self.charge_debounce_since < timedelta(seconds=SmartMode.TIMEZERO):
+                setpoint = max(0, discharge_candidate_setpoint, active_serving_pv_floor)
+        else:
+            self.charge_debounce_since = None
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
@@ -1269,9 +1323,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing.route(device).charge_floor > 0 for device in self.charge
         )
         allow_home_pv_charge = not positive_demand_charge_lag
+        # In surplus mode, low-SOC devices should redirect their solar to their
+        # own battery instead of continuing to pass it to the home.  Zero their
+        # discharge targets so the stop-discharge loop below actually stops them.
         if allow_home_pv_charge:
             active_discharge_targets = {
-                d: (0 if d.state in EMPTY_SOC_STATES and routing.chargeable_produced_home(d) > 0 else t)
+                d: (0 if d.state in LOW_SOC_STATES and routing.chargeable_produced_home(d) > 0 else t)
                 for d, t in active_discharge_targets.items()
             }
 
@@ -1490,9 +1547,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         selected_primary = self.resolve_primary_device()
         routing = self._power_routing_snapshot(selected_primary, primary_aware=True)
+        charge_produced_devices = [
+            device for device in self.charge if device.is_discharge_blocked() and routing.produced_limit(device) > 0
+        ]
 
         # stop charging devices
         for d in self.charge:
+            if d in charge_produced_devices:
+                continue
             # SF 2400 may show more gridInputPower than offGridPower and will be
             # recognized as charging, so set power to 10 instead of 0
             if max(0, d.pwr_offgrid) == 0:
@@ -1506,11 +1568,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and selected_primary is not None
             and selected_primary.online
             and selected_primary in self.discharge
-            and self.is_reserve_blocked(selected_primary)
+            and selected_primary.is_discharge_blocked()
             and primary_produced_cap == 0
         ):
             _LOGGER.info(
-                "Primary device %s is at/below reserve SoC %.1f%%; stopping discharge",
+                "Primary device %s is currently blocked for discharge at floor %.1f%%; stopping discharge",
                 selected_primary.name,
                 selected_primary.discharge_floor_soc(),
             )
@@ -1534,7 +1596,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         produced_devices = sorted(
             (
                 device
-                for device in [*remaining_active, *idle_produced_devices]
+                for device in [
+                    *remaining_active,
+                    *(device for device in charge_produced_devices if device is not primary),
+                    *idle_produced_devices,
+                ]
                 if routing.produced_limit(device) > 0
             ),
             key=lambda device: device.electricLevel.asInt,
