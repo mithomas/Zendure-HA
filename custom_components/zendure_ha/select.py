@@ -48,7 +48,6 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
         else:
             self._attr_current_option = self._attr_options[0]
         self.onchanged = onchanged
-        self.add_to_platform(self.add)
 
     def setDict(self, options: dict[Any, str]) -> None:
         """Set the options for the select entity."""

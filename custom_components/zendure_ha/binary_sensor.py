@@ -38,7 +38,6 @@ class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride
         self.entity_description = BinarySensorEntityDescription(key=uniqueid, name=uniqueid, device_class=deviceclass)
         self._attr_is_on = False
         self._value_template: Template | None = template
-        self.add_to_platform(self.add)
 
     def update_value(self, value: Any) -> bool:
         try:

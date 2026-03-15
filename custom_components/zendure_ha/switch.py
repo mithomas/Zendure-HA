@@ -48,7 +48,6 @@ class ZendureSwitch(  # pyright: ignore[reportIncompatibleVariableOverride]
         self._onwrite = onwrite
         if value is not None:
             self._attr_is_on = value
-        self.add_to_platform(self.add)
 
     def update_value(self, value: Any) -> bool:
         try:

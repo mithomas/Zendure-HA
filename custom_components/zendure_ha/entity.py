@@ -53,6 +53,7 @@ class EntityZendure(Entity):
         self._attr_has_entity_name = True
         self._attr_should_poll = False
         self._attr_available = True
+        self._registration_requested = False
         if device is None:
             if uniqueid != "empty":
                 _LOGGER.debug("Entity %s has no device, skipping initialization.", uniqueid)
@@ -65,6 +66,7 @@ class EntityZendure(Entity):
         device.entities[uniqueid] = self
         if domain and device.checkEntity is not None and self._attr_translation_key not in device.checkEntity:
             device.checkEntity[self._attr_translation_key] = domain
+        device.queue_entity_for_registration(self)
 
     @property
     def device_info(self) -> DeviceInfo | None:
@@ -87,22 +89,39 @@ class EntityZendure(Entity):
 
     def add_to_platform(self, add_callback: Any) -> None:
         """Register the entity with Home Assistant, supporting async callbacks."""
-        result = add_callback([self])
-        if isawaitable(result):
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
 
-            if running_loop is self.device.hass.loop:
-                self.device.hass.async_create_task(result)
-            else:
-                asyncio.run_coroutine_threadsafe(result, self.device.hass.loop)
+        async def _async_add_entity() -> None:
+            result = add_callback([self])
+            if isawaitable(result):
+                await result
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is self.device.hass.loop:
+            self.device.hass.async_create_task(_async_add_entity())
+        else:
+            asyncio.run_coroutine_threadsafe(_async_add_entity(), self.device.hass.loop)
 
     @property
     def hasPlatform(self) -> bool:
         """Return whether the entity has a platform."""
-        return self._platform_state != EntityPlatformState.NOT_ADDED
+        return getattr(self, "_platform_state", EntityPlatformState.NOT_ADDED) != EntityPlatformState.NOT_ADDED
+
+    def register(self) -> bool:
+        """Register the entity with its Home Assistant platform once."""
+        if self._registration_requested:
+            return True
+
+        add_callback = getattr(type(self), "add", None)
+        if add_callback is None:
+            return False
+
+        self._registration_requested = True
+        self.add_to_platform(add_callback)
+        return True
 
 
 class EntityDevice:
@@ -224,6 +243,7 @@ class EntityDevice:
         self.unique = "".join(self.name.split())
         self.entities: dict[str, EntityZendure] = {}
         self.sn = sn
+        self._pending_entities: list[EntityZendure] = []
 
         Migration.check_device(self.hass, deviceId, self.name, model, sn)
         self.attr_device_info = DeviceInfo(
@@ -280,6 +300,21 @@ class EntityDevice:
 
     async def dataRefresh(self, _update_count: int) -> None:
         return
+
+    def queue_entity_for_registration(self, entity: EntityZendure) -> None:
+        """Queue a newly created entity for explicit registration."""
+        self._pending_entities.append(entity)
+
+    def register_pending_entities(self) -> None:
+        """Register all queued entities once construction has completed."""
+        while self._pending_entities:
+            pending = self._pending_entities
+            self._pending_entities = []
+            for entity in pending:
+                if entity is self.empty:
+                    continue
+                if not entity.register():
+                    self._pending_entities.append(entity)
 
     def entityUpdate(self, key: Any, value: Any) -> bool:
         from .binary_sensor import ZendureBinarySensor
@@ -347,6 +382,7 @@ class EntityDevice:
 
             if entity is not None:
                 entity.update_value(value)
+                self.register_pending_entities()
             return True
 
         # update entity state

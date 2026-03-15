@@ -61,7 +61,6 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
         if state is not None:
             self._attr_native_value = state
         self.factor = factor
-        self.add_to_platform(self.add)
 
     def update_value(self, value: Any) -> bool:
         try:
@@ -76,9 +75,10 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
                 except ValueError:
                     new_value = 0
 
-            if self.hass and new_value != self._attr_native_value:
+            if new_value != self._attr_native_value:
                 self._attr_native_value = new_value
-                self.write_ha_state()
+                if self.hass:
+                    self.write_ha_state()
                 return True
 
         except Exception as err:

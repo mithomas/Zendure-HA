@@ -138,6 +138,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 device.discharge_start = device.discharge_limit // 10
                 device.discharge_optimal = device.discharge_limit // 4
                 Api.devices[deviceId] = device
+                device.register_pending_entities()
 
                 # Check if we should automatically manage MQTT users (opt-in)
                 auto_mqtt = self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)
@@ -176,6 +177,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         await self.update_fusegroups()
         self.update_p1meter(self.config_entry.data.get(CONF_P1METER, "sensor.power_actual"))
         await asyncio.sleep(1)  # allow other tasks to run
+        self.register_pending_entities()
 
     async def update_fusegroups(self) -> None:
         _LOGGER.info("Update fusegroups")

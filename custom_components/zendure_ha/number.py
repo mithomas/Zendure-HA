@@ -60,7 +60,6 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
         self._attr_native_value = None
         self.factor = factor
         self.doupdate = doupdate
-        self.add_to_platform(self.add)
 
     @staticmethod
     def _as_float(value: Any) -> float | None:

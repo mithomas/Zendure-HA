@@ -18,5 +18,5 @@
     "paho-mqtt==2.1.0"
   ],
   "single_config_entry": true,
-  "version": "1.0.0-MTH-14-20260312093538"
+  "version": "1.0.0-MTH-15-20260315100202"
 }
