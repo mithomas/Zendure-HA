@@ -1,6 +1,7 @@
 # The contents of this file is based on https://github.com/home-assistant/core/blob/dev/pyproject.toml
 
 target-version = "py312"
+line-length = 120
 
 [lint]
 select = [
@@ -8,12 +9,10 @@ select = [
 ]
 
 ignore = [
-    "ANN101", # Missing type annotation for `self` in method
     "ANN401", # Dynamically typed expressions (typing.Any) are disallowed
     "D203", # no-blank-line-before-class (incompatible with formatter)
     "D212", # multi-line-summary-first-line (incompatible with formatter)
     "COM812", # incompatible with formatter
-    "ISC001", # incompatible with formatter
     "N806", # non-lowercase-variable-in-function
     "G004", # logging-f-string
     "ERA001", # commented-out-code
@@ -36,13 +35,20 @@ ignore = [
     "TC003", #typing-only-standard-library-import
     "UP035", #deprecated-import
     "DTZ901", #datetime-min-max
-    "EXE002", #shebang-missing-executable-file
     "PLC0415", #import-outside-top-level
-    "PGH003", #blanket-type-ignore
 ]
 
 [lint.flake8-pytest-style]
 fixture-parentheses = false
+
+[lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN001",
+    "ANN201",
+    "E501",
+    "S101",
+    "SLF001",
+]
 
 [lint.pyupgrade]
 keep-runtime-typing = true

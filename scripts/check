@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -u
+
+cd "$(dirname "$0")"
+
+status=0
+
+printf '=========== lint ===========\n\n'
+./lint || status=$?
+
+printf '\n\n=========== test ===========\n\n'
+./test || status=$?
+
+exit "$status"

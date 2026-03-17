@@ -1,8 +1,30 @@
 #!/usr/bin/env bash
 
-set -e
+set -u
 
 cd "$(dirname "$0")/.."
 
-ruff format .
-ruff check . --fix
+if [ -x ".venv/bin/ruff" ]; then
+  RUFF=".venv/bin/ruff"
+else
+  RUFF="ruff"
+fi
+
+if [ -x ".venv/bin/python" ]; then
+  PYTHON=".venv/bin/python"
+else
+  PYTHON="python3"
+fi
+
+status=0
+
+printf '=========== format ===========\n\n'
+"$RUFF" format --check . || status=$?
+
+printf '\n\n=========== lint ===========\n\n'
+"$RUFF" check . || status=$?
+
+printf '\n\n=========== pyright ===========\n\n'
+"$PYTHON" -m pyright || status=$?
+
+exit "$status"

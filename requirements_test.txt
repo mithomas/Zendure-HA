@@ -1,0 +1,4 @@
+-r requirements_dev.txt
+pytest-homeassistant-custom-component==0.13.314
+aiousbwatcher==1.1.1
+pyserial==3.5
