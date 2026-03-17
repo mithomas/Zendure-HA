@@ -507,10 +507,7 @@ class ZendureDevice(EntityDevice):
 
     def ble_adapter_options(self) -> dict[int, str]:
         """Build selectable BLE adapter/source options for this device."""
-        options = {0: "auto"}
-        for idx, source in enumerate(self.ble_sources(), start=1):
-            options[idx] = source
-        return options
+        return {0: "auto", **dict(enumerate(self.ble_sources(), start=1))}
 
     def selected_ble_source(self) -> str | None:
         """Return configured BLE source for this device or None for auto selection."""

@@ -14,12 +14,13 @@ ignore = [
     "D212", # multi-line-summary-first-line (incompatible with formatter)
     "COM812", # incompatible with formatter
     "N806", # non-lowercase-variable-in-function
-    "G004", # logging-f-string
     "D101", # undocumented-public-class
     "D102", # undocumented-public-method
     "BLE001", # blind-except
     "DTZ005", #call-datetime-now-without-tzinfo
+    "C901", # complex-structure
     "PLR0912", #too-many-branches
+    "PLR0915", #too-many-statements
     "N802", #invalid-function-name
     "N803", #argumentname must be lowercase
     "N815", #argumentname must be lowercase

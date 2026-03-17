@@ -12,7 +12,6 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers import restore_state as rs
 from homeassistant.helpers.device_registry import DeviceEntry, DeviceInfo
 from homeassistant.helpers.entity import Entity, EntityPlatformState
 from homeassistant.helpers.template import Template
@@ -29,8 +28,7 @@ def snakecase(value: str) -> str:
     # replace any non-alphanumeric character with underscore
     value = re.sub(r"[^a-z0-9]", "_", value.lower())
     # collapse multiple underscores and strip leading/trailing
-    value = re.sub(r"_+", "_", value).strip("_")
-    return value
+    return re.sub(r"_+", "_", value).strip("_")
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -257,7 +255,7 @@ class EntityDevice:
     async def dataRefresh(self, _update_count: int) -> None:
         return
 
-    def entityUpdate(self, key: Any, value: Any) -> bool:  # noqa: PLR0915
+    def entityUpdate(self, key: Any, value: Any) -> bool:
         from .binary_sensor import ZendureBinarySensor
         from .select import ZendureSelect
         from .sensor import ZendureCalcSensor, ZendureSensor

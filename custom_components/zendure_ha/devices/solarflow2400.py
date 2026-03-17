@@ -11,7 +11,7 @@ from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSen
 _LOGGER = logging.getLogger(__name__)
 
 
-class SolarFlow2400AC_Plus(ZendureZenSdk):
+class SolarFlow2400ACPlus(ZendureZenSdk):
     def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
         """Initialise SolarFlow2400AC."""
         super().__init__(hass, deviceId, prodName, definition["productModel"], definition)

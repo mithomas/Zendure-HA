@@ -10,6 +10,7 @@ import traceback
 from base64 import b64decode
 from collections.abc import Callable
 from datetime import datetime
+from http import HTTPStatus
 from typing import Any, Mapping
 
 from homeassistant.core import HomeAssistant
@@ -39,7 +40,7 @@ from .devices.hub2000 import Hub2000
 from .devices.hyper2000 import Hyper2000
 from .devices.solarflow800 import SolarFlow800, SolarFlow800Plus, SolarFlow800Pro
 from .devices.solarflow1600 import SolarFlow1600
-from .devices.solarflow2400 import SolarFlow2400AC, SolarFlow2400AC_Plus, SolarFlow2400Pro
+from .devices.solarflow2400 import SolarFlow2400AC, SolarFlow2400ACPlus, SolarFlow2400Pro
 from .devices.superbasev4600 import SuperBaseV4600
 from .devices.superbasev6400 import SuperBaseV6400
 
@@ -68,7 +69,7 @@ class Api:
         "solarflow 800 plus": SolarFlow800Plus,
         "solarflow 1600 ac+": SolarFlow1600,
         "solarflow 2400 ac": SolarFlow2400AC,
-        "solarflow 2400 ac+": SolarFlow2400AC_Plus,
+        "solarflow 2400 ac+": SolarFlow2400ACPlus,
         "solarflow 2400 pro": SolarFlow2400Pro,
         "superbase v6400": SuperBaseV6400,
         "superbase v4600": SuperBaseV4600,
@@ -169,7 +170,7 @@ class Api:
 
             # Calculate signature
             sign_str = f"{CONF_HAKEY}{body_str}{CONF_HAKEY}"
-            sha1 = hashlib.sha1()  # noqa: S324
+            sha1 = hashlib.sha1()
             sha1.update(sign_str.encode("utf-8"))
             sign = sha1.hexdigest().upper()
 
@@ -184,12 +185,13 @@ class Api:
 
             result = await session.post(url=f"{api_url}/api/ha/deviceList", json=body, headers=headers)
             data = await result.json()
-            if data.get("code") != 200:
-                _LOGGER.debug("Zendure API response: %s Message: %s", data.get("code"), data.get("msg"))
-            elif data.get("code") == 200 and len(data["data"]["deviceList"]) == 0:
+            status_code = data.get("code")
+            if status_code != HTTPStatus.OK:
+                _LOGGER.debug("Zendure API response: %s Message: %s", status_code, data.get("msg"))
+            elif len(data["data"]["deviceList"]) == 0:
                 _LOGGER.error("Zendure API does not reply any devices: %s", data)
                 return None
-            elif data.get("code") == 200 and len(data["data"]["mqtt"]) == 0:
+            elif len(data["data"]["mqtt"]) == 0:
                 _LOGGER.error("Zendure API does not reply any mqtt info: %s", data)
                 return None
             if not data.get("success", False) or (result := data["data"]) is None:
