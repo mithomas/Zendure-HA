@@ -613,7 +613,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # and it take all offGrid power from grid
                 start_pwr = SmartMode.POWER_START
                 await d.power_charge(
-                    -start_pwr - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid)
+                    -start_pwr - max(0, d.pwr_offgrid)
+                    if d.state != DeviceState.SOCFULL
+                    else -max(0, d.pwr_offgrid)
                 )
                 if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                     break

@@ -336,7 +336,10 @@ class EntityDevice:
 
     def updateVersion(self, version: str) -> None:
         _LOGGER.info(
-            "Updating %s software version from %s to %s", self.name, self.attr_device_info.get("sw_version"), version
+            "Updating %s software version from %s to %s",
+            self.name,
+            self.attr_device_info.get("sw_version"),
+            version,
         )
         device_registry = dr.async_get(self.hass)
         identifier = self.sn or self.name
