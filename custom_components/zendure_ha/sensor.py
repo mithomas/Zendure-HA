@@ -20,7 +20,9 @@ from .entity import EntityDevice, EntityZendure
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(_hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(
+    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the Zendure sensor."""
     ZendureSensor.add = async_add_entities
 
@@ -43,7 +45,14 @@ class ZendureSensor(EntityZendure, SensorEntity):
     ) -> None:
         """Initialize a Zendure entity."""
         super().__init__(device, uniqueid, "sensor")
-        self.entity_description = SensorEntityDescription(key=uniqueid, name=uniqueid, native_unit_of_measurement=uom, device_class=deviceclass, state_class=stateclass, icon=icon)
+        self.entity_description = SensorEntityDescription(
+            key=uniqueid,
+            name=uniqueid,
+            native_unit_of_measurement=uom,
+            device_class=deviceclass,
+            state_class=stateclass,
+            icon=icon,
+        )
         self._value_template: Template | None = template
         if precision is not None:
             self._attr_suggested_display_precision = precision
@@ -54,7 +63,11 @@ class ZendureSensor(EntityZendure, SensorEntity):
 
     def update_value(self, value: Any) -> bool:
         try:
-            new_value = self._value_template.async_render_with_possible_json_value(value, None) if self._value_template is not None else value
+            new_value = (
+                self._value_template.async_render_with_possible_json_value(value, None)
+                if self._value_template is not None
+                else value
+            )
             if self.factor != 1:
                 try:
                     new_value = float(new_value) / self.factor
@@ -114,7 +127,13 @@ class ZendureRestoreSensor(ZendureSensor, RestoreEntity):
         self._attr_native_value = init_value
         state = await self.async_get_last_state()
         try:
-            self._attr_native_value = init_value if state is None else parse_datetime(state.state) if self.device_class in ["date", "timestamp"] else float(state.state)
+            self._attr_native_value = (
+                init_value
+                if state is None
+                else parse_datetime(state.state)
+                if self.device_class in ["date", "timestamp"]
+                else float(state.state)
+            )
             _LOGGER.debug("Restored state for %s: %s", self.entity_id, self._attr_native_value)
         except ValueError:
             self._attr_native_value = init_value
@@ -122,13 +141,17 @@ class ZendureRestoreSensor(ZendureSensor, RestoreEntity):
     def aggregate(self, time: datetime, value: Any) -> None:
         # Get the kWh value from the last value and the time since the last update
         value = float(value) if isinstance(value, (int, float)) else 0.0
-        if (self.last_reset is None or self.last_reset.date() != time.date()) and self.state_class != "total_increasing":
+        if (
+            self.last_reset is None or self.last_reset.date() != time.date()
+        ) and self.state_class != "total_increasing":
             self._attr_native_value = 0.0
             self._attr_last_reset = time
         else:
             try:
                 kWh = self.last_value * (time.timestamp() - self.lastValueUpdate.timestamp()) / 3600000
-                self._attr_native_value = kWh + (float(self._attr_native_value) if isinstance(self._attr_native_value, (int, float)) else 0.0)
+                self._attr_native_value = kWh + (
+                    float(self._attr_native_value) if isinstance(self._attr_native_value, (int, float)) else 0.0
+                )
             except Exception as e:
                 if not isinstance(self.state, (int, float)):
                     self._attr_native_value = 0.0
@@ -160,7 +183,11 @@ class ZendureCalcSensor(ZendureSensor):
 
     def update_value(self, value: Any) -> bool:
         try:
-            new_value = self._value_template.async_render_with_possible_json_value(value, None) if self._value_template is not None else value
+            new_value = (
+                self._value_template.async_render_with_possible_json_value(value, None)
+                if self._value_template is not None
+                else value
+            )
 
             if self.hass and new_value != self._attr_native_value and self.calculate is not None:
                 self._attr_native_value = self.calculate(new_value)
@@ -177,7 +204,13 @@ class ZendureCalcSensor(ZendureSensor):
     def calculate_version(self, value: Any) -> Any:
         """Calculate the version from the value."""
         version = int(value)
-        version = f"v{(version & 0xF000) >> 12}.{(version & 0x0F00) >> 8}.{version & 0x00FF}" if version > 10 else "not provided" if version <= 0 else version
+        version = (
+            f"v{(version & 0xF000) >> 12}.{(version & 0x0F00) >> 8}.{version & 0x00FF}"
+            if version > 10
+            else "not provided"
+            if version <= 0
+            else version
+        )
         if self._attr_native_value == version:
             return version
         if (

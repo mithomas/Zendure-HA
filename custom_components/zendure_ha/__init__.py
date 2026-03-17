@@ -12,7 +12,14 @@ from .device import ZendureDevice
 from .manager import ZendureConfigEntry, ZendureManager
 from .migration import Migration
 
-PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,7 +72,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> 
     return result
 
 
-async def async_remove_config_entry_device(_hass: HomeAssistant, entry: ZendureConfigEntry, device_entry: dr.DeviceEntry) -> bool:
+async def async_remove_config_entry_device(
+    _hass: HomeAssistant, entry: ZendureConfigEntry, device_entry: dr.DeviceEntry
+) -> bool:
     """Remove a device from a config entry."""
     manager = entry.runtime_data
 
@@ -75,7 +84,10 @@ async def async_remove_config_entry_device(_hass: HomeAssistant, entry: ZendureC
             manager.devices.remove(d)
             return True
 
-        if isinstance(d, ZendureDevice) and (bat := next((b for b in d.batteries.values() if b.name == device_entry.name), None)) is not None:
+        if (
+            isinstance(d, ZendureDevice)
+            and (bat := next((b for b in d.batteries.values() if b.name == device_entry.name), None)) is not None
+        ):
             d.batteries.pop(bat.deviceId)
             return True
 

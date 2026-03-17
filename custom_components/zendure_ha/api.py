@@ -89,7 +89,13 @@ class Api:
     def Init(self, data: Mapping[str, Any], mqtt: Mapping[str, Any]) -> None:
         """Initialize Zendure Api."""
         Api.mqttLogging = data.get(CONF_MQTTLOG, False)
-        Api.mqttCloud.__init__(mqtt_enums.CallbackAPIVersion.VERSION2, mqtt["clientId"], False, "cloud", mqtt_enums.MQTTProtocolVersion.MQTTv31)
+        Api.mqttCloud.__init__(
+            mqtt_enums.CallbackAPIVersion.VERSION2,
+            mqtt["clientId"],
+            False,
+            "cloud",
+            mqtt_enums.MQTTProtocolVersion.MQTTv31,
+        )
         url = mqtt["url"]
         Api.cloudServer, Api.cloudPort = url.rsplit(":", 1) if ":" in url else (url, "1883")
         self.mqttInit(Api.mqttCloud, Api.cloudServer, Api.cloudPort, mqtt["username"], mqtt["password"])
@@ -105,7 +111,9 @@ class Api:
         Api.localPassword = data.get(CONF_MQTTPSW, "")
         if Api.localServer != "":
             clientId = Api.localUser + str(secrets.randbelow(10000))
-            self.mqttLocal.__init__(mqtt_enums.CallbackAPIVersion.VERSION2, clientId, True, "local", mqtt_enums.MQTTProtocolVersion.MQTTv31)
+            self.mqttLocal.__init__(
+                mqtt_enums.CallbackAPIVersion.VERSION2, clientId, True, "local", mqtt_enums.MQTTProtocolVersion.MQTTv31
+            )
             self.mqttInit(self.mqttLocal, Api.localServer, Api.localPort, Api.localUser, Api.localPassword)
 
     @staticmethod
@@ -198,7 +206,13 @@ class Api:
         try:
             client.on_connect = self.mqttConnect
             client.on_disconnect = self.mqttDisconnect
-            client.on_message = self.mqttMsgCloud if client == self.mqttCloud else self.mqttMsgLocal if client == self.mqttLocal else self.mqttMsgDevice
+            client.on_message = (
+                self.mqttMsgCloud
+                if client == self.mqttCloud
+                else self.mqttMsgLocal
+                if client == self.mqttLocal
+                else self.mqttMsgDevice
+            )
             client.suppress_exceptions = True
             client.username_pw_set(user, psw)
             client.connect(srv, int(port))
@@ -249,7 +263,11 @@ class Api:
                     return
 
                 if self.mqttLogging:
-                    _LOGGER.info("Topic: %s => %s", msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"), payload)
+                    _LOGGER.info(
+                        "Topic: %s => %s",
+                        msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"),
+                        payload,
+                    )
 
                 if device.mqttMessage(topics[3], payload) and device.mqtt != client:
                     device.mqtt = client
@@ -285,7 +303,11 @@ class Api:
                     return
 
                 if self.mqttLogging:
-                    _LOGGER.info("Local topic: %s => %s", msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"), payload)
+                    _LOGGER.info(
+                        "Local topic: %s => %s",
+                        msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"),
+                        payload,
+                    )
 
                 if device.mqttMessage(topics[3], payload):
                     if device.mqtt != client:

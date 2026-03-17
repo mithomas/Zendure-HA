@@ -19,7 +19,13 @@ _LOGGER = logging.getLogger(__name__)
 class Migration:
     """Handles device/entity rename migrations."""
 
-    repairs = {"i_o_t_state": "iotstate", "o_t_a_state": "otastate", "l_c_n_state": "lcnstate", "local_a_p_i_enable": "local_apienable", "is_error": ""}
+    repairs = {
+        "i_o_t_state": "iotstate",
+        "o_t_a_state": "otastate",
+        "l_c_n_state": "lcnstate",
+        "local_a_p_i_enable": "local_apienable",
+        "is_error": "",
+    }
 
     @staticmethod
     def check_device(hass: HomeAssistant, device_id: str, name: str, model: str, sn: str) -> None:
@@ -99,7 +105,8 @@ class Migration:
                     if new_identifiers != set(device.identifiers):
                         device_registry.async_update_device(device.id, new_identifiers=new_identifiers)
 
-                # Get the best possible name for the device: prefer name_by_user, then name, then try to infer from entities
+                # Get the best possible name for the device: prefer name_by_user,
+                # then name, then try to infer from entities.
                 entities = er.async_entries_for_device(entity_registry, device.id, True)
                 if not (name := device.name_by_user or device.name) or "_" in name:
                     continue
@@ -120,7 +127,11 @@ class Migration:
                                 _LOGGER.debug("Removed orphan entity %s", entity.entity_id)
                                 continue
 
-                            uniqueid = snakecase(v) if (v := Migration.repairs.get(entity.translation_key)) is not None else snakecase(entity.translation_key)
+                            uniqueid = (
+                                snakecase(v)
+                                if (v := Migration.repairs.get(entity.translation_key)) is not None
+                                else snakecase(entity.translation_key)
+                            )
                             if uniqueid == "":
                                 entity_registry.async_remove(entity.entity_id)
                                 continue
@@ -130,7 +141,11 @@ class Migration:
                             unique_id = snakecase(f"{name.lower()}_{uniqueid}")
                             entityid = f"{entity.domain}.{unique_id}"
 
-                            if entity.entity_id != entityid or entity.unique_id != unique_id or entity.translation_key != uniqueid:
+                            if (
+                                entity.entity_id != entityid
+                                or entity.unique_id != unique_id
+                                or entity.translation_key != uniqueid
+                            ):
                                 if entity.entity_id != entityid:
                                     entity_registry.async_remove(entityid)
                                 if (rstate := data.last_states.pop(entity.entity_id, None)) is not None:
@@ -186,7 +201,9 @@ class Migration:
             await rs.RestoreStateData.async_save_persistent_states(hass)
             async_create(
                 hass,
-                f"Zendure migration updated {len(changes)} entities. Please restart Home Assistant to ensure all automations and dashboards use the new entity IDs.",
+                f"Zendure migration updated {len(changes)} entities. Please restart "
+                "Home Assistant to ensure all automations and dashboards use the new "
+                "entity IDs.",
                 title="Zendure Migration",
                 notification_id="zendure_migration",
             )

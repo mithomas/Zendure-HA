@@ -21,15 +21,9 @@ async def test_async_setup_entry_smoke(hass):
     mqtt_local.is_connected.return_value = False
 
     with (
-        patch.object(
-            hass.config_entries, "async_forward_entry_setups", AsyncMock()
-        ) as mock_forward,
-        patch.object(
-            hass.config_entries, "async_unload_platforms", AsyncMock(return_value=True)
-        ) as mock_unload,
-        patch(
-            "custom_components.zendure_ha.ZendureManager.loadDevices", AsyncMock()
-        ) as mock_load,
+        patch.object(hass.config_entries, "async_forward_entry_setups", AsyncMock()) as mock_forward,
+        patch.object(hass.config_entries, "async_unload_platforms", AsyncMock(return_value=True)) as mock_unload,
+        patch("custom_components.zendure_ha.ZendureManager.loadDevices", AsyncMock()) as mock_load,
         patch(
             "custom_components.zendure_ha.ZendureManager.async_config_entry_first_refresh",
             AsyncMock(),

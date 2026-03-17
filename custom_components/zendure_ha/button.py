@@ -13,7 +13,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .entity import EntityDevice, EntityZendure
 
 
-async def async_setup_entry(_hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(
+    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the Zendure button."""
     ZendureButton.add = async_add_entities
 

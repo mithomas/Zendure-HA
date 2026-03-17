@@ -16,7 +16,9 @@ from .entity import EntityDevice, EntityZendure
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(_hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(
+    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the Zendure select."""
     ZendureSelect.add = async_add_entities
 
@@ -26,7 +28,14 @@ class ZendureSelect(EntityZendure, SelectEntity):
 
     add: AddEntitiesCallback
 
-    def __init__(self, device: EntityDevice, uniqueid: str, options: dict[Any, str], onchanged: Callable | None, current: int | None = None) -> None:
+    def __init__(
+        self,
+        device: EntityDevice,
+        uniqueid: str,
+        options: dict[Any, str],
+        onchanged: Callable | None,
+        current: int | None = None,
+    ) -> None:
         """Initialize a select entity."""
         super().__init__(device, uniqueid, "select")
         self.entity_description = SelectEntityDescription(key=uniqueid, name=uniqueid)
@@ -96,7 +105,14 @@ class ZendureSelect(EntityZendure, SelectEntity):
 class ZendureRestoreSelect(ZendureSelect, RestoreEntity):
     """Representation of a Zendure select entity with restore."""
 
-    def __init__(self, device: EntityDevice, uniqueid: str, options: dict[int, str], onchanged: Callable | None, current: int | None = None) -> None:
+    def __init__(
+        self,
+        device: EntityDevice,
+        uniqueid: str,
+        options: dict[int, str],
+        onchanged: Callable | None,
+        current: int | None = None,
+    ) -> None:
         """Initialize a select entity."""
         super().__init__(device, uniqueid, options, onchanged, current)
 

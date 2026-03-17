@@ -141,15 +141,9 @@ def make_manager(hass: HomeAssistant) -> ZendureManager:
             NumberMode.BOX,
             True,
         )
-    manager.availableKwh = ZendureSensor(
-        manager, "available_kwh", None, "kWh", "energy", None, 1
-    )
-    manager.totalKwh = ZendureSensor(
-        manager, "total_kwh", None, "kWh", "energy", None, 2
-    )
-    manager.power = ZendureSensor(
-        manager, "power", None, "W", "power", "measurement", 0
-    )
+    manager.availableKwh = ZendureSensor(manager, "available_kwh", None, "kWh", "energy", None, 1)
+    manager.totalKwh = ZendureSensor(manager, "total_kwh", None, "kWh", "energy", None, 2)
+    manager.power = ZendureSensor(manager, "power", None, "W", "power", "measurement", 0)
     return manager
 
 
@@ -157,11 +151,7 @@ def attach_devices(manager: ZendureManager, *devices: ZendureDevice) -> None:
     """Attach devices to a manager and refresh its derived entities."""
     manager.devices = list(devices)
     manager.fuseGroups = list(
-        {
-            id(device.fuseGrp): device.fuseGrp
-            for device in devices
-            if hasattr(device, "fuseGrp")
-        }.values()
+        {id(device.fuseGrp): device.fuseGrp for device in devices if hasattr(device, "fuseGrp")}.values()
     )
     for device in devices:
         device.on_available_kwh_changed = manager.refresh_available_kwh

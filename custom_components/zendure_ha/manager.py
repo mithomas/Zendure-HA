@@ -90,7 +90,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.pwr_low = 0
 
     async def loadDevices(self) -> None:
-        if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
+        if (
+            self.config_entry is None
+            or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None
+        ):
             return
         if (mqtt := data.get("mqtt")) is None:
             return
@@ -103,10 +106,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
         self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"}, self.update_operation),
+            ZendureRestoreSelect(
+                self,
+                "Operation",
+                {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"},
+                self.update_operation,
+            ),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
-        self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
+        self.manualpower = ZendureRestoreNumber(
+            self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True
+        )
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
@@ -139,7 +149,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         user = await self.hass.auth.async_get_user_by_credentials(credentials)
                         if user is None:
                             # Enforce local_only=True for technical MQTT accounts
-                            user = await self.hass.auth.async_create_user(deviceId, group_ids=[GROUP_ID_USER], local_only=True)
+                            user = await self.hass.auth.async_create_user(
+                                deviceId, group_ids=[GROUP_ID_USER], local_only=True
+                            )
                             await provider.async_add_auth(deviceId.lower(), psw)
                             await self.hass.auth.async_link_user(user, credentials)
                         else:
@@ -198,7 +210,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                             await device.power_off()
                         continue
                     case _:
-                        _LOGGER.debug("Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state)
+                        _LOGGER.debug(
+                            "Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state
+                        )
                         continue
 
                 if fg is not None:
@@ -207,7 +221,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             except AttributeError as err:
                 _LOGGER.error("Device %s missing fuseGroup attribute: %s", device.name, err)
             except Exception as err:
-                _LOGGER.error("Unable to create fusegroup for device %s (%s): %s", device.name, device.deviceId, err, exc_info=True)
+                _LOGGER.error(
+                    "Unable to create fusegroup for device %s (%s): %s",
+                    device.name,
+                    device.deviceId,
+                    err,
+                    exc_info=True,
+                )
 
         # Update the fusegroups and select optins for each device
         for device in self.devices:
@@ -229,7 +249,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             except AttributeError as err:
                 _LOGGER.error("Device %s missing fuseGroup attribute: %s", device.name, err)
             except Exception as err:
-                _LOGGER.error("Unable to update fusegroup options for device %s (%s): %s", device.name, device.deviceId, err, exc_info=True)
+                _LOGGER.error(
+                    "Unable to update fusegroup options for device %s (%s): %s",
+                    device.name,
+                    device.deviceId,
+                    err,
+                    exc_info=True,
+                )
 
         # Add devices to fusegroups
         for device in self.devices:
@@ -241,7 +267,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # check if we can split fuse groups
         self.fuseGroups.clear()
         for fg in fuseGroups.values():
-            if len(fg.devices) > 1 and fg.maxpower >= sum(d.discharge_limit for d in fg.devices) and fg.minpower <= sum(d.charge_limit for d in fg.devices):
+            if (
+                len(fg.devices) > 1
+                and fg.maxpower >= sum(d.discharge_limit for d in fg.devices)
+                and fg.minpower <= sum(d.charge_limit for d in fg.devices)
+            ):
                 for d in fg.devices:
                     self.fuseGroups.append(FuseGroup(d.name, d.discharge_limit, d.charge_limit, [d]))
             else:
@@ -257,7 +287,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if self.p1meterEvent is not None:
             if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
                 _LOGGER.warning("No devices online, not possible to start the operation")
-                persistent_notification.async_create(self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha")
+                persistent_notification.async_create(
+                    self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha"
+                )
                 return
 
             match self.operation:
@@ -310,7 +342,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.p1meterEvent()
         if p1meter:
             self.p1meterEvent = async_track_state_change_event(self.hass, [p1meter], self._p1_changed)
-            if (entity := self.hass.states.get(p1meter)) is not None and entity.attributes.get("unit_of_measurement", "W") in ("kW", "kilowatt", "kilowatts"):
+            if (entity := self.hass.states.get(p1meter)) is not None and entity.attributes.get(
+                "unit_of_measurement", "W"
+            ) in ("kW", "kilowatt", "kilowatts"):
                 self.p1_factor = 1000
         else:
             self.p1meterEvent = None
@@ -355,7 +389,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
                 data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
 
-            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n")
+            f.write(
+                f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n"
+            )
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do
@@ -380,7 +416,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # calculate the standard deviation
         if len(self.p1_history) > 1:
             avg = int(sum(self.p1_history) / len(self.p1_history))
-            stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
+            stddev = SmartMode.P1_STDDEV_FACTOR * max(
+                SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
+            )
             if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
                 self.p1_history.clear()
         else:
@@ -426,7 +464,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         for d in self.devices:
             if await d.power_get():
                 # get power production
-                d.pwr_produced = min(0, d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt)
+                d.pwr_produced = min(
+                    0, d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt
+                )
                 self.produced -= d.pwr_produced
 
                 # only positive pwr_offgrid must be taken into account, negative values count a solarInput
@@ -436,7 +476,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     self.charge_optimal += d.charge_optimal
                     self.charge_weight += d.pwr_max * (100 - d.electricLevel.asInt)
                     setpoint += -d.homeInput.asInt  # use gridInputPower directly; offgrid consumers are invisible to P1
-                # SOCEMPTY means, it could not discharge the battery, but it is still possible to feed into the home using solarpower or offGrid
+                # SOCEMPTY means, it could not discharge the battery, but it is still
+                # possible to feed into the home using solarpower or offGrid.
                 elif (home := d.homeOutput.asInt) > 0:
                     self.discharge.append(d)
                     self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
@@ -449,7 +490,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 else:
                     self.idle.append(d)
                     self.idle_lvlmax = max(self.idle_lvlmax, d.electricLevel.asInt)
-                    self.idle_lvlmin = min(self.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100)
+                    self.idle_lvlmin = min(
+                        self.idle_lvlmin, d.electricLevel.asInt if d.state != DeviceState.SOCFULL else 100
+                    )
 
                 availableKwh += d.actualKwh
                 power += d.pwr_offgrid + home + d.pwr_produced
@@ -482,7 +525,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             case ManagerMode.MATCHING_CHARGE | ManagerMode.STORE_SOLAR:
                 # Allow discharge of produced power in MATCHING_CHARGE-Mode, otherwise only charge
                 # d.pwr_produced is negative, but self.produced is positive
-                if setpoint > 0 and self.produced > SmartMode.POWER_START and self.operation == ManagerMode.MATCHING_CHARGE:
+                if (
+                    setpoint > 0
+                    and self.produced > SmartMode.POWER_START
+                    and self.operation == ManagerMode.MATCHING_CHARGE
+                ):
                     await self.power_discharge(min(self.produced, setpoint))
                 # send device into idle-mode
                 elif setpoint > 0:
@@ -515,7 +562,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # prevent hysteria
         if self.charge_time > time:
             if self.charge_time == datetime.max:
-                self.charge_time = time + timedelta(seconds=2 if (time - self.charge_last).total_seconds() > 300 else 60)
+                self.charge_time = time + timedelta(
+                    seconds=2 if (time - self.charge_last).total_seconds() > 300 else 60
+                )
                 self.charge_last = self.charge_time
                 self.pwr_low = 0
             setpoint = 0
@@ -557,11 +606,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if dev_start < 0 and len(self.idle) > 0:
             self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=False)
             for d in self.idle:
-                # offGrid device need to be started with at least their offgrid power, otherwise they will not be recognized as charging
+                # offGrid device need to be started with at least their offgrid power,
+                # otherwise they will not be recognized as charging
                 # but should not be started with more than pwr_offgrid if they are full
-                # if a offGrid device need to be started, the output power is set to 0 and it take all offGrid power from grid
+                # if a offGrid device need to be started, the output power is set to 0
+                # and it take all offGrid power from grid
                 start_pwr = SmartMode.POWER_START
-                await d.power_charge(-start_pwr - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid))
+                await d.power_charge(
+                    -start_pwr - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid)
+                )
                 if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                     break
             self.pwr_low: int = 0
@@ -569,7 +622,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     async def power_discharge(self, setpoint: int) -> None:
         """Discharge devices."""
         _LOGGER.info("Discharge => setpoint %sW", setpoint)
-        self.operationstate.update_value(ManagerState.DISCHARGE.value if setpoint > 0 and self.discharge else ManagerState.IDLE.value)
+        self.operationstate.update_value(
+            ManagerState.DISCHARGE.value if setpoint > 0 and self.discharge else ManagerState.IDLE.value
+        )
 
         # reset hysteria time
         if self.charge_time != datetime.max:
@@ -578,11 +633,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # stop charging devices
         for d in self.charge:
-            # SF 2400 may show more gridInputPower than offGridPower and will be recognized as charging, so set power to 10 instead of 0
+            # SF 2400 may show more gridInputPower than offGridPower and will be
+            # recognized as charging, so set power to 10 instead of 0
             await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else 10)
 
         # distribute discharging devices, use produced power first, before adding another device
-        dev_start = max(0, setpoint - self.discharge_optimal * 2 - self.discharge_produced) if setpoint > SmartMode.POWER_START else 0
+        dev_start = (
+            max(0, setpoint - self.discharge_optimal * 2 - self.discharge_produced)
+            if setpoint > SmartMode.POWER_START
+            else 0
+        )
         solaronly = self.discharge_produced >= setpoint
         limit = self.discharge_produced if solaronly else self.discharge_limit
         setpoint = min(limit, setpoint)

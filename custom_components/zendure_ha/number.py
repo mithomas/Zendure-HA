@@ -17,7 +17,9 @@ from .entity import EntityDevice, EntityZendure
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(_hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(
+    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the Zendure number."""
     ZendureNumber.add = async_add_entities
 
@@ -59,7 +61,14 @@ class ZendureNumber(EntityZendure, NumberEntity):
 
     def update_value(self, value: Any) -> bool:
         try:
-            new_value = int(float(self._value_template.async_render_with_possible_json_value(value, None)) if self._value_template is not None else float(value)) / self.factor
+            new_value = (
+                int(
+                    float(self._value_template.async_render_with_possible_json_value(value, None))
+                    if self._value_template is not None
+                    else float(value)
+                )
+                / self.factor
+            )
 
             if self._attr_native_value == new_value:
                 return False

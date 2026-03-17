@@ -18,7 +18,9 @@ from .entity import EntityDevice, EntityZendure
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(_hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
+async def async_setup_entry(
+    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
     """Set up the Zendure switch."""
     ZendureSwitch.add = async_add_entities
 
@@ -48,7 +50,11 @@ class ZendureSwitch(EntityZendure, SwitchEntity):
 
     def update_value(self, value: Any) -> bool:
         try:
-            is_on = bool(int(self._value_template.async_render_with_possible_json_value(value, None)) != 0 if self._value_template is not None else int(value) != 0)
+            is_on = bool(
+                int(self._value_template.async_render_with_possible_json_value(value, None)) != 0
+                if self._value_template is not None
+                else int(value) != 0
+            )
 
             if self._attr_is_on == is_on:
                 return False

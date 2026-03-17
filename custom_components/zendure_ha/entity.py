@@ -225,11 +225,16 @@ class EntityDevice:
             _t = json.loads((Path(__file__).parent / "translations" / "en.json").read_text())
             EntityDevice.checkEntity = {key: domain for domain, keys in _t.get("entity", {}).items() for key in keys}
 
-        # Get all entities for this device and group them by translation_key if they match the current device and platform
+        # Get all entities for this device and group them by translation_key
+        # if they match the current device and platform.
         entity_registry = er.async_get(self.hass)
         ed: dict[str, list[er.RegistryEntry]] = {}
         for entity in er.async_entries_for_device(entity_registry, di.id, True):
-            if entity.platform == DOMAIN and (dn := self.checkEntity.get(entity.translation_key)) is not None and dn == entity.domain:
+            if (
+                entity.platform == DOMAIN
+                and (dn := self.checkEntity.get(entity.translation_key)) is not None
+                and dn == entity.domain
+            ):
                 ed.setdefault(entity.translation_key, []).append(entity)
 
         # check al entities
@@ -330,7 +335,9 @@ class EntityDevice:
         return
 
     def updateVersion(self, version: str) -> None:
-        _LOGGER.info("Updating %s software version from %s to %s", self.name, self.attr_device_info.get("sw_version"), version)
+        _LOGGER.info(
+            "Updating %s software version from %s to %s", self.name, self.attr_device_info.get("sw_version"), version
+        )
         device_registry = dr.async_get(self.hass)
         identifier = self.sn or self.name
         device_entry = device_registry.async_get_device(identifiers={(DOMAIN, identifier)})
