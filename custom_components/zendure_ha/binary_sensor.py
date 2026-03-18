@@ -21,7 +21,9 @@ async def async_setup_entry(
     ZendureBinarySensor.add = async_add_entities
 
 
-class ZendureBinarySensor(EntityZendure, BinarySensorEntity):
+class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride]
+    EntityZendure, BinarySensorEntity
+):
     add: AddEntitiesCallback
 
     def __init__(

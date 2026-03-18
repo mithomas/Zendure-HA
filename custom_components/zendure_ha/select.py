@@ -23,7 +23,9 @@ async def async_setup_entry(
     ZendureSelect.add = async_add_entities
 
 
-class ZendureSelect(EntityZendure, SelectEntity):
+class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
+    EntityZendure, SelectEntity
+):
     """Representation of a Zendure select entity."""
 
     add: AddEntitiesCallback
@@ -102,7 +104,9 @@ class ZendureSelect(EntityZendure, SelectEntity):
         return None
 
 
-class ZendureRestoreSelect(ZendureSelect, RestoreEntity):
+class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
+    ZendureSelect, RestoreEntity
+):
     """Representation of a Zendure select entity with restore."""
 
     def __init__(

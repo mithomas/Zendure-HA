@@ -20,7 +20,9 @@ async def async_setup_entry(
     ZendureButton.add = async_add_entities
 
 
-class ZendureButton(EntityZendure, ButtonEntity):
+class ZendureButton(  # pyright: ignore[reportIncompatibleVariableOverride]
+    EntityZendure, ButtonEntity
+):
     add: AddEntitiesCallback
 
     def __init__(self, device: EntityDevice, uniqueid: str, onpress: Callable) -> None:

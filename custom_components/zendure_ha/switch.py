@@ -25,7 +25,9 @@ async def async_setup_entry(
     ZendureSwitch.add = async_add_entities
 
 
-class ZendureSwitch(EntityZendure, SwitchEntity):
+class ZendureSwitch(  # pyright: ignore[reportIncompatibleVariableOverride]
+    EntityZendure, SwitchEntity
+):
     add: AddEntitiesCallback
 
     def __init__(

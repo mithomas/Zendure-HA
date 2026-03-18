@@ -27,7 +27,9 @@ async def async_setup_entry(
     ZendureSensor.add = async_add_entities
 
 
-class ZendureSensor(EntityZendure, SensorEntity):
+class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
+    EntityZendure, SensorEntity
+):
     add: AddEntitiesCallback
 
     def __init__(
@@ -101,7 +103,9 @@ class ZendureSensor(EntityZendure, SensorEntity):
         return int(self._attr_native_value / self.factor) if isinstance(self._attr_native_value, (int, float)) else 0
 
 
-class ZendureRestoreSensor(ZendureSensor, RestoreEntity):
+class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
+    ZendureSensor, RestoreEntity
+):
     """Representation of a Zendure sensor entity with restore."""
 
     def __init__(

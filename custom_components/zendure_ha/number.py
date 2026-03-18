@@ -24,7 +24,9 @@ async def async_setup_entry(
     ZendureNumber.add = async_add_entities
 
 
-class ZendureNumber(EntityZendure, NumberEntity):
+class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
+    EntityZendure, NumberEntity
+):
     add: AddEntitiesCallback
 
     def __init__(
@@ -111,7 +113,9 @@ class ZendureNumber(EntityZendure, NumberEntity):
         return int(self._attr_native_value) if isinstance(self._attr_native_value, (int, float)) else 0
 
 
-class ZendureRestoreNumber(ZendureNumber, RestoreEntity):
+class ZendureRestoreNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
+    ZendureNumber, RestoreEntity
+):
     """Representation of a Zendure number entity with restore."""
 
     def __init__(
