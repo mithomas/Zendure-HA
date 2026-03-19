@@ -162,6 +162,14 @@
           "1": "Auto-calibration"
         }
       },
+      "soc_limit": {
+        "name": "Limite du SOC",
+        "state": {
+          "0": "Normal",
+          "1": "Plein",
+          "2": "Vide"
+        }
+      },
       "hub_state": {
         "name": "État du hub",
         "state": {

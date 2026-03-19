@@ -177,11 +177,11 @@
         }
       },
       "soc_limit": {
-        "name": "SoC-Begrenzungsstatus",
+        "name": "SoC-Limit",
         "state": {
           "0": "Normal",
-          "1": "Begrenzt",
-          "2": "Voll"
+          "1": "Voll",
+          "2": "Leer"
         }
       },
       "hub_state": {

@@ -158,6 +158,14 @@
           "1": "Automatische kalibratie"
         }
       },
+      "soc_limit": {
+        "name": "SoC-limiet",
+        "state": {
+          "0": "Normaal",
+          "1": "Vol",
+          "2": "Leeg"
+        }
+      },
       "hub_state": {
         "name": "Hub Status"
       },
