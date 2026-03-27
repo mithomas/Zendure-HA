@@ -204,6 +204,12 @@
           "12": "Connected (zenSDK)"
         }
       },
+      "last_http_report": {
+        "name": "Last HTTP Report"
+      },
+      "last_mqtt_report": {
+        "name": "Last MQTT Report"
+      },
       "soh": {
         "name": "SoH"
       },

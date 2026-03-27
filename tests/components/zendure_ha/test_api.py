@@ -26,6 +26,7 @@ def test_zendure_topic_for_zensdk_device_is_ignored_without_warning(hass, caplog
         api.mqttMsgLocal(Mock(), None, msg)
 
     mock_add_job.assert_not_called()
+    assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
     assert "Unknown Zendure local MQTT message" not in caplog.text
 
 

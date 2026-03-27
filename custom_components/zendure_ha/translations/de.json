@@ -193,6 +193,12 @@
           "12": "Verbunden (zenSDK)"
         }
       },
+      "last_http_report": {
+        "name": "Letzter HTTP-Bericht"
+      },
+      "last_mqtt_report": {
+        "name": "Letzter MQTT-Bericht"
+      },
       "soh": {
         "name": "Gesundheitszustand"
       },

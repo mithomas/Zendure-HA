@@ -175,6 +175,12 @@
           "12": "Verbonden (zenSDK)"
         }
       },
+      "last_http_report": {
+        "name": "Laatste HTTP-rapport"
+      },
+      "last_mqtt_report": {
+        "name": "Laatste MQTT-rapport"
+      },
       "so_h": {
         "name": "Gezondheidsstatus"
       },

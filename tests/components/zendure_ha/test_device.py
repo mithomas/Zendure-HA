@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -10,6 +11,7 @@ from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
 from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SmartMode
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
+from custom_components.zendure_ha.sensor import ZendureSensor
 
 from .common import make_device
 
@@ -266,6 +268,113 @@ async def test_sf800_pro_power_bypass_sets_ac_input_mode(hass):
     mock_do_command.assert_awaited_once_with(
         {"properties": {"smartMode": 0, "acMode": 1, "outputLimit": 0, "inputLimit": 0}}
     )
+
+
+async def test_http_report_updates_last_http_report_only(hass):
+    """Applied HTTP reports should advance only the HTTP freshness sensor."""
+    device = make_device(hass)
+
+    assert getattr(device.lastHttpReport, "_attr_native_value", None) is None
+    assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
+
+    with patch.object(device, "register_pending_entities"):
+        await device.mqttProperties({"properties": {"hyperTmp": 2801}}, "http")
+
+    assert device.lastHttpReport._attr_native_value is not None
+    assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
+    assert float(cast("ZendureSensor", device.entities["hyperTmp"])._attr_native_value) == pytest.approx(7.0)
+
+
+async def test_empty_http_report_does_not_update_report_timestamps(hass):
+    """Empty or non-report HTTP payloads should not advance freshness sensors."""
+    device = make_device(hass)
+
+    await device.mqttProperties({}, "http")
+    await device.mqttProperties({"foo": "bar"}, "http")
+
+    assert getattr(device.lastHttpReport, "_attr_native_value", None) is None
+    assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
+
+
+async def test_mqtt_report_updates_last_mqtt_report_only(hass):
+    """Applied MQTT reports should advance only the MQTT freshness sensor."""
+    device = make_device(hass)
+
+    with patch.object(device, "register_pending_entities"):
+        await device.mqttProperties({"properties": {"hyperTmp": 2801}}, "mqtt")
+
+    assert getattr(device.lastHttpReport, "_attr_native_value", None) is None
+    assert device.lastMqttReport._attr_native_value is not None
+    assert float(cast("ZendureSensor", device.entities["hyperTmp"])._attr_native_value) == pytest.approx(7.0)
+
+
+async def test_http_pack_data_updates_last_http_report(hass):
+    """Battery-only HTTP reports should still advance HTTP freshness."""
+    device = make_device(hass)
+
+    with patch.object(device, "register_pending_entities"):
+        await device.mqttProperties({"packData": [{"sn": "C123456789", "state": 1}]}, "http")
+
+    assert device.lastHttpReport._attr_native_value is not None
+    assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
+    assert "C123456789" in device.batteries
+
+
+def test_local_mqtt_availability_message_does_not_update_last_mqtt_report(hass):
+    """Ignored local availability topics should not move MQTT freshness."""
+    device = cast(
+        "SolarFlow800Pro",
+        make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-local",
+            product_model="SolarFlow 800 Pro",
+        ),
+    )
+    device.connection.update_value(ConnectionMode.ZENSDK_WITH_LOCAL_MQTT)
+
+    device.handleLocalMqttMessage(Mock(), "sensor", "hyperTmp/availability", "online")
+
+    assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
+
+
+def test_local_mqtt_device_message_updates_last_mqtt_report(hass):
+    """Applied hybrid device MQTT updates should advance MQTT freshness."""
+    device = cast(
+        "SolarFlow800Pro",
+        make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-mqtt",
+            product_model="SolarFlow 800 Pro",
+        ),
+    )
+    device.connection.update_value(ConnectionMode.ZENSDK_WITH_LOCAL_MQTT)
+
+    with patch.object(device, "register_pending_entities"):
+        device.handleLocalMqttMessage(Mock(), "sensor", "hyperTmp", "7")
+
+    assert device.lastMqttReport._attr_native_value is not None
+    assert float(cast("ZendureSensor", device.entities["hyperTmp"])._attr_native_value) == pytest.approx(7.0)
+
+
+def test_local_mqtt_battery_message_updates_last_mqtt_report(hass):
+    """Applied hybrid battery MQTT updates should advance MQTT freshness."""
+    device = cast(
+        "SolarFlow800Pro",
+        make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-battery",
+            product_model="SolarFlow 800 Pro",
+        ),
+    )
+    device.connection.update_value(ConnectionMode.ZENSDK_WITH_LOCAL_MQTT)
+
+    with patch("custom_components.zendure_ha.entity.EntityDevice.register_pending_entities"):
+        device.handleLocalMqttBatteryMessage("C123456789", "state", "charging")
+
+    assert device.lastMqttReport._attr_native_value is not None
 
 
 class TestZenSdkDataRefresh:

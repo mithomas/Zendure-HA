@@ -9,7 +9,7 @@ import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from aiohttp import ClientTimeout, ServerDisconnectedError
 from bleak import BleakClient
@@ -206,6 +206,8 @@ class ZendureDevice(EntityDevice):
         self.bleAdapter: ZendureRestoreSelect | None = None
         self.remainingTime = ZendureSensor(self, "remainingTime", None, "h", "duration", "measurement")
         self.nextCalibration = ZendureRestoreSensor(self, "nextCalibration", None, None, "timestamp", None)
+        self.lastHttpReport = ZendureRestoreSensor(self, "lastHttpReport", None, None, "timestamp", None)
+        self.lastMqttReport = ZendureRestoreSensor(self, "lastMqttReport", None, None, "timestamp", None)
 
         self.aggrCharge = ZendureRestoreSensor(self, "aggrCharge", None, "kWh", "energy", "total_increasing", 2)
         self.aggrDischarge = ZendureRestoreSensor(self, "aggrDischarge", None, "kWh", "energy", "total_increasing", 2)
@@ -307,6 +309,22 @@ class ZendureDevice(EntityDevice):
             _LOGGER.error(traceback.format_exc())
 
         return changed
+
+    @staticmethod
+    def _report_has_device_data(payload: Any) -> bool:
+        """Return whether a report payload contains usable device data."""
+        if not isinstance(payload, dict):
+            return False
+        if properties := payload.get("properties"):
+            return len(properties) > 0
+        if pack_data := payload.get("packData"):
+            return len(pack_data) > 0
+        return False
+
+    def _mark_report_success(self, source: Literal["http", "mqtt"]) -> None:
+        """Record the last successfully applied report timestamp for a source."""
+        sensor = self.lastHttpReport if source == "http" else self.lastMqttReport
+        sensor.update_value(dt_util.utcnow())
 
     def update_available_kwh(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
         """Refresh the available energy sensor from the current discharge baseline."""
@@ -479,19 +497,21 @@ class ZendureDevice(EntityDevice):
         command["timestamp"] = int(datetime.now().timestamp())
         self.mqttPublish(self.topic_function, command)
 
-    async def mqttProperties(self, payload: Any) -> None:
-        if self.lastseen == datetime.min:
-            self.lastseen = datetime.now() + timedelta(minutes=5)
-            self.setStatus()
-        else:
-            self.lastseen = datetime.now() + timedelta(minutes=5)
+    async def mqttProperties(self, payload: Any, source: Literal["http", "mqtt"] | None = None) -> bool:
+        report_applied = self._report_has_device_data(payload)
 
-        if (properties := payload.get("properties", None)) and len(properties) > 0:
+        if report_applied:
+            was_offline = self.lastseen == datetime.min
+            self.lastseen = datetime.now() + timedelta(minutes=5)
+            if was_offline:
+                self.setStatus()
+
+        if isinstance(payload, dict) and (properties := payload.get("properties", None)) and len(properties) > 0:
             for key, value in properties.items():
                 self.entityUpdate(key, value)
 
         # update the battery properties
-        if batprops := payload.get("packData", None):
+        if isinstance(payload, dict) and (batprops := payload.get("packData", None)):
             for b in batprops:
                 if (sn := b.get("sn", None)) is None:
                     continue
@@ -510,11 +530,16 @@ class ZendureDevice(EntityDevice):
             self.totalKwh.update_value(self.kWh)
             self.refresh_discharge_state()
 
+        if report_applied and source is not None:
+            self._mark_report_success(source)
+
+        return report_applied
+
     def mqttMessage(self, topic: str, payload: Any) -> bool:
         try:
             match topic:
                 case "properties/report":
-                    asyncio.run_coroutine_threadsafe(self.mqttProperties(payload), self.hass.loop)
+                    asyncio.run_coroutine_threadsafe(self.mqttProperties(payload, "mqtt"), self.hass.loop)
 
                 case "register/replay":
                     _LOGGER.info("Register replay for %s => %s", self.name, payload)
@@ -947,9 +972,9 @@ class ZendureZenSdk(ZendureDevice):
         return await super().power_get()
 
     async def _refresh_http_report(self) -> bool:
-        """Fetch the latest HTTP report and apply it."""
+        """Fetch the latest HTTP report and apply it as an HTTP-sourced update."""
         json = await self.httpGet("properties/report")
-        return await self.mqttProperties(json)
+        return await self.mqttProperties(json, "http")
 
     async def charge(self, power: int, _off: bool = False) -> int:
         """Set charge power."""
@@ -1167,10 +1192,10 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
 
         await super().entityWrite(entity, value)
 
-    def localMqttMessage(self, entity_type: str, entity_name: str, value: str) -> bool:
+    def localMqttMessage(self, entity_type: str, entity_name: str, value: str) -> tuple[bool, bool]:
         try:
             if entity_name.endswith(("/availability", "/set")):
-                return True
+                return True, False
 
             parsed_value = self._parse_mqtt_value(entity_type, value)
             if entity_name in {"socStatus", "socState", "packState"} and isinstance(parsed_value, str):
@@ -1199,20 +1224,23 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
                 value,
                 e,
             )
-            return False
+            return False, False
         else:
-            return True
+            return True, True
 
     def handleLocalMqttMessage(self, client: Any, entity_type: str, entity_name: str, value: str) -> None:
         """Handle local MQTT entity updates on Home Assistant loop."""
-        if self.localMqttMessage(entity_type, entity_name, value) and self.mqtt != client:
+        handled, report_applied = self.localMqttMessage(entity_type, entity_name, value)
+        if report_applied:
+            self._mark_report_success("mqtt")
+        if handled and self.mqtt != client:
             self.mqtt = client
             self.setStatus()
 
     def localMqttBatteryMessage(self, battery_id: str, entity_name: str, value: str) -> bool:
         try:
             if entity_name.endswith(("/availability", "/set")):
-                return True
+                return False
 
             actual_entity_name = entity_name
             if entity_name.startswith(f"{battery_id}_"):
@@ -1247,7 +1275,8 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
 
     def handleLocalMqttBatteryMessage(self, battery_id: str, entity_name: str, value: str) -> None:
         """Handle local MQTT battery updates on Home Assistant loop."""
-        self.localMqttBatteryMessage(battery_id, entity_name, value)
+        if self.localMqttBatteryMessage(battery_id, entity_name, value):
+            self._mark_report_success("mqtt")
 
     def _parse_mqtt_value(self, entity_type: str, value: str) -> Any:
         if entity_type == "switch":
