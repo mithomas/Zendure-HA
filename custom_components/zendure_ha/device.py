@@ -786,16 +786,19 @@ class ZendureZenSdk(ZendureDevice):
 
     async def dataRefresh(self, update_count: int) -> None:
         if update_count == 0 and not self.online:
-            json = await self.httpGet("properties/report")
-            await self.mqttProperties(json)
+            await self._refresh_http_report()
 
     async def power_get(self) -> bool:
         """Get the current power."""
         if self.connection.value != ConnectionMode.CLOUD:
-            json = await self.httpGet("properties/report")
-            await self.mqttProperties(json)
+            await self._refresh_http_report()
 
         return await super().power_get()
+
+    async def _refresh_http_report(self) -> bool:
+        """Fetch the latest HTTP report and apply it."""
+        json = await self.httpGet("properties/report")
+        return await self.mqttProperties(json)
 
     async def charge(self, power: int, _off: bool = False) -> int:
         """Set charge power."""
