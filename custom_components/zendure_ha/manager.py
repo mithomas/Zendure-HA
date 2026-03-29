@@ -412,6 +412,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # Check for fast delay
         if time < self.zero_fast:
+            _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
             self.p1_history.append(p1)
             return
 
@@ -452,10 +453,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             except Exception as err:
                 _LOGGER.error(err)
                 _LOGGER.error(traceback.format_exc())
-
-            time = datetime.now()
-            self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
-            self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+            finally:
+                time = datetime.now()
+                self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
+                self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
