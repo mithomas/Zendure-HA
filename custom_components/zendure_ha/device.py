@@ -86,7 +86,7 @@ class ZendureBattery(EntityDevice):
     def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice) -> None:
         """Initialize Device."""
         name, model, self.kWh = ZendureBattery.get_battery_type(sn)
-        super().__init__(hass, sn, name, model, "", sn, parent.sn)
+        super().__init__(hass, sn, name, model, "", sn, parent.deviceId)
         self.attr_device_info["serial_number"] = sn
 
 

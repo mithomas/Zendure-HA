@@ -1,6 +1,7 @@
 """Migration helpers for Zendure integration."""
 
 import logging
+from functools import partial
 from pathlib import Path
 
 from homeassistant.components.persistent_notification import async_create
@@ -8,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import restore_state as rs
+from homeassistant.helpers.event import async_call_later
 
 from .const import DOMAIN
 from .device import ZendureBattery
@@ -48,9 +50,40 @@ class Migration:
         if not existing:
             return
 
-        if name != existing.name and existing.name_by_user is None:
-            _LOGGER.info("Device '%s' renamed to '%s' in cloud, storing for next migration", existing.name, name)
-            device_registry.async_update_device(existing.id, name_by_user=name)
+        # check for wrong identifier
+        if next(iter(existing.identifiers))[1] != device_id:
+            _LOGGER.warning("Migrating device '%s' -> name='%s' id='%s'", existing.name, name, device_id)
+            device_registry.async_update_device(existing.id, new_identifiers={(DOMAIN, device_id)})
+
+        # Reconcile orphaned recorder states_meta rows on every startup
+        entity_registry = er.async_get(hass)
+        device_entities = er.async_entries_for_device(entity_registry, existing.id, True)
+        old_prefix = snakecase(model.lower()) if model else ""
+        short_model = model.replace(" ", "").replace("SolarFlow", "Sf") if model else ""
+        sn_suffix = sn[-3:] if sn else ""
+        new_prefix_base = f"{short_model.lower()} {sn_suffix}".strip()
+        new_prefix = snakecase(new_prefix_base) if new_prefix_base else ""
+        if old_prefix and new_prefix and old_prefix != new_prefix:
+            changes_recorder: list[tuple[str, str]] = []
+            for entity in device_entities:
+                if entity.translation_key is None:
+                    continue
+                uniqueid = snakecase(entity.translation_key)
+                if uniqueid.startswith("aggr") and uniqueid.endswith("total"):
+                    uniqueid = uniqueid.replace("_total", "")
+                old_id = f"{entity.domain}.{snakecase(f'{old_prefix}_{uniqueid}')}"
+                new_id = entity.entity_id
+                if old_id != new_id:
+                    changes_recorder.append((old_id, new_id))
+            if changes_recorder:
+                async_call_later(
+                    hass, 5, partial(Migration._reconcile_recorder, hass, changes_recorder)
+                )
+
+        if name != existing.name:
+            _LOGGER.warning("Migrating device '%s' -> name='%s' id='%s'", existing.name, name, device_id)
+            device_registry.async_update_device(existing.id, name=name, name_by_user=None)
+
 
     @staticmethod
     def _update_files(hass: HomeAssistant, changes: list[tuple[str, str]]) -> bool:
@@ -118,6 +151,12 @@ class Migration:
                     _LOGGER.info("Promoting device name '%s' -> '%s'", device.name, name)
                     device_registry.async_update_device(device.id, name=name, name_by_user=None)
 
+                short_model = device.model.replace(" ", "").replace("SolarFlow", "Sf") if device.model else ""
+                sn = device.serial_number or ""
+                sn_suffix = sn[-3:] if sn else ""
+                prefix_base = f"{short_model.lower()} {sn_suffix}".strip()
+                entity_prefix = snakecase(prefix_base) if prefix_base else snakecase(name)
+
                 for entity in entities:
                     try:
                         # rename only entities which belong to the zendure_ha domain
@@ -138,7 +177,7 @@ class Migration:
 
                             if uniqueid.startswith("aggr") and uniqueid.endswith("total"):
                                 uniqueid = uniqueid.replace("_total", "")
-                            unique_id = snakecase(f"{name.lower()}_{uniqueid}")
+                            unique_id = snakecase(f"{entity_prefix}_{uniqueid}")
                             entityid = f"{entity.domain}.{unique_id}"
 
                             if (
@@ -208,3 +247,67 @@ class Migration:
                 notification_id="zendure_migration",
             )
         _LOGGER.info("Zendure async_migrate complete: %d entity changes", len(changes))
+
+    @staticmethod
+    async def _reconcile_recorder(
+        hass: HomeAssistant, changes: list[tuple[str, str]], _now: object | None = None
+    ) -> None:
+        """Merge orphaned states_meta rows into current entity IDs."""
+
+        def _do_reconcile() -> None:
+            try:
+                from homeassistant.components.recorder import get_instance
+                from sqlalchemy import text
+
+                recorder = get_instance(hass)
+                with recorder.engine.connect() as conn:
+                    for old_id, new_id in changes:
+                        old_row = conn.execute(
+                            text("SELECT metadata_id FROM states_meta WHERE entity_id = :eid"),
+                            {"eid": old_id},
+                        ).fetchone()
+                        if not old_row:
+                            continue
+
+                        new_row = conn.execute(
+                            text("SELECT metadata_id FROM states_meta WHERE entity_id = :eid"),
+                            {"eid": new_id},
+                        ).fetchone()
+                        if new_row:
+                            conn.execute(
+                                text("UPDATE states_meta SET entity_id = :back WHERE metadata_id = :mid"),
+                                {"back": new_id + "_back", "mid": new_row[0]},
+                            )
+                        conn.execute(
+                            text("UPDATE states_meta SET entity_id = :new WHERE metadata_id = :mid"),
+                            {"new": new_id, "mid": old_row[0]},
+                        )
+                        _LOGGER.info("Reconciled states_meta '%s' -> '%s'", old_id, new_id)
+
+                        old_stat = conn.execute(
+                            text("SELECT id FROM statistics_meta WHERE statistic_id = :sid"),
+                            {"sid": old_id},
+                        ).fetchone()
+                        if not old_stat:
+                            continue
+
+                        new_stat = conn.execute(
+                            text("SELECT id FROM statistics_meta WHERE statistic_id = :sid"),
+                            {"sid": new_id},
+                        ).fetchone()
+                        if new_stat:
+                            conn.execute(
+                                text("UPDATE statistics_meta SET statistic_id = :back WHERE id = :mid"),
+                                {"back": new_id + "_back", "mid": new_stat[0]},
+                            )
+                        conn.execute(
+                            text("UPDATE statistics_meta SET statistic_id = :new WHERE id = :mid"),
+                            {"new": new_id, "mid": old_stat[0]},
+                        )
+                        _LOGGER.info("Reconciled statistics_meta '%s' -> '%s'", old_id, new_id)
+
+                    conn.commit()
+            except Exception as e:
+                _LOGGER.error("Error reconciling recorder metadata: %s", e)
+
+        await hass.async_add_executor_job(_do_reconcile)

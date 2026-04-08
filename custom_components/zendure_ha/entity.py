@@ -60,7 +60,7 @@ class EntityZendure(Entity):
             return
         self.device = device
         self.propertyName = uniqueid
-        self._attr_unique_id = snakecase(f"{self.device.name.lower()}_{uniqueid}")
+        self._attr_unique_id = snakecase(f"{self.device.entity_prefix}_{uniqueid}")
         self.internal_integration_suggested_object_id = self._attr_unique_id
         self._attr_translation_key = snakecase(uniqueid)
         device.entities[uniqueid] = self
@@ -244,7 +244,10 @@ class EntityDevice:
         self.entities: dict[str, EntityZendure] = {}
         self.sn = sn
         self._pending_entities: list[EntityZendure] = []
-
+        short_model = model.replace(" ", "").replace("SolarFlow", "Sf") if model else ""
+        sn_suffix = sn[-3:] if sn else ""
+        prefix_base = f"{short_model.lower()} {sn_suffix}".strip()
+        self.entity_prefix = snakecase(prefix_base) if prefix_base else snakecase(self.name)
         Migration.check_device(self.hass, deviceId, self.name, model, sn)
         self.attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, deviceId)} | {(DOMAIN, sn)},
@@ -257,9 +260,12 @@ class EntityDevice:
         if parent is None:
             self.attr_device_info["hw_version"] = deviceId
         device_registry = dr.async_get(self.hass)
-        if di := device_registry.async_get_device(identifiers={(DOMAIN, sn)}):
+        di = device_registry.async_get_device(identifiers={(DOMAIN, sn)})
+        if di is None:
+            di = device_registry.async_get_device(identifiers={(DOMAIN, deviceId)})
+        if di is not None:
             self.attr_device_info["connections"] = di.connections
-            self.check_entities(di, snakecase(self.name.lower()))
+            self.check_entities(di, self.entity_prefix)
 
         if parent is not None:
             self.attr_device_info["via_device"] = (DOMAIN, parent)
