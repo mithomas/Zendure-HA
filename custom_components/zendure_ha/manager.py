@@ -134,7 +134,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     continue
 
                 # create the device and mqtt server
-                device = init(self.hass, deviceId, dev.get("deviceName", prodModel), dev)
+                prodName = dev.get("deviceName") or prodModel
+                device = init(self.hass, deviceId, prodName, dev)
                 device.discharge_start = device.discharge_limit // 10
                 device.discharge_optimal = device.discharge_limit // 4
                 Api.devices[deviceId] = device

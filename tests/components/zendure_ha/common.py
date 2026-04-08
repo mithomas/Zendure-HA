@@ -85,7 +85,7 @@ def make_device(
         "custom_components.zendure_ha.device.async_get_clientsession",
         return_value=Mock(),
     ):
-        device = device_cls(hass, device_id, product_model, definition)
+        device = device_cls(hass, device_id, device_name, definition)
     device.fuseGroup.update_value(1)
     device.fuseGrp = FuseGroup(
         device.name,
