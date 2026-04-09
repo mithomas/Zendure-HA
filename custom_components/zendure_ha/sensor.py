@@ -137,9 +137,39 @@ class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverrid
                 if self.device_class in ["date", "timestamp"]
                 else float(state.state)
             )
+            if state is not None and (lr := state.attributes.get("last_reset")):
+                self._attr_last_reset = parse_datetime(lr)
             _LOGGER.debug("Restored state for %s: %s", self.entity_id, self._attr_native_value)
         except ValueError:
             self._attr_native_value = init_value
+
+        # Fall back to recorder statistics for aggregation sensors with missing/zero restore
+        if self._attr_native_value in (0.0, 0, None) and self.state_class in ("total", "total_increasing"):
+            recovered = await self._recover_from_statistics()
+            if recovered is not None:
+                self._attr_native_value = recovered
+                _LOGGER.info("Recovered %s from statistics: %s", self.entity_id, recovered)
+
+    async def _recover_from_statistics(self) -> float | None:
+        """Try to recover value from recorder statistics."""
+        try:
+            from homeassistant.components.recorder.statistics import (
+                get_last_short_term_statistics,
+                get_last_statistics,
+            )
+
+            for getter in (get_last_short_term_statistics, get_last_statistics):
+                stats = await self.hass.async_add_executor_job(
+                    getter, self.hass, 1, self.entity_id, True, {"sum", "state"}
+                )
+                if stats and self.entity_id in stats:
+                    row = stats[self.entity_id][0]
+                    value = row.get("sum") or row.get("state")
+                    if value is not None and value != 0:
+                        return float(value)
+        except Exception as e:
+            _LOGGER.debug("Could not recover from statistics for %s: %s", self.entity_id, e)
+        return None
 
     def aggregate(self, time: datetime, value: Any) -> None:
         # Get the kWh value from the last value and the time since the last update
