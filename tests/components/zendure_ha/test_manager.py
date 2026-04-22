@@ -3442,6 +3442,54 @@ class TestSmartMatchingPrimaryAware:
         first.power_charge.assert_not_awaited()
         second.power_charge.assert_awaited_once_with(-300)
 
+    async def test_routes_surplus_from_a_full_primary_to_the_secondary_during_charge_holdoff(self, hass):
+        """A full selected primary should still hand surplus to a secondary in the same cycle while charge holdoff is active."""
+        first = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-first-solar-surplus-holdoff",
+            device_name="sf800 pro first solar surplus holdoff",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=200,
+            battery_input=300,
+        )
+        second = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-second-solar-surplus-holdoff",
+            device_name="sf800 pro second solar surplus holdoff",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        manager = make_manager(
+            hass,
+            devices=(first, second),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=first.deviceId,
+        )
+        first.power_get = AsyncMock(return_value=True)
+        second.power_get = AsyncMock(return_value=True)
+        first.power_bypass = AsyncMock(return_value=0)
+        first.power_charge = AsyncMock(side_effect=lambda power: power)
+        second.power_charge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(0, False, datetime.now())
+
+        assert first.state is DeviceState.SOCFULL
+        first.power_bypass.assert_awaited_once()
+        first.power_charge.assert_not_awaited()
+        second.power_charge.assert_awaited_once_with(-300)
+
     async def test_charges_the_secondary_only_with_true_net_surplus_when_both_devices_have_solar(self, hass):
         """
         When both devices have solar, charging should use only the true net surplus after local demand is covered.
@@ -3492,6 +3540,54 @@ class TestSmartMatchingPrimaryAware:
 
         await manager.powerChanged(0, False, datetime.now())
 
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-400)
+
+    async def test_charges_the_secondary_only_with_true_net_surplus_during_charge_holdoff(self, hass):
+        """A full selected primary should preserve true net surplus for the secondary even before charge holdoff expires."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-both-solar-holdoff",
+            device_name="sf800 pro primary both solar holdoff",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=200,
+            battery_input=300,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-both-solar-holdoff",
+            device_name="sf800 pro secondary both solar holdoff",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            battery_input=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_bypass = AsyncMock(return_value=0)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(0, False, datetime.now())
+
+        primary.power_bypass.assert_awaited_once()
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-400)
 

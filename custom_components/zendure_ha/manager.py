@@ -1371,6 +1371,44 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if device in self.charge and device.homeOutput.asInt > 0 and routing.charge_surplus(device) > 0
         ]
         idle_secondary_surplus_devices = [device for device in idle_devices if routing.charge_surplus(device) > 0]
+        cross_group_charge_devices: list[ZendureDevice] = []
+        cross_group_active_secondary_charge_devices: list[ZendureDevice] = []
+        cross_group_idle_secondary_surplus_devices: list[ZendureDevice] = []
+        full_primary_bypass_handoff_promotions: list[ZendureDevice] = []
+        if selected_primary is not None:
+            cross_group_charge_devices = [
+                device for device in charge_devices if device.fuseGrp is not selected_primary.fuseGrp
+            ]
+            cross_group_active_secondary_charge_devices = [
+                device for device in active_secondary_charge_devices if device.fuseGrp is not selected_primary.fuseGrp
+            ]
+            cross_group_idle_secondary_surplus_devices = [
+                device for device in idle_secondary_surplus_devices if device.fuseGrp is not selected_primary.fuseGrp
+            ]
+            full_primary_bypass_handoff_promotions = [
+                device
+                for device in idle_devices
+                if (
+                    device.fuseGrp is not selected_primary.fuseGrp
+                    and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
+                )
+            ]
+        full_primary_bypass_handoff = (
+            requested_setpoint < -SmartMode.POWER_START
+            and self.charge_time > time
+            and selected_primary is not None
+            and selected_primary.online
+            and selected_primary in self.discharge
+            and selected_primary.state == DeviceState.SOCFULL
+            and selected_primary.can_bypass
+            and primary is None
+            and bool(
+                cross_group_charge_devices
+                or cross_group_active_secondary_charge_devices
+                or cross_group_idle_secondary_surplus_devices
+                or full_primary_bypass_handoff_promotions
+            )
+        )
         primary_local_surplus = routing.charge_surplus(primary) if primary is not None else 0
         move_primary_charge_to_secondary = (
             primary is not None
@@ -1386,6 +1424,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if move_primary_charge_to_secondary and self.charge_time > time:
             setpoint = requested_setpoint
             self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
+        if full_primary_bypass_handoff:
+            setpoint = requested_setpoint
+            self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
+            charge_devices.extend(full_primary_bypass_handoff_promotions)
+            idle_devices = [device for device in idle_devices if device not in full_primary_bypass_handoff_promotions]
+            idle_secondary_surplus_devices = [
+                device
+                for device in idle_secondary_surplus_devices
+                if device not in full_primary_bypass_handoff_promotions
+            ]
 
         surplus_floor_devices = [*active_secondary_charge_devices, *charge_devices, *idle_secondary_surplus_devices]
         charge_targets, setpoint = self._allocate_capped_targets(
