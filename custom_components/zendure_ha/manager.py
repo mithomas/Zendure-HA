@@ -17,7 +17,7 @@ from typing import Any
 
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.auth.providers import homeassistant as auth_ha
-from homeassistant.components import bluetooth, persistent_notification
+from homeassistant.components import bluetooth
 from homeassistant.components.number import NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant
@@ -512,9 +512,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if self.p1meterEvent is not None:
             if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
                 _LOGGER.warning("No devices online, not possible to start the operation")
-                persistent_notification.async_create(
-                    self.hass, "No devices online, not possible to start the operation", "Zendure", "zendure_ha"
-                )
                 return
 
             match self.operation:

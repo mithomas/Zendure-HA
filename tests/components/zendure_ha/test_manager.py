@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
@@ -68,6 +69,37 @@ class TestAvailableKwh:
         manager.discharge_recovery_margin._attr_native_value = 0
         manager._refresh_discharge_recovery_margin(None, None)
         assert manager.availableKwh.asNumber == pytest.approx(0.04)
+
+
+class TestUpdateOperation:
+    @pytest.mark.parametrize("offline_only", [False, True], ids=["no-devices", "offline-devices"])
+    async def test_does_not_create_a_notification_when_no_devices_are_available(self, hass, caplog, offline_only):
+        """Starting manager operation without available devices should only log a warning."""
+        devices = ()
+        device = None
+        power_off_mock = None
+        if offline_only:
+            device = make_device(hass, device_id="offline-device", device_name="offline device", level=50)
+            device.connectionStatus.update_value(0)
+            power_off_mock = AsyncMock()
+            device.power_off = power_off_mock
+            devices = (device,)
+
+        manager = make_manager(hass, devices=devices)
+        manager.p1meterEvent = Mock()
+        operation_entity = Mock(value=ManagerMode.MATCHING.value)
+
+        with (
+            patch("homeassistant.components.persistent_notification.async_create") as mock_notify,
+            caplog.at_level(logging.WARNING),
+        ):
+            await manager.update_operation(operation_entity, ManagerMode.MATCHING.value)
+
+        mock_notify.assert_not_called()
+        assert "No devices online, not possible to start the operation" in caplog.text
+        assert manager.operation == ManagerMode.MATCHING
+        if power_off_mock is not None:
+            power_off_mock.assert_not_awaited()
 
 
 class TestSmartMatchingPrimaryAware:
