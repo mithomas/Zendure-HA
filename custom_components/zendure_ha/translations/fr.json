@@ -76,6 +76,9 @@
       "wifi_state": {
         "name": "État du Wi-Fi"
       },
+      "pass": {
+        "name": "Dérivation ( bypass )"
+      },
       "heat_state": {
         "name": "chauffage de batterie"
       },

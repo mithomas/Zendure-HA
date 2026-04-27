@@ -60,6 +60,9 @@
       "wifi_state": {
         "name": "WLAN-Status"
       },
+      "pass": {
+        "name": "Bypass"
+      },
       "heat_state": {
         "name": "Batterieheizung"
       },

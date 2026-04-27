@@ -32,11 +32,12 @@ class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride
         uniqueid: str,
         template: Template | None = None,
         deviceclass: Any | None = None,
+        initial_state: bool = False,
     ) -> None:
         """Initialize a binary sensor entity."""
         super().__init__(device, uniqueid, "binary_sensor")
         self.entity_description = BinarySensorEntityDescription(key=uniqueid, name=uniqueid, device_class=deviceclass)
-        self._attr_is_on = False
+        self._attr_is_on = initial_state
         self._value_template: Template | None = template
 
     def update_value(self, value: Any) -> bool:

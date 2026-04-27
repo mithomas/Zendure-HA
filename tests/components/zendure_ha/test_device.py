@@ -4,11 +4,24 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
 from custom_components.zendure_ha.const import ConnectionMode
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 
 from .common import make_device
+
+
+def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
+    """Bypass should expose the binary-sensor API expected by manager routing."""
+    device = make_device(hass)
+
+    assert isinstance(device.byPass, ZendureBinarySensor)
+    assert device.byPass.is_on is False
+
+    device.byPass.update_value(1)
+
+    assert device.byPass.is_on is True
 
 
 class TestZenSdkDataRefresh:
