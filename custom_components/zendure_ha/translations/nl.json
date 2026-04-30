@@ -115,6 +115,9 @@
       "available_kwh": {
         "name": "Beschikbare Energie"
       },
+      "total_available_kwh": {
+        "name": "Totale Beschikbare Energie"
+      },
       "auto_model": {
         "name": "Batterijprogramma",
         "state": {

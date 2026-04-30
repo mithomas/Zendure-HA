@@ -118,6 +118,9 @@
       "available_kwh": {
         "name": "Verfügbare Energie"
       },
+      "total_available_kwh": {
+        "name": "Gesamte verfügbare Energie"
+      },
       "total_kwh": {
         "name": "Gesamtkapazität Batterie"
       },

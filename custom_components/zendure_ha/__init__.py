@@ -83,7 +83,7 @@ async def async_remove_config_entry_device(
     for d in manager.devices:
         if d.name == device_entry.name:
             manager.devices.remove(d)
-            manager.refresh_available_kwh()
+            manager.refresh_energy_kwh()
             return True
 
         if (

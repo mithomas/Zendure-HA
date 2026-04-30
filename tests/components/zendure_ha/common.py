@@ -176,6 +176,7 @@ def make_manager(
         True,
     )
     manager.availableKwh = ZendureSensor(manager, "available_kwh", None, "kWh", "energy", None, 1)
+    manager.totalAvailableKwh = ZendureSensor(manager, "total_available_kwh", None, "kWh", "energy", None, 1)
     manager.totalKwh = ZendureSensor(manager, "total_kwh", None, "kWh", "energy", None, 2)
     manager.power = ZendureSensor(manager, "power", None, "W", "power", "measurement", 0)
     manager.operation = operation
@@ -205,113 +206,6 @@ def attach_devices(manager: ZendureManager, *devices: ZendureDevice) -> None:
         {id(device.fuseGrp): device.fuseGrp for device in devices if hasattr(device, "fuseGrp")}.values()
     )
     for device in devices:
-        device.on_available_kwh_changed = manager.refresh_available_kwh
+        device.on_available_kwh_changed = manager.refresh_energy_kwh
     manager.refresh_primary_device_options()
-    manager.refresh_available_kwh()
-
-
-@dataclass
-class StubValue:
-    """Simple numeric wrapper matching the integration sensor API."""
-
-    value: int | float = 0
-
-    @property
-    def asInt(self) -> int:
-        return int(self.value)
-
-    @property
-    def asNumber(self) -> int | float:
-        return self.value
-
-
-@dataclass
-class StubFuseGroup:
-    """Simple fuse-group model for manager tests."""
-
-    maxpower: int
-    minpower: int
-    discharge_limit_value: int
-    charge_limit_value: int
-    devices: list[Any] = field(default_factory=list)
-    initPower: bool = False
-
-    def discharge_limit(self, _device: Any) -> int:
-        return self.discharge_limit_value
-
-    def charge_limit(self, _device: Any) -> int:
-        return self.charge_limit_value
-
-
-@dataclass(eq=False)
-class StubDevice:
-    """Small device double for manager allocation tests."""
-
-    name: str
-    deviceId: str
-    state: DeviceState = DeviceState.INACTIVE
-    level: int = 50
-    online: bool = True
-    blocked: bool = False
-    floor: float = 10.0
-    discharge_limit: int = 800
-    charge_limit: int = -1000
-    discharge_optimal: int = 200
-    discharge_start: int = 50
-    charge_optimal: int = 200
-    charge_start: int = 50
-    pwr_max: int = 800
-    home_input: int = 0
-    home_output: int = 0
-    battery_input: int = 0
-    battery_output: int = 0
-    pwr_produced: int = 0
-    pwr_offgrid_value: int = 0
-    actualKwh: float = 0.0
-    bypass_capable: bool = False
-    fuse_discharge_limit: int | None = None
-    fuse_charge_limit: int | None = None
-    power_discharge_mock: AsyncMock = field(default_factory=AsyncMock, repr=False)
-    power_charge_mock: AsyncMock = field(default_factory=AsyncMock, repr=False)
-    power_bypass_mock: AsyncMock = field(default_factory=AsyncMock, repr=False)
-
-    def __post_init__(self) -> None:
-        """Initialize stub values."""
-        self.electricLevel = StubValue(self.level)
-        self.homeInput = StubValue(self.home_input)
-        self.homeOutput = StubValue(self.home_output)
-        self.batteryInput = StubValue(self.battery_input)
-        self.batteryOutput = StubValue(self.battery_output)
-        self.fuseGrp = StubFuseGroup(
-            maxpower=self.fuse_discharge_limit or self.discharge_limit,
-            minpower=self.fuse_charge_limit or self.charge_limit,
-            discharge_limit_value=self.fuse_discharge_limit or self.discharge_limit,
-            charge_limit_value=self.fuse_charge_limit or self.charge_limit,
-            devices=[self],
-        )
-
-    @property
-    def can_bypass(self) -> bool:
-        return self.bypass_capable and self.state == DeviceState.SOCFULL
-
-    @property
-    def pwr_offgrid(self) -> int:
-        return self.pwr_offgrid_value
-
-    def is_discharge_blocked(self, *_args: Any, **_kwargs: Any) -> bool:
-        return self.blocked
-
-    def discharge_floor_soc(self, *_args: Any, **_kwargs: Any) -> float:
-        return self.floor
-
-    async def power_discharge(self, power: int) -> int:
-        await self.power_discharge_mock(power)
-        return power
-
-    async def power_charge(self, power: int) -> int:
-        await self.power_charge_mock(power)
-        return power
-
-    async def power_bypass(self) -> int:
-        await self.power_bypass_mock()
-        return 0
+    manager.refresh_energy_kwh()

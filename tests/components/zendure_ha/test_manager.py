@@ -33,12 +33,15 @@ class TestAvailableKwh:
         attach_devices(manager, first, second)
 
         assert manager.availableKwh.asNumber == pytest.approx(0.6)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.6)
 
         second.entityUpdate("socReserve", 25)
         assert manager.availableKwh.asNumber == pytest.approx(0.3)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.3)
 
         second.entityUpdate("electricLevel", 25)
         assert manager.availableKwh.asNumber == pytest.approx(0.2)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.2)
 
     def test_refresh_available_kwh_updates_when_capacity_changes(self, hass):
         """A single 30% device should double aggregate available kWh when total capacity doubles from 2 to 4 kWh."""
@@ -47,28 +50,95 @@ class TestAvailableKwh:
         attach_devices(manager, device)
 
         assert manager.availableKwh.asNumber == pytest.approx(0.4)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.4)
 
         device.kWh = 4.0
         device.totalKwh.update_value(4.0)
         device.refresh_discharge_state()
 
         assert manager.availableKwh.asNumber == pytest.approx(0.8)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.8)
 
     def test_refresh_available_kwh_updates_when_discharge_recovery_margin_changes(self, hass):
-        """A 12% device with a 10% floor should move in and out of recovery when manager margin toggles between 0% and 5%."""
+        """A 12% device with a 10% floor should move in and out of recovery as the margin changes."""
         manager = make_manager(hass)
         device = make_device(hass, level=12, min_soc=10, reserve=10, kwh=2.0)
         attach_devices(manager, device)
 
         assert manager.availableKwh.asNumber == pytest.approx(0.04)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.04)
 
         manager.discharge_recovery_margin._attr_native_value = 5
         manager._refresh_discharge_recovery_margin(None, None)
-        assert manager.availableKwh.asNumber == pytest.approx(-0.06)
+        assert device.actualKwh == pytest.approx(-0.06)
+        assert device.state is DeviceState.RESERVE_RECOVERY
+        assert manager.availableKwh.asNumber == pytest.approx(0)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0)
 
         manager.discharge_recovery_margin._attr_native_value = 0
         manager._refresh_discharge_recovery_margin(None, None)
         assert manager.availableKwh.asNumber == pytest.approx(0.04)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.04)
+
+    def test_refresh_available_kwh_clamps_negative_device_contributions(self, hass):
+        """Manager aggregates should count any negative per-device available energy as zero."""
+        manager = make_manager(hass)
+        charged = make_device(hass, device_id="charged-device", level=20, min_soc=10, reserve=10, kwh=2.0)
+        empty = make_device(hass, device_id="empty-device", level=5, min_soc=10, reserve=10, kwh=2.0)
+        high_reserve = make_device(hass, device_id="high-reserve-device", level=20, min_soc=10, reserve=30, kwh=2.0)
+        attach_devices(manager, charged, empty, high_reserve)
+
+        assert charged.actualKwh == pytest.approx(0.2)
+        assert empty.actualKwh < 0
+        assert high_reserve.actualKwh < 0
+        assert manager.availableKwh.asNumber == pytest.approx(0.2)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.2)
+
+    def test_total_available_kwh_clamps_negative_offline_device_contributions(self, hass):
+        """Stable aggregate should keep positive offline energy but not subtract negative offline energy."""
+        manager = make_manager(hass)
+        positive = make_device(hass, device_id="positive-offline-device", level=20, min_soc=10, reserve=10, kwh=2.0)
+        negative = make_device(hass, device_id="negative-offline-device", level=5, min_soc=10, reserve=10, kwh=2.0)
+        attach_devices(manager, positive, negative)
+
+        positive.lastseen = datetime.min
+        positive.setStatus()
+        positive.update_device_state()
+        negative.lastseen = datetime.min
+        negative.setStatus()
+        negative.update_device_state()
+        manager.refresh_energy_kwh()
+
+        assert positive.actualKwh == pytest.approx(0.2)
+        assert negative.actualKwh < 0
+        assert manager.availableKwh.asNumber == pytest.approx(0)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.2)
+
+    def test_total_available_kwh_keeps_offline_devices_included(self, hass):
+        """Stable aggregate should keep the last energy of devices that temporarily go offline."""
+        manager = make_manager(hass)
+        first = make_device(hass, device_id="device-1", level=20, min_soc=10, reserve=10, kwh=2.0)
+        second = make_device(hass, device_id="device-2", level=30, min_soc=10, reserve=10, kwh=2.0)
+        attach_devices(manager, first, second)
+
+        second.lastseen = datetime.min
+        second.setStatus()
+        second.update_device_state()
+        manager.refresh_energy_kwh()
+
+        assert manager.availableKwh.asNumber == pytest.approx(0.2)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.6)
+
+    def test_total_available_kwh_ignores_unused_fusegroup_setting(self, hass):
+        """Stable aggregate should include devices even when their fusegroup select is set to unused."""
+        manager = make_manager(hass)
+        first = make_device(hass, device_id="device-1", level=20, min_soc=10, reserve=10, kwh=2.0)
+        second = make_device(hass, device_id="device-2", level=30, min_soc=10, reserve=10, kwh=2.0)
+        second.fuseGroup.update_value(0)
+        attach_devices(manager, first, second)
+
+        assert manager.availableKwh.asNumber == pytest.approx(0.6)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.6)
 
 
 class TestUpdateOperation:

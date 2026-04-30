@@ -129,6 +129,9 @@
       "available_kwh": {
         "name": "Available Energy"
       },
+      "total_available_kwh": {
+        "name": "Total Available Energy"
+      },
       "total_kwh": {
         "name": "Total Battery Capacity"
       },

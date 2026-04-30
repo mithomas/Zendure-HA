@@ -335,6 +335,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             True,
         )
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
+        self.totalAvailableKwh = ZendureSensor(self, "total_available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", None, 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
 
@@ -388,9 +389,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.devices = list(Api.devices.values())
         for device in self.devices:
-            device.on_available_kwh_changed = self.refresh_available_kwh
+            device.on_available_kwh_changed = self.refresh_energy_kwh
         self._refresh_discharge_recovery_margin(None, None)
-        self.refresh_available_kwh()
+        self.refresh_energy_kwh()
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
         # initialize the api & p1 meter
@@ -590,13 +591,29 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         margin = max(0, self.discharge_recovery_margin.asNumber)
         for device in getattr(self, "devices", []):
             device.set_discharge_recovery_margin(margin)
+        self.refresh_energy_kwh()
+
+    def refresh_energy_kwh(self) -> None:
+        """Refresh all manager energy aggregates derived from device availability."""
         self.refresh_available_kwh()
+        self.refresh_total_available_kwh()
+
+    @staticmethod
+    def _available_device_kwh(device: ZendureDevice) -> float:
+        """Return the non-negative available energy contribution for manager aggregates."""
+        if device.state in LOW_SOC_STATES:
+            return 0
+        return max(0, device.actualKwh)
 
     def refresh_available_kwh(self) -> None:
         """Refresh the manager aggregate for currently online device energy."""
         self.availableKwh.update_value(
-            sum(max(0, device.actualKwh) for device in self.devices if device.state != DeviceState.OFFLINE)
+            sum(self._available_device_kwh(device) for device in self.devices if device.state != DeviceState.OFFLINE)
         )
+
+    def refresh_total_available_kwh(self) -> None:
+        """Refresh the stable manager aggregate for all managed device energy."""
+        self.totalAvailableKwh.update_value(sum(self._available_device_kwh(device) for device in self.devices))
 
     @staticmethod
     def _is_discharge_capable(device: ZendureDevice) -> bool:
@@ -936,7 +953,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             device.update_device_state()
         self.update_count += 1
         self.totalKwh.update_value(kwh)
-        self.refresh_available_kwh()
+        self.refresh_energy_kwh()
 
         # Manually update the timer
         if self.hass and self.hass.loop.is_running():
@@ -1089,7 +1106,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # Update the power entities
         self.power.update_value(power)
-        self.refresh_available_kwh()
+        self.refresh_energy_kwh()
 
         primary_aware_mode = self.operation in {
             ManagerMode.MATCHING_PRIMARY_AWARE,
@@ -1299,9 +1316,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # and it take all offGrid power from grid
                 start_pwr = SmartMode.POWER_START
                 await d.power_charge(
-                    -start_pwr - max(0, d.pwr_offgrid)
-                    if d.state != DeviceState.SOCFULL
-                    else -max(0, d.pwr_offgrid)
+                    -start_pwr - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid)
                 )
                 if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                     break
