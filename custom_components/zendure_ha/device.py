@@ -790,7 +790,7 @@ class ZendureZenSdk(ZendureDevice):
             await self.httpPost("properties/write", {"properties": {entity.propertyName: value}})
 
     async def dataRefresh(self, update_count: int) -> None:
-        if update_count == 0 and not self.online:
+        if self.connection.value == ConnectionMode.ZENSDK or (update_count == 0 and not self.online):
             await self._refresh_http_report()
 
     async def power_get(self) -> bool:

@@ -2,13 +2,45 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-
+from custom_components.zendure_ha.const import ConnectionMode
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 
 from .common import make_device
+
+
+class TestZenSdkDataRefresh:
+    """Verify ZenSDK devices poll on every coordinator cycle."""
+
+    async def test_data_refresh_polls_on_non_zero_update_count(self, hass):
+        """dataRefresh must call httpGet on cycles after the first when in ZenSDK mode."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-poll",
+            product_model="SolarFlow 800 Pro",
+        )
+        device.connection.update_value(ConnectionMode.ZENSDK)
+
+        with patch.object(device, "httpGet", new_callable=AsyncMock, return_value={}) as mock_get:
+            await device.dataRefresh(5)
+            mock_get.assert_awaited_once()
+
+    async def test_data_refresh_skips_cloud_mode(self, hass):
+        """dataRefresh must not poll via HTTP when the device is in CLOUD mode."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-cloud",
+            product_model="SolarFlow 800 Pro",
+        )
+        device.connection.update_value(ConnectionMode.CLOUD)
+
+        with patch.object(device, "httpGet", new_callable=AsyncMock, return_value={}) as mock_get:
+            await device.dataRefresh(5)
+            mock_get.assert_not_awaited()
 
 
 class TestHttpConnectionClose:
