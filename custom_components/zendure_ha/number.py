@@ -5,11 +5,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from homeassistant.components.number import NumberEntity, NumberEntityDescription, NumberMode
+from homeassistant.components.number import NumberEntity, NumberEntityDescription, NumberMode, RestoreNumber
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.template import Template
 
 from .entity import EntityDevice, EntityZendure
@@ -61,16 +61,34 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
         self.doupdate = doupdate
         self.add_to_platform(self.add)
 
-    def update_value(self, value: Any) -> bool:
+    @staticmethod
+    def _as_float(value: Any) -> float | None:
+        if value is None:
+            return None
+
+        value_str = str(value).strip().lower()
+        if value_str in ("", STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return None
+
         try:
-            new_value = (
-                int(
-                    float(self._value_template.async_render_with_possible_json_value(value, None))
-                    if self._value_template is not None
-                    else float(value)
-                )
-                / self.factor
-            )
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def update_value(self, value: Any) -> bool:
+        rendered_value = (
+            self._value_template.async_render_with_possible_json_value(value, None)
+            if self._value_template is not None
+            else value
+        )
+
+        parsed_value = self._as_float(rendered_value)
+        if parsed_value is None:
+            _LOGGER.warning("Invalid number state for %s: %s", self._attr_unique_id, rendered_value)
+            return False
+
+        try:
+            new_value = int(parsed_value) / self.factor
 
             if self._attr_native_value == new_value:
                 return False
@@ -79,6 +97,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
             self.write_ha_state()
         except Exception as err:
             _LOGGER.error("Error %s setting state: %s => %s", err, self._attr_unique_id, value)
+            return False
 
         return True
 
@@ -111,7 +130,7 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class ZendureRestoreNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
-    ZendureNumber, RestoreEntity
+    ZendureNumber, RestoreNumber
 ):
     """Representation of a Zendure number entity with restore."""
 
@@ -135,13 +154,16 @@ class ZendureRestoreNumber(  # pyright: ignore[reportIncompatibleVariableOverrid
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
         await super().async_added_to_hass()
-        if state := await self.async_get_last_state():
-            if state.state is None or state.state == "unknown":
-                self._attr_native_value = 0
-                return
-            self._attr_native_value = int(float(state.state))
-            if self._onwrite is not None:
-                if asyncio.iscoroutinefunction(self._onwrite):
-                    await self._onwrite(self, self._attr_native_value)
-                else:
-                    self._onwrite(self, self._attr_native_value)
+        if number_data := await self.async_get_last_number_data():
+            if number_data.native_min_value is not None:
+                self._attr_native_min_value = number_data.native_min_value
+            if number_data.native_max_value is not None:
+                self._attr_native_max_value = number_data.native_max_value
+            if number_data.native_value is not None:
+                self._attr_native_value = number_data.native_value
+
+        if self._onwrite is not None:
+            if asyncio.iscoroutinefunction(self._onwrite):
+                await self._onwrite(self, self._attr_native_value)
+            else:
+                self._onwrite(self, self._attr_native_value)
