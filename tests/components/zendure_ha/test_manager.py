@@ -3413,6 +3413,54 @@ class TestSmartMatchingPrimaryAware:
         assert primary.state is DeviceState.RESERVE_RECOVERY
         primary.power_discharge.assert_awaited_once_with(200)
 
+    async def test_recovering_secondary_keeps_current_pv_when_recovering_primary_can_cover_home(self, hass):
+        """A recovering secondary's current PV pass-through should stop when primary PV can cover the full load."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-recovering-primary-covers-secondary-pv",
+            device_name="sf800 pro recovering primary covers secondary pv",
+            product_model="SolarFlow 800 Pro",
+            level=13,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=30,
+            battery_input=670,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-recovering-secondary-keeps-pv",
+            device_name="sf800 pro recovering secondary keeps pv",
+            product_model="SolarFlow 800 Pro",
+            level=13,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=120,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            discharge_recovery_margin=5,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_bypass = AsyncMock(return_value=0)
+
+        await manager.powerChanged(0, False, datetime.now())
+
+        assert primary.state is DeviceState.RESERVE_RECOVERY
+        assert secondary.state is DeviceState.RESERVE_RECOVERY
+        primary.power_discharge.assert_awaited_once_with(150)
+        secondary.power_discharge.assert_awaited_once_with(0)
+        secondary.power_bypass.assert_not_awaited()
+
     async def test_recovering_primary_keeps_solar_pass_through_even_with_a_healthy_secondary(self, hass):
         """A healthy secondary should not replace current PV pass-through from a recovering primary."""
         primary = make_device(
@@ -4811,6 +4859,63 @@ class TestSmartMatchingPrimaryAware:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-200)
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_positive_p1_with_recovering_devices_reduces_primary_charge_before_secondary_charge(self, hass):
+        """Positive demand should reduce recovering primary charge and keep secondary PV charging locally."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-recovering-primary-charge-lag",
+            device_name="sf800 pro recovering primary charge lag",
+            product_model="SolarFlow 800 Pro",
+            level=13,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=700,
+            output_limit=0,
+            home_input=700,
+            battery_input=700,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-recovering-secondary-charge-lag",
+            device_name="sf800 pro recovering secondary charge lag",
+            product_model="SolarFlow 800 Pro",
+            level=13,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=120,
+            output_limit=0,
+            home_input=120,
+            battery_input=120,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            discharge_recovery_margin=5,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(150, False, datetime.now())
+
+        assert primary.state is DeviceState.RESERVE_RECOVERY
+        assert secondary.state is DeviceState.RESERVE_RECOVERY
+        primary.power_charge.assert_awaited_once_with(-550)
+        secondary.power_charge.assert_awaited_once_with(-120)
         primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 

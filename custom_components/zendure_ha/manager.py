@@ -1170,7 +1170,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if (
                 setpoint <= 0
                 or active_non_primary_local_surplus > 0
-                or active_non_primary_empty_chargeable > 0
+                or (p1 < 0 and active_non_primary_empty_chargeable > 0)
                 or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
             ):
                 setpoint = surplus_setpoint
@@ -1675,10 +1675,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         active_produced_floor, setpoint = self._allocate_capped_targets(
             setpoint,
-            remaining_active,
+            [device for device in remaining_active if device.state != DeviceState.RESERVE_RECOVERY],
             {
                 device: min(max(0, device.homeOutput.asInt), routing.produced_limit(device))
                 for device in remaining_active
+                if device.state != DeviceState.RESERVE_RECOVERY
             },
             direction=1,
         )
