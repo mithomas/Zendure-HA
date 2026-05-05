@@ -9,6 +9,7 @@ import logging
 import traceback
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import sqrt
 from pathlib import Path
@@ -46,6 +47,34 @@ SCAN_INTERVAL = timedelta(seconds=60)
 _LOGGER = logging.getLogger(__name__)
 
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
+
+
+@dataclass(frozen=True, slots=True)
+class _PowerRouteDevice:
+    """Per-cycle routing facts for one device."""
+
+    device: ZendureDevice
+    discharging: bool
+    produced_limit: int
+    produced_home: int
+    produced_bypass: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PowerRoutingSnapshot:
+    """Per-cycle routing view shared by manager power paths."""
+
+    discharge_devices: tuple[ZendureDevice, ...]
+    devices: dict[ZendureDevice, _PowerRouteDevice]
+
+    def route(self, device: ZendureDevice) -> _PowerRouteDevice:
+        """Return routing facts for a device."""
+        return self.devices[device]
+
+    @property
+    def produced_bypass(self) -> int:
+        """Return solar-only power already covered by full devices."""
+        return sum(self.route(device).produced_bypass for device in self.discharge_devices)
 
 
 class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
@@ -352,6 +381,31 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         else:
             self.p1meterEvent = None
 
+    def _current_produced_output_limit(self, device: ZendureDevice) -> int:
+        """Return the solar/off-grid contribution currently available without draining the battery."""
+        if not device.online or device.discharge_limit <= 0:
+            return 0
+        return min(max(0, -device.pwr_produced), max(0, device.fuseGrp.discharge_limit(device)))
+
+    def _power_routing_snapshot(self) -> _PowerRoutingSnapshot:
+        """Build a per-cycle route snapshot from the current device classification."""
+        route_devices: dict[ZendureDevice, _PowerRouteDevice] = {}
+        for device in self.discharge:
+            produced_limit = self._current_produced_output_limit(device)
+            home_output = max(0, device.homeOutput.asInt)
+            route_devices[device] = _PowerRouteDevice(
+                device=device,
+                discharging=True,
+                produced_limit=produced_limit,
+                produced_home=min(home_output, produced_limit),
+                produced_bypass=max(0, -device.pwr_produced) if device.state == DeviceState.SOCFULL else 0,
+            )
+
+        return _PowerRoutingSnapshot(
+            discharge_devices=tuple(self.discharge),
+            devices=route_devices,
+        )
+
     def writeSimulation(self, time: datetime, p1: int) -> None:
         if Path("simulation.csv").exists() is False:
             with Path("simulation.csv").open("w") as f:
@@ -505,13 +559,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.power.update_value(power)
         self.availableKwh.update_value(availableKwh)
 
+        routing = self._power_routing_snapshot()
         # discharge_bypass accumulates the solar-only power produced by SOCFULL devices.
         # Subtract it from setpoint to avoid over-discharging from grid, but clamp so
         # setpoint never goes below 0 when p1 >= 0: a SOCFULL device producing solar
         # should still cover home demand, not trigger charge mode (fixes #1151 output
         # cycling to 0W with bypass forbidden + 100% SoC).
-        if self.discharge_bypass > 0:
-            setpoint = max(0 if p1 >= 0 else setpoint - self.discharge_bypass, setpoint - self.discharge_bypass)
+        if routing.produced_bypass > 0:
+            setpoint = max(0 if p1 >= 0 else setpoint - routing.produced_bypass, setpoint - routing.produced_bypass)
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
