@@ -4759,7 +4759,59 @@ class TestSmartMatchingPrimaryAware:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-150)
-        primary.power_discharge.assert_awaited_once_with(100)
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_positive_p1_with_selected_primary_pv_reduces_secondary_charge_floor_without_touching_primary(
+        self, hass
+    ):
+        """A secondary's active charge floor should cover positive demand before the selected primary is touched."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-pv-covering-home-while-secondary-charges",
+            device_name="sf800 pro primary pv covering home while secondary charges",
+            product_model="SolarFlow 800 Pro",
+            level=35,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=250,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-active-charge-floor",
+            device_name="sf800 pro secondary active charge floor",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=250,
+            output_limit=0,
+            home_input=250,
+            battery_input=250,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(50, False, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-200)
+        primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
     async def test_positive_p1_with_mixed_full_and_blocked_secondary_pv_still_reduces_primary_charge(self, hass):

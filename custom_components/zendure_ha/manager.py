@@ -1450,6 +1450,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 if device not in full_primary_bypass_handoff_promotions
             ]
 
+        def active_charge_lag_capacity(device: ZendureDevice) -> int:
+            return routing.route(device).charge_floor if positive_demand_charge_lag and device in self.charge else 0
+
         surplus_floor_devices = [*active_secondary_charge_devices, *charge_devices, *idle_secondary_surplus_devices]
         charge_targets, setpoint = self._allocate_capped_targets(
             setpoint,
@@ -1457,6 +1460,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             {
                 device: max(
                     routing.charge_surplus(device),
+                    active_charge_lag_capacity(device),
                     routing.chargeable_produced_home(device) if allow_home_pv_charge else 0,
                 )
                 for device in surplus_floor_devices
@@ -1481,11 +1485,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             primary_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
             if primary_target != 0:
                 setpoint -= await primary.power_charge(primary_target)
-            elif active_discharge_targets.get(primary, 0) > 0:
+            elif active_discharge_targets.get(primary, 0) > 0 and not positive_demand_charge_lag:
                 await self._power_discharge_primary_aware(primary, active_discharge_targets[primary])
         elif positive_demand_charge_lag and primary is not None and primary in self.charge:
             await primary.power_charge(0)
-        elif selected_primary is not None and active_discharge_targets.get(selected_primary, 0) > 0:
+        elif (
+            selected_primary is not None
+            and active_discharge_targets.get(selected_primary, 0) > 0
+            and not positive_demand_charge_lag
+        ):
             await self._power_discharge_primary_aware(selected_primary, active_discharge_targets[selected_primary])
 
         _idle_lvlmax, idle_lvlmin = self._idle_levels(idle_devices)
