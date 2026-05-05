@@ -341,7 +341,6 @@ class ZendureDevice(EntityDevice):
             match topic:
                 case "properties/report":
                     asyncio.run_coroutine_threadsafe(self.mqttProperties(payload), self.hass.loop)
-                    # self.mqttProperties(payload)
 
                 case "register/replay":
                     _LOGGER.info("Register replay for %s => %s", self.name, payload)
@@ -363,8 +362,6 @@ class ZendureDevice(EntityDevice):
                 case "properties/read" | "function/invoke/reply" | "properties/read/reply" | "config" | "log" | "function/invoke":
                     return False
 
-                # case "firmware/report":
-                #     _LOGGER.info("Firmware report for %s => %s", self.name, payload)
                 case _:
                     return False
         except Exception as err:

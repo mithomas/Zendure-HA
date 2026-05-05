@@ -15,7 +15,6 @@ ignore = [
     "COM812", # incompatible with formatter
     "N806", # non-lowercase-variable-in-function
     "G004", # logging-f-string
-    "ERA001", # commented-out-code
     "D101", # undocumented-public-class
     "D102", # undocumented-public-method
     "BLE001", # blind-except
