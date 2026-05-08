@@ -4507,6 +4507,65 @@ class TestSmartMatchingPrimaryAware:
         full_bypass.power_charge.assert_not_awaited()
         charging.power_discharge.assert_not_awaited()
 
+    async def test_negative_p1_with_same_group_full_primary_bypass_charges_secondary_during_hysteresis(self, hass):
+        """A full bypassing primary should hand export to a same-group secondary even while charge hysteresis is active."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-full-primary-bypass-export",
+            device_name="sf800 pro full primary bypass export",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=0,
+            output_limit=0,
+            home_output=750,
+        )
+        primary.solarInput.update_value(750)
+        primary.byPass.update_value(1)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-same-group-pv-charge",
+            device_name="sf800 pro secondary same group pv charge",
+            product_model="SolarFlow 800 Pro",
+            level=95,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=40,
+            output_limit=0,
+            battery_input=40,
+        )
+        secondary.solarInput.update_value(150)
+        FuseGroup("group3600-full-primary-export", 3600, primary.charge_limit, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+
+        await manager.powerChanged(-460, False, datetime.now())
+
+        assert primary.state is DeviceState.SOCFULL
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-500)
+        secondary.power_discharge.assert_not_awaited()
+
     async def test_keeps_idle_secondary_local_pv_out_of_the_primary_on_a_small_negative_charge_cycle(self, hass):
         """A small negative charge target must still let an idle secondary keep its own PV locally."""
         primary = make_device(

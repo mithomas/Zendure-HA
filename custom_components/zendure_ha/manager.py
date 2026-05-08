@@ -842,7 +842,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         optimal = 0
         weight = 0
         for device in devices:
-            limit += device.fuseGrp.charge_limit(device)
+            limit += device.fuseGrp.charge_limit(device, devices)
             optimal += device.charge_optimal
             weight += device.pwr_max * (100 - device.electricLevel.asInt)
         return limit, optimal, weight
@@ -1540,12 +1540,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 device for device in idle_secondary_surplus_devices if device.fuseGrp is not selected_primary.fuseGrp
             ]
             full_primary_bypass_handoff_promotions = [
-                device
-                for device in idle_devices
-                if (
-                    device.fuseGrp is not selected_primary.fuseGrp
-                    and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
-                )
+                device for device in idle_devices if device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
             ]
         full_primary_bypass_handoff = (
             requested_setpoint < -SmartMode.POWER_START
