@@ -44,6 +44,15 @@ EMPTY_SOC_STATES = {
     DeviceState.SOCRESERVE,
 }
 
+PV_CHARGE_FIRST_STATES = {
+    DeviceState.SOCEMPTY,
+}
+
+PV_CHARGE_FIRST_PRIMARY_AWARE_MODES = {
+    ManagerMode.MATCHING_PRIMARY_AWARE,
+    ManagerMode.MATCHING_CHARGE_PRIMARY_AWARE,
+}
+
 LOW_SOC_STATES = {
     *EMPTY_SOC_STATES,
     DeviceState.RESERVE_RECOVERY,
@@ -58,6 +67,7 @@ class _PowerRouteDevice:
 
     device: ZendureDevice
     selected_primary: bool
+    pv_charge_first: bool
     charging: bool
     discharging: bool
     idle: bool
@@ -72,8 +82,10 @@ class _PowerRouteDevice:
 
     @property
     def active_produced_home(self) -> int:
-        """Return current produced power already serving home output."""
+        """Return current produced power that should remain serving home output."""
         if not self.discharging or self.device.state == DeviceState.SOCFULL:
+            return 0
+        if self.pv_charge_first and self.device.state in PV_CHARGE_FIRST_STATES:
             return 0
         return self.produced_home
 
@@ -82,12 +94,13 @@ class _PowerRouteDevice:
         """
         Return produced home that should be preserved as a discharge target.
 
-        SOCEMPTY, SOCRESERVE, and RESERVE_RECOVERY devices are passing solar to
-        home but should have that solar redirected to their own battery instead;
-        their contribution must not be treated as a floor to preserve in charge
-        mode.
+        SOCEMPTY devices are passing solar to home but should have that solar
+        redirected to their own battery first; their contribution must not be
+        treated as a floor to preserve in charge mode.
         """
-        if not self.discharging or self.device.state in {DeviceState.SOCFULL, *LOW_SOC_STATES}:
+        if not self.discharging or self.device.state == DeviceState.SOCFULL:
+            return 0
+        if self.pv_charge_first and self.device.state in PV_CHARGE_FIRST_STATES:
             return 0
         return self.produced_home
 
@@ -166,11 +179,11 @@ class _PowerRoutingSnapshot:
     @property
     def active_chargeable_serving_pv_floor(self) -> int:
         """
-        Return produced home output from devices that are not blocked-low.
+        Return produced home output from devices that should stay home-serving.
 
-        SOCEMPTY, SOCRESERVE, and RESERVE_RECOVERY devices pass solar to home
-        but should be redirected to charge their own battery; their solar floor
-        must not block the charge-mode debounce.
+        SOCEMPTY devices pass solar to home but should redirect it to charge
+        their own battery first; their solar floor must not block the
+        charge-mode debounce.
         """
         return sum(self.route(device).active_chargeable_produced_home for device in self.discharge_devices)
 
@@ -661,7 +674,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         return min(-device.charge_limit, max(0, -device.pwr_produced - max(0, device.homeOutput.asInt)))
 
     def _power_routing_snapshot(
-        self, selected_primary: ZendureDevice | None, *, primary_aware: bool
+        self,
+        selected_primary: ZendureDevice | None,
+        *,
+        primary_aware: bool,
+        pv_charge_first: bool = False,
     ) -> _PowerRoutingSnapshot:
         """Build a per-cycle route snapshot from the current device classification."""
         devices = [*self.charge, *self.discharge, *self.idle]
@@ -689,6 +706,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             route_devices[device] = _PowerRouteDevice(
                 device=device,
                 selected_primary=device is selected_primary,
+                pv_charge_first=pv_charge_first,
                 charging=device in self.charge,
                 discharging=device in self.discharge,
                 idle=device in self.idle,
@@ -1107,8 +1125,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             ManagerMode.MATCHING_CHARGE_PRIMARY_AWARE,
             ManagerMode.MANUAL_PRIMARY_AWARE,
         }
+        pv_charge_first_mode = self.operation in PV_CHARGE_FIRST_PRIMARY_AWARE_MODES
         selected_primary = self.resolve_primary_device()
-        routing = self._power_routing_snapshot(selected_primary, primary_aware=primary_aware_mode)
+        routing = self._power_routing_snapshot(
+            selected_primary,
+            primary_aware=primary_aware_mode,
+            pv_charge_first=pv_charge_first_mode,
+        )
         selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
         self.discharge_bypass += selected_primary_bypass_passthrough
         active_primary_produced_floor = routing.active_primary_produced_floor
@@ -1150,12 +1173,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         idle_non_primary_local_surplus = sum(
             routing.charge_surplus(device) for device in self.idle if device is not selected_primary
         )
-        # Non-primary low-SOC devices whose solar exactly covers homeOutput have
+        active_pv_charge_first_home = sum(
+            routing.chargeable_produced_home(device)
+            for device in self.discharge
+            if pv_charge_first_mode and device.state in PV_CHARGE_FIRST_STATES
+        )
+        # Non-primary SOCEMPTY devices whose solar exactly covers homeOutput have
         # charge_surplus=0 but can still redirect that solar to their own battery.
         active_non_primary_empty_chargeable = sum(
             routing.chargeable_produced_home(device)
             for device in self.discharge
-            if device is not selected_primary and device.state in LOW_SOC_STATES
+            if pv_charge_first_mode and device is not selected_primary and device.state in PV_CHARGE_FIRST_STATES
         )
         selected_primary_local_surplus = (
             routing.charge_surplus(selected_charge_primary) if selected_charge_primary is not None else 0
@@ -1203,6 +1231,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     )
                 else:
                     setpoint = surplus_setpoint
+
+        if pv_charge_first_mode and active_pv_charge_first_home > 0:
+            setpoint = min(setpoint, -active_pv_charge_first_home)
 
         positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
         debounce_charge_flip = (
@@ -1356,7 +1387,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Charge (primary-aware) => setpoint %sW", setpoint)
 
         selected_primary = self.resolve_primary_device()
-        routing = self._power_routing_snapshot(selected_primary, primary_aware=True)
+        routing = self._power_routing_snapshot(
+            selected_primary,
+            primary_aware=True,
+            pv_charge_first=self.operation in PV_CHARGE_FIRST_PRIMARY_AWARE_MODES,
+        )
         active_discharge_targets = routing.active_produced_targets(self.discharge)
         requested_setpoint = setpoint
         positive_demand_charge_lag = routing.positive_demand_charge_lag(requested_setpoint)
@@ -1364,12 +1399,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing.route(device).charge_floor > 0 for device in self.charge
         )
         allow_home_pv_charge = not positive_demand_charge_lag
-        # In surplus mode, low-SOC devices should redirect their solar to their
+        # In surplus mode, SOCEMPTY devices should redirect their solar to their
         # own battery instead of continuing to pass it to the home.  Zero their
         # discharge targets so the stop-discharge loop below actually stops them.
         if allow_home_pv_charge:
             active_discharge_targets = {
-                d: (0 if d.state in LOW_SOC_STATES and routing.chargeable_produced_home(d) > 0 else t)
+                d: (0 if d.state in PV_CHARGE_FIRST_STATES and routing.chargeable_produced_home(d) > 0 else t)
                 for d, t in active_discharge_targets.items()
             }
 
@@ -1643,7 +1678,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.pwr_low = 0
 
         selected_primary = self.resolve_primary_device()
-        routing = self._power_routing_snapshot(selected_primary, primary_aware=True)
+        routing = self._power_routing_snapshot(
+            selected_primary,
+            primary_aware=True,
+            pv_charge_first=self.operation in PV_CHARGE_FIRST_PRIMARY_AWARE_MODES,
+        )
         charge_produced_devices = [
             device for device in self.charge if device.is_discharge_blocked() and routing.produced_limit(device) > 0
         ]
