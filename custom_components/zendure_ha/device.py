@@ -42,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
 CONST_HEADER_CLOSE = {**CONST_HEADER, "Connection": "close"}
 CONST_TIMEOUT = ClientTimeout(total=4)
+FULL_SOC_PERCENT = 100
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 
 
@@ -145,6 +146,7 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.on_available_kwh_changed: Callable[[], None] | None = None
         self.discharge_recovery_margin_soc: float = 0.0
+        self._raw_soc_limit: int = 0
         self.state: DeviceState = DeviceState.OFFLINE
 
         self.create_entities()
@@ -263,9 +265,15 @@ class ZendureDevice(EntityDevice):
             self.remainingTime.update_value(self.calcRemainingTime())
             return True
 
-        changed = super().entityUpdate(key, value)
+        previous_soc_limit = self.socLimit.asInt if key == "socLimit" and hasattr(self, "socLimit") else None
+        if key == "socLimit":
+            previous_raw_soc_limit = self._raw_soc_limit
+            self._raw_soc_limit = self._coerce_soc_limit(value, previous_raw_soc_limit)
+            changed = self._raw_soc_limit != previous_raw_soc_limit
+        else:
+            changed = super().entityUpdate(key, value)
         try:
-            if changed:
+            if changed or key == "socLimit":
                 match key:
                     case "packState":
                         if value == 0:
@@ -300,15 +308,23 @@ class ZendureDevice(EntityDevice):
                         self.setStatus()
                         if key == "socStatus" and self.socStatus.asInt == 0:
                             self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
-                    case "electricLevel" | "minSoc" | "socLimit" | "socReserve":
-                        if self.electricLevel.asInt == 100:
+                    case "electricLevel" | "minSoc" | "socLimit" | "socReserve" | "socSet":
+                        if changed and self.electricLevel.asInt == FULL_SOC_PERCENT:
                             self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
                         self.refresh_recovery_state()
         except Exception as e:
             _LOGGER.error("EntityUpdate error %s %s %s!", self.name, key, e)
             _LOGGER.error(traceback.format_exc())
 
-        return changed
+        return changed or (previous_soc_limit is not None and self.socLimit.asInt != previous_soc_limit)
+
+    @staticmethod
+    def _coerce_soc_limit(value: Any, default: int = 0) -> int:
+        """Return the raw device-reported SoC limit value."""
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _report_has_device_data(payload: Any) -> bool:
@@ -350,9 +366,9 @@ class ZendureDevice(EntityDevice):
 
         if not self.online or self.socSet.asNumber == 0 or self.kWh == 0:
             self.state = DeviceState.OFFLINE
-        elif self.socLimit.asInt == SmartMode.SOCFULL or self.electricLevel.asInt >= self.socSet.asNumber:
+        elif self._raw_soc_limit == SmartMode.SOCFULL or self.electricLevel.asInt >= self.socSet.asNumber:
             self.state = DeviceState.SOCFULL
-        elif self.socLimit.asInt == SmartMode.SOCEMPTY or level <= min_soc:
+        elif self._raw_soc_limit == SmartMode.SOCEMPTY or level <= min_soc:
             self.state = DeviceState.SOCEMPTY
         elif min_soc < level <= reserve:
             self.state = DeviceState.SOCRESERVE
@@ -360,6 +376,23 @@ class ZendureDevice(EntityDevice):
             self.state = DeviceState.RESERVE_RECOVERY
         else:
             self.state = DeviceState.INACTIVE
+        self.socLimit.update_value(self._soc_limit_value_for_state())
+
+    def _soc_limit_value_for_state(self) -> int:
+        """Return the public SoC Limit sensor value for the effective device state."""
+        match self.state:
+            case DeviceState.SOCFULL:
+                return SmartMode.SOCFULL
+            case DeviceState.SOCEMPTY:
+                return SmartMode.SOCEMPTY
+            case DeviceState.RESERVE_RECOVERY:
+                return 3
+            case DeviceState.SOCRESERVE:
+                return 4
+            case DeviceState.OFFLINE:
+                return 5
+            case _:
+                return 0
 
     def refresh_discharge_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
         """Refresh all device-local state derived from the current discharge baseline."""

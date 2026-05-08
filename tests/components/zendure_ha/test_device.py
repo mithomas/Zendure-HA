@@ -15,6 +15,8 @@ from custom_components.zendure_ha.sensor import ZendureSensor
 
 from .common import make_device
 
+TARGET_SOC_AFTER_UPDATE = 90
+
 
 def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
     """Bypass should expose the binary-sensor API expected by manager routing."""
@@ -89,12 +91,101 @@ def test_device_state_distinguishes_empty_from_reserve_floor(
 ):
     """Device state should expose reserve-band SoC separately from empty SoC."""
     device = make_device(hass, level=20, min_soc=min_soc, reserve=reserve, soc_set=100)
-    device.socLimit.update_value(soc_limit)
+    device.entityUpdate("socLimit", soc_limit)
     device.electricLevel.update_value(level)
 
     device.refresh_discharge_state()
 
     assert device.state is expected_state
+
+
+@pytest.mark.parametrize(
+    (
+        "level",
+        "min_soc",
+        "reserve",
+        "soc_set",
+        "raw_soc_limit",
+        "recovery_active",
+        "margin",
+        "online",
+        "expected_state",
+        "expected_soc_limit",
+    ),
+    [
+        (50, 10, 10, 80, 0, False, 0, True, DeviceState.INACTIVE, 0),
+        (80, 10, 10, 80, 0, False, 0, True, DeviceState.SOCFULL, SmartMode.SOCFULL),
+        (10, 10, 10, 80, 0, False, 0, True, DeviceState.SOCEMPTY, SmartMode.SOCEMPTY),
+        (10, 5, 10, 80, 0, False, 0, True, DeviceState.SOCRESERVE, 4),
+        (12, 10, 10, 80, 0, True, 5, True, DeviceState.RESERVE_RECOVERY, 3),
+        (50, 10, 10, 80, 0, False, 0, False, DeviceState.OFFLINE, 5),
+    ],
+)
+def test_soc_limit_sensor_exposes_effective_device_state(
+    hass,
+    level,
+    min_soc,
+    reserve,
+    soc_set,
+    raw_soc_limit,
+    recovery_active,
+    margin,
+    online,
+    expected_state,
+    expected_soc_limit,
+):
+    """SoC Limit should expose the effective derived device state."""
+    device = make_device(hass, level=level, min_soc=min_soc, reserve=reserve, soc_set=soc_set)
+    device.discharge_recovery_margin_soc = margin
+    device.discharge_recovery_active._attr_is_on = recovery_active
+    device.entityUpdate("socLimit", raw_soc_limit)
+    if not online:
+        device.connectionStatus.update_value(0)
+
+    device.refresh_discharge_state()
+
+    assert device.state is expected_state
+    assert device.socLimit.asInt == expected_soc_limit
+
+
+def test_soc_limit_sensor_drops_threshold_full_when_soc_falls_below_target(hass):
+    """A threshold-derived full state should not stick after SoC drops below the target."""
+    device = make_device(hass, level=80, min_soc=10, reserve=10, soc_set=80)
+
+    assert device.state is DeviceState.SOCFULL
+    assert device.socLimit.asInt == SmartMode.SOCFULL
+
+    device.electricLevel.update_value(79)
+    device.refresh_discharge_state()
+
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == 0
+
+
+def test_raw_soc_limit_full_override_still_forces_effective_full(hass):
+    """The device-reported full limit should still force the effective full state."""
+    device = make_device(hass, level=50, min_soc=10, reserve=10, soc_set=80)
+
+    device.entityUpdate("socLimit", SmartMode.SOCFULL)
+    device.electricLevel.update_value(40)
+    device.refresh_discharge_state()
+
+    assert device.state is DeviceState.SOCFULL
+    assert device.socLimit.asInt == SmartMode.SOCFULL
+
+
+def test_soc_set_update_refreshes_effective_soc_limit_state(hass):
+    """Changing the target SoC should immediately refresh the effective SoC Limit sensor."""
+    device = make_device(hass, level=80, min_soc=10, reserve=10, soc_set=80)
+
+    assert device.state is DeviceState.SOCFULL
+    assert device.socLimit.asInt == SmartMode.SOCFULL
+
+    device.entityUpdate("socSet", TARGET_SOC_AFTER_UPDATE * 10)
+
+    assert device.socSet.asNumber == TARGET_SOC_AFTER_UPDATE
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == 0
 
 
 @pytest.mark.parametrize(

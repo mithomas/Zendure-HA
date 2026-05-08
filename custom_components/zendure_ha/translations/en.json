@@ -228,7 +228,10 @@
         "state": {
           "0": "Normal",
           "1": "Full",
-          "2": "Empty"
+          "2": "Empty",
+          "3": "Reserve recovery",
+          "4": "Reserve",
+          "5": "Offline"
         }
       },
       "hub_state": {

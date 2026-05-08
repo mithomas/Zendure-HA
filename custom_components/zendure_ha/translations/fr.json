@@ -203,7 +203,10 @@
         "state": {
           "0": "Normal",
           "1": "Plein",
-          "2": "Vide"
+          "2": "Vide",
+          "3": "Récupération de réserve",
+          "4": "Réserve",
+          "5": "Hors ligne"
         }
       },
       "hub_state": {

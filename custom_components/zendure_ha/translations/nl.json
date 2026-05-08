@@ -199,7 +199,10 @@
         "state": {
           "0": "Normaal",
           "1": "Vol",
-          "2": "Leeg"
+          "2": "Leeg",
+          "3": "Reserveherstel",
+          "4": "Reserve",
+          "5": "Offline"
         }
       },
       "hub_state": {
