@@ -3222,6 +3222,61 @@ class TestSmartMatchingPrimaryAware:
         assert manager.power_discharge_primary_aware.await_args == call(0)
         manager.power_charge_primary_aware.assert_not_awaited()
 
+    async def test_positive_p1_uses_secondary_pv_then_full_primary_bypass_remainder(self, hass):
+        """A full bypassing primary should keep its PV floor while covering demand after secondary PV."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-full-primary-bypass-demand",
+            device_name="sf800 pro full primary bypass demand",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=0,
+            output_limit=0,
+            home_output=300,
+        )
+        primary.solarInput.update_value(300)
+        primary.byPass.update_value(1)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-pv-demand",
+            device_name="sf800 pro secondary pv demand",
+            product_model="SolarFlow 800 Pro",
+            level=95,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=35,
+            output_limit=0,
+            battery_input=35,
+        )
+        secondary.solarInput.update_value(35)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(150, False, datetime.now())
+
+        assert primary.state is DeviceState.SOCFULL
+        secondary.power_charge.assert_not_awaited()
+        secondary.power_discharge.assert_awaited_once_with(35)
+        primary.power_discharge.assert_awaited_once_with(415)
+
     async def test_keeps_an_existing_charge_ramp_running_through_a_small_positive_p1_swing(self, hass):
         """
         A slight positive p1 swing from command lag must not stop an already-charging device when a full PV device is in bypass.

@@ -1774,6 +1774,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 await d.power_discharge(10)
 
         primary_produced_cap = routing.produced_limit(selected_primary) if selected_primary is not None else 0
+        primary_bypass_floor = 0
+        if (
+            selected_primary is not None
+            and selected_primary in self.discharge
+            and selected_primary.state == DeviceState.SOCFULL
+        ):
+            primary_bypass_floor = min(
+                routing.route(selected_primary).bypass_passthrough,
+                max(0, selected_primary.solarInput.asInt),
+            )
+        if primary_bypass_floor > 0:
+            primary_produced_cap = 0
         if (
             not produced_only
             and selected_primary is not None
@@ -1845,10 +1857,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         if primary is not None and not produced_only and setpoint > 0:
             primary_cap = routing.route(primary).available_discharge_with_produced
-            primary_battery_cap = max(0, primary_cap - primary_target)
+            primary_floor = primary_bypass_floor if primary_target == 0 else primary_target
+            primary_battery_cap = max(0, primary_cap - primary_floor)
             additional_primary = min(setpoint, primary_battery_cap)
             if additional_primary > 0:
-                primary_target += additional_primary
+                primary_target = primary_floor + additional_primary
                 setpoint -= additional_primary
 
         discharge_devices = routing.discharge_candidates(
