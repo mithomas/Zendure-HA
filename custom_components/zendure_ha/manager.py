@@ -1260,6 +1260,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in self.discharge
             if pv_charge_first_mode and device is not selected_primary and device.state in PV_CHARGE_FIRST_STATES
         )
+        non_primary_local_chargeable_surplus = (
+            active_charge_local_surplus
+            + active_non_primary_local_surplus
+            + idle_non_primary_local_surplus
+            + active_non_primary_empty_chargeable
+        )
         selected_primary_local_surplus = (
             routing.charge_surplus(selected_charge_primary) if selected_charge_primary is not None else 0
         )
@@ -1286,13 +1292,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 or (p1 < 0 and active_non_primary_empty_chargeable > 0)
                 or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
             ):
-                local_chargeable_surplus = (
-                    active_charge_local_surplus
-                    + active_non_primary_local_surplus
-                    + idle_non_primary_local_surplus
-                    + active_non_primary_empty_chargeable
-                    + selected_primary_local_surplus
-                )
+                local_chargeable_surplus = non_primary_local_chargeable_surplus + selected_primary_local_surplus
                 if protects_selected_primary_floor:
                     requested_charge = max(0, -surplus_setpoint)
                     charge_without_primary_floor = max(
@@ -1311,12 +1311,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             setpoint = min(setpoint, -active_pv_charge_first_home)
 
         positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
+        charge_uses_only_non_primary_local_surplus = (
+            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+            and p1 < 0
+            and non_primary_local_chargeable_surplus > 0
+            and setpoint < 0
+            and -setpoint <= non_primary_local_chargeable_surplus
+        )
         debounce_charge_flip = (
             self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
             and routing.active_chargeable_serving_pv_floor > 0
             and charge_transition_would_zero
             and setpoint < 0
             and not positive_demand_charge_lag
+            and not charge_uses_only_non_primary_local_surplus
         )
         if debounce_charge_flip:
             if self.charge_debounce_since is None:
@@ -1474,6 +1482,25 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing.route(device).charge_floor > 0 for device in self.charge
         )
         allow_home_pv_charge = not positive_demand_charge_lag
+        non_primary_local_chargeable_surplus = sum(
+            max(
+                routing.charge_surplus(device),
+                routing.chargeable_produced_home(device)
+                if (
+                    allow_home_pv_charge
+                    and self.operation in PV_CHARGE_FIRST_PRIMARY_AWARE_MODES
+                    and device.state in PV_CHARGE_FIRST_STATES
+                )
+                else 0,
+            )
+            for device in [*self.charge, *self.discharge, *self.idle]
+            if device is not selected_primary
+        )
+        keeps_non_primary_local_charge = (
+            requested_setpoint < 0
+            and non_primary_local_chargeable_surplus > 0
+            and -requested_setpoint <= non_primary_local_chargeable_surplus
+        )
         # In surplus mode, SOCEMPTY devices should redirect their solar to their
         # own battery instead of continuing to pass it to the home.  Zero their
         # discharge targets so the stop-discharge loop below actually stops them.
@@ -1491,7 +1518,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 )
                 self.charge_last = self.charge_time
                 self.pwr_low = 0
-            if not adjusts_active_charge:
+            if not adjusts_active_charge and not keeps_non_primary_local_charge:
                 setpoint = 0
         self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
 

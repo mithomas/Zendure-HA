@@ -3979,6 +3979,53 @@ class TestSmartMatchingPrimaryAware:
         assert primary.power_discharge.await_args_list == [call(250), call(250)]
         secondary.power_discharge.assert_not_awaited()
 
+    async def test_charge_hysteresis_keeps_secondary_local_pv_when_primary_pv_serves_home(self, hass):
+        """Charge hysteresis must not block a secondary from absorbing its own PV near the primary PV floor."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-hysteresis-home-floor",
+            device_name="sf800 pro primary hysteresis home floor",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=250,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-hysteresis-local-charge",
+            device_name="sf800 pro secondary hysteresis local charge",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            battery_input=20,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(-20, False, datetime.now())
+
+        assert primary.state is DeviceState.INACTIVE
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-20)
+        primary.power_discharge.assert_awaited_once_with(250)
+        secondary.power_discharge.assert_not_awaited()
+
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_reserve_primary_keeps_solar_pass_through_while_the_secondary_covers_battery_remainder(
         self, hass, low_soc_level, low_soc_state
