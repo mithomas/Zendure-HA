@@ -5849,6 +5849,7 @@ class TestP1ChargeLagFastPath:
         manager.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
         manager.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
         manager.p1_last_update = now - SmartMode.P1_MIN_UPDATE
+        manager.p1_charge_lag_last_update = now - SmartMode.P1_MIN_UPDATE
 
     @pytest.mark.parametrize("p1_value", [pytest.param(150, id="import"), pytest.param(-100, id="export")])
     async def test_active_charge_deviation_bypasses_p1_debounce(self, hass, p1_value):
@@ -5865,6 +5866,7 @@ class TestP1ChargeLagFastPath:
             home_input=300,
             battery_input=300,
         )
+        device.solarInput.update_value(300)
         manager = make_manager(
             hass,
             devices=(device,),
@@ -5882,6 +5884,108 @@ class TestP1ChargeLagFastPath:
         assert await_args.args[0] == p1_value
         assert await_args.args[1] is True
 
+    @pytest.mark.parametrize("charging_device_is_primary", [True, False])
+    async def test_charge_telemetry_bypasses_p1_debounce_without_previous_manager_bucket(
+        self, hass, charging_device_is_primary
+    ):
+        p1_value = 150
+        charging = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-fast-telemetry-charge-{charging_device_is_primary}",
+            device_name=f"sf800 pro fast telemetry charge {charging_device_is_primary}",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=600,
+            output_limit=0,
+            home_input=600,
+            battery_input=600,
+        )
+        charging.solarInput.update_value(100)
+        full_bypass = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-fast-telemetry-full-{charging_device_is_primary}",
+            device_name=f"sf800 pro fast telemetry full {charging_device_is_primary}",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            home_output=200,
+        )
+        full_bypass.solarInput.update_value(700)
+        full_bypass.byPass.update_value(1)
+        manager = make_manager(
+            hass,
+            devices=(charging, full_bypass),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=charging.deviceId if charging_device_is_primary else full_bypass.deviceId,
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(p1_value))
+
+        manager.powerChanged.assert_awaited_once()
+        await_args = manager.powerChanged.await_args
+        assert await_args is not None
+        assert await_args.args[0] == p1_value
+        assert await_args.args[1] is True
+
+    async def test_first_charge_lag_deviation_after_normal_update_bypasses_p1_debounce(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-charge-after-normal-update",
+            device_name="sf800 pro fast charge after normal update",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        device.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.p1_last_update = datetime.now()
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(150))
+
+        manager.powerChanged.assert_awaited_once()
+
+    async def test_active_charge_without_pv_keeps_existing_p1_debounce(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-charge-without-pv",
+            device_name="sf800 pro fast charge without pv",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            charge_devices=(device,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(150))
+
+        manager.powerChanged.assert_not_awaited()
+
     async def test_bypassing_primary_with_charge_candidate_bypasses_p1_debounce(self, hass):
         p1_value = -100
         primary = make_device(
@@ -5893,6 +5997,7 @@ class TestP1ChargeLagFastPath:
             level=100,
             home_output=200,
         )
+        primary.solarInput.update_value(200)
         primary.byPass.update_value(1)
         secondary = make_device(
             hass,
@@ -5944,6 +6049,7 @@ class TestP1ChargeLagFastPath:
             home_input=300,
             battery_input=300,
         )
+        device.solarInput.update_value(300)
         manager = make_manager(
             hass,
             devices=(device,),
@@ -5971,6 +6077,7 @@ class TestP1ChargeLagFastPath:
             home_input=300,
             battery_input=300,
         )
+        device.solarInput.update_value(300)
         manager = make_manager(
             hass,
             devices=(device,),
@@ -5978,7 +6085,7 @@ class TestP1ChargeLagFastPath:
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
-        manager.p1_last_update = datetime.now()
+        manager.p1_charge_lag_last_update = datetime.now()
         manager.powerChanged = AsyncMock()
 
         await manager._p1_changed(make_p1_event(150))

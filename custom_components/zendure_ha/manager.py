@@ -248,6 +248,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
         self.p1_factor = 1
         self.p1_last_update = datetime.min
+        self.p1_charge_lag_last_update = datetime.min
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -301,36 +302,57 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Return whether recent routing state can benefit from faster charge correction."""
         if self.operation not in P1_CHARGE_LAG_FAST_PRIMARY_AWARE_MODES:
             return False
-        if self.charge:
+        if any(self._device_reports_active_pv_charge(device) for device in self.devices):
+            return True
+        if any(self._device_reports_pv(device) for device in self.charge):
             return True
 
-        selected_primary = self.resolve_primary_device()
-        if selected_primary is None:
-            return False
-
-        primary_bypass_pv = (
-            selected_primary in self.discharge
-            and selected_primary.state == DeviceState.SOCFULL
-            and getattr(selected_primary, "byPass", None) is not None
-            and selected_primary.byPass.is_on
-            and selected_primary.homeOutput.asInt > 0
-        )
-        if not primary_bypass_pv:
+        full_bypass_pv = any(self._device_reports_full_bypass_pv(device) for device in self.devices)
+        if not full_bypass_pv:
             return False
 
         return any(
-            device is not selected_primary
-            and device.online
+            device.online and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL} and device.charge_limit < 0
+            for device in self.devices
+        )
+
+    @staticmethod
+    def _device_reports_full_bypass_pv(device: ZendureDevice) -> bool:
+        """Return whether telemetry shows a full bypassing device passing PV home."""
+        bypass = getattr(device, "byPass", None)
+        return (
+            device.online
+            and device.state == DeviceState.SOCFULL
+            and ZendureManager._device_reports_pv(device)
+            and bypass is not None
+            and bool(bypass.is_on)
+            and device.homeOutput.asInt > 0
+        )
+
+    @staticmethod
+    def _device_reports_pv(device: ZendureDevice) -> bool:
+        """Return whether telemetry or previous routing shows current PV production."""
+        return device.solarInput.asInt > 0 or device.pwr_produced < 0
+
+    @staticmethod
+    def _device_reports_active_pv_charge(device: ZendureDevice) -> bool:
+        """Return whether telemetry shows the device is currently charging from PV."""
+        return (
+            device.online
             and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
             and device.charge_limit < 0
-            for device in self.devices
+            and ZendureManager._device_reports_pv(device)
+            and (
+                device.homeInput.asInt > max(0, device.pwr_offgrid)
+                or device.batteryInput.asInt > device.batteryOutput.asInt
+            )
         )
 
     def _should_fast_track_charge_lag_p1(self, p1: int, time: datetime) -> bool:
         """Return whether P1 should bypass the normal debounce for charge-lag correction."""
         return (
             abs(p1) > P1_CHARGE_LAG_FAST_DEVIATION
-            and time - self.p1_last_update >= SmartMode.P1_MIN_UPDATE
+            and time - self.p1_charge_lag_last_update >= SmartMode.P1_MIN_UPDATE
             and self._has_charge_lag_fast_path_state()
         )
 
@@ -1123,7 +1145,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 _LOGGER.error(err)
                 _LOGGER.error(traceback.format_exc())
             finally:
-                self._restore_p1_update_timing()
+                time = datetime.now()
+                if fast_charge_lag_correction:
+                    self.p1_charge_lag_last_update = time
+                self._restore_p1_update_timing(time)
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
