@@ -17,6 +17,7 @@ from .common import (
     attach_devices,
     make_device,
     make_manager,
+    make_p1_event,
 )
 
 LOW_SOC_DEVICE_CASES = (
@@ -5837,6 +5838,173 @@ class TestSmartMatchingPrimaryAware:
         await manager.powerChanged(-300, False, datetime.now())
 
         secondary.power_charge.assert_awaited_once_with(-300)
+
+
+class TestP1ChargeLagFastPath:
+    """Verify active charge correction can bypass normal P1 debounce."""
+
+    @staticmethod
+    def _block_normal_p1_debounce(manager) -> None:
+        now = datetime.now()
+        manager.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
+        manager.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
+        manager.p1_last_update = now - SmartMode.P1_MIN_UPDATE
+
+    @pytest.mark.parametrize("p1_value", [pytest.param(150, id="import"), pytest.param(-100, id="export")])
+    async def test_active_charge_deviation_bypasses_p1_debounce(self, hass, p1_value):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-fast-charge-{p1_value}",
+            device_name=f"sf800 pro fast charge {p1_value}",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            charge_devices=(device,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(p1_value))
+
+        manager.powerChanged.assert_awaited_once()
+        await_args = manager.powerChanged.await_args
+        assert await_args is not None
+        assert await_args.args[0] == p1_value
+        assert await_args.args[1] is True
+
+    async def test_bypassing_primary_with_charge_candidate_bypasses_p1_debounce(self, hass):
+        p1_value = -100
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-bypass-primary",
+            device_name="sf800 pro fast bypass primary",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            home_output=200,
+        )
+        primary.byPass.update_value(1)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-bypass-secondary",
+            device_name="sf800 pro fast bypass secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+            discharge_devices=(primary,),
+            idle_devices=(secondary,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(p1_value))
+
+        manager.powerChanged.assert_awaited_once()
+        await_args = manager.powerChanged.await_args
+        assert await_args is not None
+        assert await_args.args[0] == p1_value
+        assert await_args.args[1] is True
+
+    @pytest.mark.parametrize(
+        "p1_value",
+        [
+            pytest.param(20, id="positive-edge"),
+            pytest.param(-20, id="negative-edge"),
+            pytest.param(10, id="positive-small"),
+            pytest.param(-10, id="negative-small"),
+        ],
+    )
+    async def test_charge_lag_deadband_keeps_existing_p1_debounce(self, hass, p1_value):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-fast-deadband-{p1_value}",
+            device_name=f"sf800 pro fast deadband {p1_value}",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            charge_devices=(device,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(p1_value))
+
+        manager.powerChanged.assert_not_awaited()
+
+    async def test_charge_lag_fast_path_respects_minimum_p1_interval(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-charge-min-interval",
+            device_name="sf800 pro fast charge min interval",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            charge_devices=(device,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.p1_last_update = datetime.now()
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(150))
+
+        manager.powerChanged.assert_not_awaited()
+
+    async def test_charge_lag_fast_path_requires_active_charge_state(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-no-charge-state",
+            device_name="sf800 pro fast no charge state",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(150))
+
+        manager.powerChanged.assert_not_awaited()
 
 
 class TestZeroFastRecovery:

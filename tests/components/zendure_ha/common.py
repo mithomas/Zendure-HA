@@ -46,6 +46,15 @@ def make_config_entry(data: dict[str, Any] | None = None) -> MockConfigEntry:
     return MockConfigEntry(domain=DOMAIN, data=data or config_entry_data())
 
 
+def make_p1_event(value: float | str) -> Mock:
+    """Create a HomeAssistant-style P1 state change event."""
+    state = Mock()
+    state.state = str(value)
+    event = Mock()
+    event.data = {"new_state": state, "old_state": None, "entity_id": "sensor.power_actual"}
+    return event
+
+
 def make_device_definition(
     *,
     device_id: str,

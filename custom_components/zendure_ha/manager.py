@@ -53,6 +53,13 @@ PV_CHARGE_FIRST_PRIMARY_AWARE_MODES = {
     ManagerMode.MATCHING_CHARGE_PRIMARY_AWARE,
 }
 
+P1_CHARGE_LAG_FAST_DEVIATION = 20
+
+P1_CHARGE_LAG_FAST_PRIMARY_AWARE_MODES = {
+    ManagerMode.MATCHING_PRIMARY_AWARE,
+    ManagerMode.MATCHING_CHARGE_PRIMARY_AWARE,
+}
+
 LOW_SOC_STATES = {
     *EMPTY_SOC_STATES,
     DeviceState.RESERVE_RECOVERY,
@@ -240,6 +247,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1meterEvent: Callable[[], None] | None = None
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
         self.p1_factor = 1
+        self.p1_last_update = datetime.min
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -281,6 +289,50 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.produced = 0
         for fg in self.fuseGroups:
             fg.initPower = True
+
+    def _restore_p1_update_timing(self, time: datetime | None = None) -> None:
+        """Restore P1 debounce timers after a routing update."""
+        time = datetime.now() if time is None else time
+        self.p1_last_update = time
+        self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
+        self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+
+    def _has_charge_lag_fast_path_state(self) -> bool:
+        """Return whether recent routing state can benefit from faster charge correction."""
+        if self.operation not in P1_CHARGE_LAG_FAST_PRIMARY_AWARE_MODES:
+            return False
+        if self.charge:
+            return True
+
+        selected_primary = self.resolve_primary_device()
+        if selected_primary is None:
+            return False
+
+        primary_bypass_pv = (
+            selected_primary in self.discharge
+            and selected_primary.state == DeviceState.SOCFULL
+            and getattr(selected_primary, "byPass", None) is not None
+            and selected_primary.byPass.is_on
+            and selected_primary.homeOutput.asInt > 0
+        )
+        if not primary_bypass_pv:
+            return False
+
+        return any(
+            device is not selected_primary
+            and device.online
+            and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
+            and device.charge_limit < 0
+            for device in self.devices
+        )
+
+    def _should_fast_track_charge_lag_p1(self, p1: int, time: datetime) -> bool:
+        """Return whether P1 should bypass the normal debounce for charge-lag correction."""
+        return (
+            abs(p1) > P1_CHARGE_LAG_FAST_DEVIATION
+            and time - self.p1_last_update >= SmartMode.P1_MIN_UPDATE
+            and self._has_charge_lag_fast_path_state()
+        )
 
     async def loadDevices(self) -> None:
         if (
@@ -548,9 +600,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self._reset_power_distribution_state()
             await self.powerChanged(p1, False, datetime.now())
         finally:
-            time = datetime.now()
-            self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
-            self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+            self._restore_p1_update_timing()
 
     def refresh_primary_device_options(self) -> None:
         """Refresh the selectable primary device list."""
@@ -1043,8 +1093,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if ZendureManager.simulation:
             self.writeSimulation(time, p1)
 
+        fast_charge_lag_correction = self._should_fast_track_charge_lag_p1(p1, time)
+
         # Check for fast delay
-        if time < self.zero_fast:
+        if time < self.zero_fast and not fast_charge_lag_correction:
             _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
             self.p1_history.append(p1)
             return
@@ -1062,18 +1114,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_history.append(p1)
 
         # check minimal time between updates
-        if isFast or time > self.zero_next:
+        if isFast or fast_charge_lag_correction or time > self.zero_next:
             try:
                 # prevent updates during power distribution changes
                 self._reset_power_distribution_state()
-                await self.powerChanged(p1, isFast, time)
+                await self.powerChanged(p1, isFast or fast_charge_lag_correction, time)
             except Exception as err:
                 _LOGGER.error(err)
                 _LOGGER.error(traceback.format_exc())
             finally:
-                time = datetime.now()
-                self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
-                self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+                self._restore_p1_update_timing()
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
