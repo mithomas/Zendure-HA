@@ -1295,9 +1295,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 local_chargeable_surplus = non_primary_local_chargeable_surplus + selected_primary_local_surplus
                 if protects_selected_primary_floor:
                     requested_charge = max(0, -surplus_setpoint)
+                    uncovered_primary_floor = max(
+                        0,
+                        active_primary_produced_floor - max(0, discharge_candidate_setpoint),
+                    )
                     charge_without_primary_floor = max(
                         local_chargeable_surplus,
-                        requested_charge - active_primary_produced_floor,
+                        requested_charge - uncovered_primary_floor,
                     )
                     setpoint = (
                         -charge_without_primary_floor

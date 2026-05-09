@@ -5921,6 +5921,68 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge.assert_awaited_once_with(-100)
         secondary.power_charge.assert_awaited_once_with(-200)
 
+    async def test_routes_near_full_primary_pv_overflow_to_the_secondary(self, hass):
+        """
+        A near-full selected primary should keep only its tapered PV charge and hand excess PV to the secondary.
+
+        The primary has 500W PV: 200W already serves the home and 300W is currently flowing into the battery.
+        At 99% SoC it may keep only 100W for charging, so the remaining 200W must be routed to the secondary
+        instead of being dropped when the primary charge target is reduced.
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-near-full-pv-overflow",
+            device_name="sf800 pro primary near full pv overflow",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_output=200,
+            battery_input=300,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-near-full-pv-overflow",
+            device_name="sf800 pro secondary near full pv overflow",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        primary.fuseGrp.devices = [primary, secondary]
+        secondary.fuseGrp = primary.fuseGrp
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(0, False, datetime.now())
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        primary.power_charge.assert_awaited_once_with(-100)
+        secondary.power_charge.assert_awaited_once_with(-200)
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
     async def test_falls_back_to_the_secondary_for_discharge_when_the_primary_is_offline(self, hass):
         """If the selected primary is offline, the secondary should take over the discharge target."""
         primary = make_device(
