@@ -231,7 +231,8 @@
           "2": "Empty",
           "3": "Reserve recovery",
           "4": "Reserve",
-          "5": "Offline"
+          "5": "Offline",
+          "6": "Nearly full"
         }
       },
       "hub_state": {
@@ -284,6 +285,19 @@
           "1": "Charging",
           "2": "Discharging",
           "3": "Off"
+        }
+      },
+      "device_state": {
+        "name": "State",
+        "state": {
+          "0": "Offline",
+          "1": "Empty",
+          "2": "Normal",
+          "3": "Full",
+          "4": "Active",
+          "5": "Reserve recovery",
+          "6": "Reserve",
+          "7": "Nearly full"
         }
       },
       "state": {

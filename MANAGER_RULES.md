@@ -15,13 +15,14 @@ The manager accounts for power devices are already providing or consuming before
 
 Device reserve and recovery state is owned by the device; the manager consumes it and must not recompute it from back-references.
 
-| State      | SoC condition                      | Battery discharge | Available energy                               | PV routing                                        |
-|------------|------------------------------------|-------------------|------------------------------------------------|---------------------------------------------------|
-| Empty      | At or below minimum SoC            | Blocked           | Excluded                                       | Battery-first (PV → own battery before home load) |
-| At reserve | Above minimum, at or below reserve | Blocked           | Excluded                                       | Normal (household-load-first); current PV still serves home |
-| Recovering | Any                                | Blocked           | Excluded                                       | Pass-through preserved for home demand            |
-| Offline    | Any                                | Blocked           | Excluded from *available*; included in *total* | —                                                 |
-| Normal     | Above reserve, not recovering      | Allowed           | Included                                       | Normal                                            |
+| State        | SoC condition                      | Battery discharge | Available energy                               | PV routing                                        |
+|--------------|------------------------------------|-------------------|------------------------------------------------|---------------------------------------------------|
+| Empty        | At or below minimum SoC            | Blocked           | Excluded                                       | Battery-first (PV → own battery before home load) |
+| At reserve   | Above minimum, at or below reserve | Blocked           | Excluded                                       | Normal (household-load-first); current PV still serves home |
+| Recovering   | Any                                | Blocked           | Excluded                                       | Pass-through preserved for home demand            |
+| Offline      | Any                                | Blocked           | Excluded from *available*; included in *total* | —                                                 |
+| Near-full    | In device-specific taper range     | Allowed           | Included                                       | Normal; charge capped by taper (see below)        |
+| Normal       | Above reserve, not recovering      | Allowed           | Included                                       | Normal                                            |
 
 > **Note:** *Available energy* excludes offline devices. *Total available energy* retains offline devices so the aggregate does not vanish when a device is temporarily unreachable. Negative contributions are clamped to zero.
 
@@ -78,6 +79,27 @@ Apply sources in priority order, stopping when demand is covered:
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
 
 > **Anti-oscillation:** entering charge mode sets a hold timer that suppresses any immediate flip back to discharge. The timer is 2 s if the previous charge session ended more than 5 minutes ago, or 60 s otherwise. In primary-aware mode an additional short delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home.
+
+## Near-full Charge Taper
+
+To prevent hardware-level PV curtailment near the configured target, the SF800 Pro applies a software charge cap once SoC enters the taper range below `socSet`. The cap reduces the charge rate in steps as SoC rises:
+
+| SoC band relative to `socSet` | Example at `socSet = 80 %` | Max charge rate  |
+|--------------------------------|----------------------------|------------------|
+| `socSet - 6` through `socSet - 5` | 74 – 75 %                  | 200 W            |
+| `socSet - 4` through `socSet - 3` | 76 – 77 %                  | 150 W            |
+| `socSet - 2` through `socSet - 1` | 78 – 79 %                  | 100 W            |
+| At or above `socSet`             | 80 % or above              | Bypass (SOCFULL) |
+
+The taper uses the `SOCNEARLYFULL` device state (rather than `ACTIVE`/`INACTIVE`), but is otherwise treated as a normal chargeable state:
+
+- **Charge is allowed** but capped at the taper rate via `effective_charge_limit`.
+- **Bypass is not triggered.** Bypass (pass-through via `power_bypass`) is reserved for `SOCFULL`. A near-full device receives normal charge commands, not a bypass command.
+- **Sensors expose near-full distinctly.** The device state sensor reports `SOCNEARLYFULL`, and the SoC Limit sensor reports `Nearly full` rather than `Full`.
+- **Discharge is unrestricted.** The taper does not block battery discharge.
+- **Overflow is routed normally.** Capping charge at the taper rate reduces the surplus that the device will absorb. The remaining surplus is distributed to other sinks (home load → other batteries → grid export) through the normal routing logic — no special overflow handling is needed.
+- **"Keep local PV local" is suspended.** When a device is near-full, its charge cap may prevent it from absorbing all its own PV. Excess PV is routed outward rather than being withheld.
+- **Drop-back.** If SoC falls more than 6 percentage points below `socSet` (e.g. during active discharge), `taper_charge_limit` returns `None`, the state returns to `INACTIVE` or `ACTIVE`, and the full charge rate is restored automatically.
 
 ## Grid Demand During Charge Lag
 

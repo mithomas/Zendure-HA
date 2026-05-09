@@ -220,7 +220,8 @@
           "2": "Leer",
           "3": "Reserve-Erholung",
           "4": "Reserve",
-          "5": "Offline"
+          "5": "Offline",
+          "6": "Fast voll"
         }
       },
       "hub_state": {
@@ -273,6 +274,19 @@
           "1": "Laden",
           "2": "Entladen",
           "3": "Aus"
+        }
+      },
+      "device_state": {
+        "name": "Status",
+        "state": {
+          "0": "Offline",
+          "1": "Leer",
+          "2": "Normal",
+          "3": "Voll",
+          "4": "Aktiv",
+          "5": "Reserve-Erholung",
+          "6": "Reserve",
+          "7": "Fast voll"
         }
       },
       "state": {

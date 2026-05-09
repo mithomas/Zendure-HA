@@ -48,6 +48,7 @@ class EntityZendure(Entity):
         device: EntityDevice | None,
         uniqueid: str,
         domain: str = "",
+        translation_key: str | None = None,
     ) -> None:
         """Initialize a Zendure entity."""
         self._attr_has_entity_name = True
@@ -62,7 +63,7 @@ class EntityZendure(Entity):
         self.propertyName = uniqueid
         self._attr_unique_id = snakecase(f"{self.device.entity_prefix}_{uniqueid}")
         self.internal_integration_suggested_object_id = self._attr_unique_id
-        self._attr_translation_key = snakecase(uniqueid)
+        self._attr_translation_key = snakecase(translation_key or uniqueid)
         device.entities[uniqueid] = self
         if domain and device.checkEntity is not None and self._attr_translation_key not in device.checkEntity:
             device.checkEntity[self._attr_translation_key] = domain

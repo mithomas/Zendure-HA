@@ -30,7 +30,7 @@ from stringcase import camelcase
 
 from .binary_sensor import ZendureBinarySensor
 from .button import ZendureButton
-from .const import ConnectionMode, DeviceState, SmartMode
+from .const import ConnectionMode, DeviceState, SmartMode, SocLimitState
 from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber, ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -44,6 +44,14 @@ CONST_HEADER_CLOSE = {**CONST_HEADER, "Connection": "close"}
 CONST_TIMEOUT = ClientTimeout(total=4)
 FULL_SOC_PERCENT = 100
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
+SOC_LIMIT_BY_DEVICE_STATE = {
+    DeviceState.SOCFULL: SocLimitState.FULL,
+    DeviceState.SOCNEARLYFULL: SocLimitState.NEARLY_FULL,
+    DeviceState.SOCEMPTY: SocLimitState.EMPTY,
+    DeviceState.RESERVE_RECOVERY: SocLimitState.RESERVE_RECOVERY,
+    DeviceState.SOCRESERVE: SocLimitState.RESERVE,
+    DeviceState.OFFLINE: SocLimitState.OFFLINE,
+}
 
 
 class ZendureBattery(EntityDevice):
@@ -173,7 +181,8 @@ class ZendureDevice(EntityDevice):
             self, "socReserve", self.refresh_recovery_state, None, "%", "soc", 100, 5, NumberMode.SLIDER, True
         )
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
-        self.socLimit = ZendureSensor(self, "socLimit", state=0)
+        self.socLimit = ZendureSensor(self, "socLimit", state=SocLimitState.NORMAL.value)
+        self.deviceState = ZendureSensor(self, "state", state=self.state.value, translation_key="device_state")
         self.byPass = ZendureBinarySensor(self, "pass")
         self.discharge_recovery_active = ZendureBinarySensor(self, "dischargeRecoveryActive", initial_state=True)
 
@@ -264,6 +273,9 @@ class ZendureDevice(EntityDevice):
         if key in {"remainOutTime", "remainInputTime"}:
             self.remainingTime.update_value(self.calcRemainingTime())
             return True
+        if key == "state":
+            self.update_device_state()
+            return False
 
         previous_soc_limit = self.socLimit.asInt if key == "socLimit" and hasattr(self, "socLimit") else None
         if key == "socLimit":
@@ -366,9 +378,11 @@ class ZendureDevice(EntityDevice):
 
         if not self.online or self.socSet.asNumber == 0 or self.kWh == 0:
             self.state = DeviceState.OFFLINE
-        elif self._raw_soc_limit == SmartMode.SOCFULL or self.electricLevel.asInt >= self.socSet.asNumber:
+        elif self._raw_soc_limit == SocLimitState.FULL or self.electricLevel.asInt >= self.socSet.asNumber:
             self.state = DeviceState.SOCFULL
-        elif self._raw_soc_limit == SmartMode.SOCEMPTY or level <= min_soc:
+        elif self.taper_charge_limit is not None:
+            self.state = DeviceState.SOCNEARLYFULL
+        elif self._raw_soc_limit == SocLimitState.EMPTY or level <= min_soc:
             self.state = DeviceState.SOCEMPTY
         elif min_soc < level <= reserve:
             self.state = DeviceState.SOCRESERVE
@@ -376,23 +390,25 @@ class ZendureDevice(EntityDevice):
             self.state = DeviceState.RESERVE_RECOVERY
         else:
             self.state = DeviceState.INACTIVE
-        self.socLimit.update_value(self._soc_limit_value_for_state())
+        self.socLimit.update_value(self._soc_limit_value_for_state().value)
+        self.deviceState.update_value(self.state.value)
 
-    def _soc_limit_value_for_state(self) -> int:
+    @property
+    def taper_charge_limit(self) -> int | None:
+        """Return the maximum charge rate in watts when near-full, or None if not tapering."""
+        return None
+
+    @property
+    def effective_charge_limit(self) -> int:
+        """Return the effective charge limit, respecting any near-full taper."""
+        taper = self.taper_charge_limit
+        if taper is not None:
+            return max(self.charge_limit, -taper)
+        return self.charge_limit
+
+    def _soc_limit_value_for_state(self) -> SocLimitState:
         """Return the public SoC Limit sensor value for the effective device state."""
-        match self.state:
-            case DeviceState.SOCFULL:
-                return SmartMode.SOCFULL
-            case DeviceState.SOCEMPTY:
-                return SmartMode.SOCEMPTY
-            case DeviceState.RESERVE_RECOVERY:
-                return 3
-            case DeviceState.SOCRESERVE:
-                return 4
-            case DeviceState.OFFLINE:
-                return 5
-            case _:
-                return 0
+        return SOC_LIMIT_BY_DEVICE_STATE.get(self.state, SocLimitState.NORMAL)
 
     def refresh_discharge_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
         """Refresh all device-local state derived from the current discharge baseline."""
@@ -838,7 +854,7 @@ class ZendureDevice(EntityDevice):
 
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
-        power = min(0, max(power, self.charge_limit))
+        power = min(0, max(power, self.effective_charge_limit))
         if abs(power - self.homeInput.asInt + self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
             return power

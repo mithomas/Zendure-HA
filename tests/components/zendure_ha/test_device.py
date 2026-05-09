@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
-from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SmartMode
+from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SocLimitState
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.sensor import ZendureSensor
@@ -78,7 +78,7 @@ def test_available_kwh_uses_reserve_aware_floor(hass, level, min_soc, reserve, k
         (10, 5, 10, 0, DeviceState.SOCRESERVE),
         (11, 5, 10, 0, DeviceState.INACTIVE),
         (8, 10, 5, 0, DeviceState.SOCEMPTY),
-        (8, 5, 10, SmartMode.SOCEMPTY, DeviceState.SOCEMPTY),
+        (8, 5, 10, SocLimitState.EMPTY, DeviceState.SOCEMPTY),
     ],
 )
 def test_device_state_distinguishes_empty_from_reserve_floor(
@@ -114,11 +114,22 @@ def test_device_state_distinguishes_empty_from_reserve_floor(
     ),
     [
         (50, 10, 10, 80, 0, False, 0, True, DeviceState.INACTIVE, 0),
-        (80, 10, 10, 80, 0, False, 0, True, DeviceState.SOCFULL, SmartMode.SOCFULL),
-        (10, 10, 10, 80, 0, False, 0, True, DeviceState.SOCEMPTY, SmartMode.SOCEMPTY),
-        (10, 5, 10, 80, 0, False, 0, True, DeviceState.SOCRESERVE, 4),
-        (12, 10, 10, 80, 0, True, 5, True, DeviceState.RESERVE_RECOVERY, 3),
-        (50, 10, 10, 80, 0, False, 0, False, DeviceState.OFFLINE, 5),
+        (80, 10, 10, 80, 0, False, 0, True, DeviceState.SOCFULL, SocLimitState.FULL),
+        (10, 10, 10, 80, 0, False, 0, True, DeviceState.SOCEMPTY, SocLimitState.EMPTY),
+        (10, 5, 10, 80, 0, False, 0, True, DeviceState.SOCRESERVE, SocLimitState.RESERVE),
+        (
+            12,
+            10,
+            10,
+            80,
+            0,
+            True,
+            5,
+            True,
+            DeviceState.RESERVE_RECOVERY,
+            SocLimitState.RESERVE_RECOVERY,
+        ),
+        (50, 10, 10, 80, 0, False, 0, False, DeviceState.OFFLINE, SocLimitState.OFFLINE),
     ],
 )
 def test_soc_limit_sensor_exposes_effective_device_state(
@@ -146,6 +157,7 @@ def test_soc_limit_sensor_exposes_effective_device_state(
 
     assert device.state is expected_state
     assert device.socLimit.asInt == expected_soc_limit
+    assert cast("ZendureSensor", device.entities["state"]).asInt == expected_state.value
 
 
 def test_soc_limit_sensor_drops_threshold_full_when_soc_falls_below_target(hass):
@@ -153,7 +165,7 @@ def test_soc_limit_sensor_drops_threshold_full_when_soc_falls_below_target(hass)
     device = make_device(hass, level=80, min_soc=10, reserve=10, soc_set=80)
 
     assert device.state is DeviceState.SOCFULL
-    assert device.socLimit.asInt == SmartMode.SOCFULL
+    assert device.socLimit.asInt == SocLimitState.FULL
 
     device.electricLevel.update_value(79)
     device.refresh_discharge_state()
@@ -166,12 +178,12 @@ def test_raw_soc_limit_full_override_still_forces_effective_full(hass):
     """The device-reported full limit should still force the effective full state."""
     device = make_device(hass, level=50, min_soc=10, reserve=10, soc_set=80)
 
-    device.entityUpdate("socLimit", SmartMode.SOCFULL)
+    device.entityUpdate("socLimit", SocLimitState.FULL)
     device.electricLevel.update_value(40)
     device.refresh_discharge_state()
 
     assert device.state is DeviceState.SOCFULL
-    assert device.socLimit.asInt == SmartMode.SOCFULL
+    assert device.socLimit.asInt == SocLimitState.FULL
 
 
 def test_soc_set_update_refreshes_effective_soc_limit_state(hass):
@@ -179,7 +191,7 @@ def test_soc_set_update_refreshes_effective_soc_limit_state(hass):
     device = make_device(hass, level=80, min_soc=10, reserve=10, soc_set=80)
 
     assert device.state is DeviceState.SOCFULL
-    assert device.socLimit.asInt == SmartMode.SOCFULL
+    assert device.socLimit.asInt == SocLimitState.FULL
 
     device.entityUpdate("socSet", TARGET_SOC_AFTER_UPDATE * 10)
 
@@ -574,3 +586,148 @@ class TestHttpConnectionClose:
         call_kwargs = device.session.post.call_args
         headers = call_kwargs.kwargs.get("headers") or call_kwargs[1].get("headers")
         assert headers["Connection"] == "close"
+
+
+@pytest.mark.parametrize(
+    ("level", "soc_set", "expected_taper"),
+    [
+        (93, 100, None),
+        (94, 100, 200),
+        (95, 100, 200),
+        (96, 100, 150),
+        (97, 100, 150),
+        (98, 100, 100),
+        (99, 100, 100),
+        (100, 100, None),
+        (73, 80, None),
+        (74, 80, 200),
+        (75, 80, 200),
+        (76, 80, 150),
+        (77, 80, 150),
+        (78, 80, 100),
+        (79, 80, 100),
+        (80, 80, None),
+    ],
+)
+def test_sf800_pro_taper_charge_limit_by_soc_set_offset(hass, level, soc_set, expected_taper):
+    """SF800 Pro should return the correct taper limit by distance below socSet."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-taper",
+        product_model="SolarFlow 800 Pro",
+        level=level,
+        soc_set=soc_set,
+    )
+
+    assert device.taper_charge_limit == expected_taper
+
+
+@pytest.mark.parametrize(
+    ("level", "soc_set", "expected_effective"),
+    [
+        (90, 100, -1000),
+        (93, 100, -1000),
+        (94, 100, -200),
+        (96, 100, -150),
+        (98, 100, -100),
+        (73, 80, -1000),
+        (74, 80, -200),
+        (76, 80, -150),
+        (78, 80, -100),
+    ],
+)
+def test_sf800_pro_effective_charge_limit_reflects_relative_taper(hass, level, soc_set, expected_effective):
+    """effective_charge_limit should match the taper cap in watts (negative) or the device limit."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-effective",
+        product_model="SolarFlow 800 Pro",
+        level=level,
+        soc_set=soc_set,
+    )
+
+    assert device.effective_charge_limit == expected_effective
+
+
+@pytest.mark.parametrize(
+    ("level", "soc_set", "expected_state"),
+    [
+        (90, 100, DeviceState.INACTIVE),
+        (94, 100, DeviceState.SOCNEARLYFULL),
+        (95, 100, DeviceState.SOCNEARLYFULL),
+        (98, 100, DeviceState.SOCNEARLYFULL),
+        (100, 100, DeviceState.SOCFULL),
+        (73, 80, DeviceState.INACTIVE),
+        (74, 80, DeviceState.SOCNEARLYFULL),
+        (78, 80, DeviceState.SOCNEARLYFULL),
+        (79, 80, DeviceState.SOCNEARLYFULL),
+        (80, 80, DeviceState.SOCFULL),
+        (81, 80, DeviceState.SOCFULL),
+    ],
+)
+def test_sf800_pro_state_transitions_around_taper_thresholds(hass, level, soc_set, expected_state):
+    """SF800 Pro should enter SOCNEARLYFULL near socSet but SOCFULL at/above socSet."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-state",
+        product_model="SolarFlow 800 Pro",
+        level=level,
+        soc_set=soc_set,
+    )
+
+    device.refresh_discharge_state()
+
+    assert device.state is expected_state
+
+
+def test_base_device_has_no_taper_by_default(hass):
+    """Base ZendureDevice should return None for taper_charge_limit (no taper)."""
+    device = make_device(hass, level=95)
+
+    assert device.taper_charge_limit is None
+    assert device.effective_charge_limit == device.charge_limit
+
+
+def test_sf800_pro_socnearlyfull_state_uses_nearly_full_soc_limit_sensor(hass):
+    """SOCNEARLYFULL should expose a distinct SoC Limit sensor value."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-sensor",
+        product_model="SolarFlow 800 Pro",
+        level=95,
+        soc_set=100,
+    )
+
+    device.refresh_discharge_state()
+
+    assert device.state is DeviceState.SOCNEARLYFULL
+    assert device.socLimit.asInt == SocLimitState.NEARLY_FULL
+    state_sensor = cast("ZendureSensor", device.entities["state"])
+    assert state_sensor.asInt == DeviceState.SOCNEARLYFULL.value
+    assert state_sensor.translation_key == "device_state"
+
+
+def test_raw_device_state_update_does_not_overwrite_derived_state_sensor(hass):
+    """Device-level raw state telemetry should not replace the derived device state sensor."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-derived-state",
+        product_model="SolarFlow 800 Pro",
+        level=95,
+        soc_set=100,
+    )
+    state_sensor = cast("ZendureSensor", device.entities["state"])
+
+    assert device.state is DeviceState.SOCNEARLYFULL
+    assert state_sensor.asInt == DeviceState.SOCNEARLYFULL.value
+
+    changed = device.entityUpdate("state", 1)
+
+    assert changed is False
+    assert device.state is DeviceState.SOCNEARLYFULL
+    assert state_sensor.asInt == DeviceState.SOCNEARLYFULL.value

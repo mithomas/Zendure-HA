@@ -148,7 +148,7 @@ class _PowerRoutingSnapshot:
             return 0
         if route.device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL} or route.device.charge_limit >= 0:
             return 0
-        return min(route.produced_home, -route.device.charge_limit)
+        return min(route.produced_home, -route.device.effective_charge_limit)
 
     @property
     def selected_primary_bypass_passthrough(self) -> int:
@@ -729,7 +729,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     def _primary_charge_limit(self, device: ZendureDevice) -> int:
         """Return the maximum charge power for the primary within its fusegroup."""
         other_input = sum(max(0, other.homeInput.asInt) for other in device.fuseGrp.devices if other is not device)
-        return min(0, max(device.charge_limit, device.fuseGrp.minpower + other_input))
+        return min(0, max(device.effective_charge_limit, device.fuseGrp.minpower + other_input))
 
     def _primary_discharge_limit(self, device: ZendureDevice) -> int:
         """Return the maximum discharge power for the primary within its fusegroup."""
@@ -739,11 +739,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     @staticmethod
     def _current_charge_surplus_limit(device: ZendureDevice) -> int:
         """Return current locally produced surplus that can stay on this device for charging."""
-        if not device.online or device.charge_limit >= 0:
+        if not device.online or device.effective_charge_limit >= 0:
             return 0
         if device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
             return 0
-        return min(-device.charge_limit, max(0, -device.pwr_produced - max(0, device.homeOutput.asInt)))
+        return min(-device.effective_charge_limit, max(0, -device.pwr_produced - max(0, device.homeOutput.asInt)))
 
     def _power_routing_snapshot(
         self,

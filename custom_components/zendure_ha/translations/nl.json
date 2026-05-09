@@ -202,7 +202,8 @@
           "2": "Leeg",
           "3": "Reserveherstel",
           "4": "Reserve",
-          "5": "Offline"
+          "5": "Offline",
+          "6": "Bijna vol"
         }
       },
       "hub_state": {
@@ -254,6 +255,19 @@
           "1": "Laden",
           "2": "Ontladen",
           "3": "Uit"
+        }
+      },
+      "device_state": {
+        "name": "Status",
+        "state": {
+          "0": "Offline",
+          "1": "Leeg",
+          "2": "Normaal",
+          "3": "Vol",
+          "4": "Actief",
+          "5": "Reserveherstel",
+          "6": "Reserve",
+          "7": "Bijna vol"
         }
       },
       "state": {

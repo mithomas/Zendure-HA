@@ -456,7 +456,7 @@ class TestSmartMatchingPrimaryAware:
         await manager.powerChanged(100, False, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
-        assert secondary.state is DeviceState.INACTIVE
+        assert secondary.state is DeviceState.SOCNEARLYFULL
         primary.power_discharge.assert_awaited_once_with(170)
         secondary.power_discharge.assert_awaited_once_with(30)
         primary.power_bypass.assert_not_awaited()
@@ -508,8 +508,8 @@ class TestSmartMatchingPrimaryAware:
 
         await manager.powerChanged(100, False, datetime.now())
 
-        assert primary.state is DeviceState.INACTIVE
-        assert secondary.state is DeviceState.INACTIVE
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        assert secondary.state is DeviceState.SOCNEARLYFULL
         primary.power_discharge.assert_awaited_once_with(170)
         secondary.power_discharge.assert_awaited_once_with(30)
         primary.power_bypass.assert_not_awaited()
@@ -661,7 +661,7 @@ class TestSmartMatchingPrimaryAware:
 
         await manager.powerChanged(81, False, datetime.now())
 
-        assert first.state is DeviceState.INACTIVE
+        assert first.state is DeviceState.SOCNEARLYFULL
         assert second.state is DeviceState.RESERVE_RECOVERY
         first.power_discharge.assert_awaited_once_with(336)
         second.power_discharge.assert_not_awaited()
@@ -712,7 +712,7 @@ class TestSmartMatchingPrimaryAware:
         await manager.powerChanged(81, False, datetime.now())
 
         assert first.state is low_soc_state
-        assert second.state is DeviceState.INACTIVE
+        assert second.state is DeviceState.SOCNEARLYFULL
         first.power_discharge.assert_not_awaited()
         second.power_discharge.assert_awaited_once_with(336)
         first.power_bypass.assert_not_awaited()
@@ -5863,7 +5863,12 @@ class TestSmartMatchingPrimaryAware:
         second.power_discharge.assert_not_awaited()
 
     async def test_charges_a_99_percent_primary_in_output_mode_before_the_secondary(self, hass):
-        """A selected primary at 99% should still receive charge priority even if it was previously in AC output mode."""
+        """
+        A selected primary at 99% should still receive charge priority even if it was previously in AC output mode.
+
+        At 99% the taper cap is 100W, so the primary absorbs up to 100W and the remaining surplus
+        overflows to the secondary via normal routing.
+        """
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -5911,10 +5916,10 @@ class TestSmartMatchingPrimaryAware:
 
         await manager.powerChanged(-300, False, datetime.now())
 
-        assert primary.state is DeviceState.INACTIVE
+        assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_discharge.assert_not_awaited()
-        primary.power_charge.assert_awaited_once_with(-300)
-        secondary.power_charge.assert_not_awaited()
+        primary.power_charge.assert_awaited_once_with(-100)
+        secondary.power_charge.assert_awaited_once_with(-200)
 
     async def test_falls_back_to_the_secondary_for_discharge_when_the_primary_is_offline(self, hass):
         """If the selected primary is offline, the secondary should take over the discharge target."""
@@ -6415,3 +6420,126 @@ class TestZeroFastRecovery:
 
         assert manager.zero_fast != datetime.max
         assert manager.zero_fast < datetime.now() + timedelta(seconds=10)
+
+
+class TestNearFullChargeTaper:
+    """Manager routing tests for near-full (SOCNEARLYFULL) charge taper behavior."""
+
+    async def test_near_full_sf800_pro_is_not_bypassed_when_reduced_to_zero(self, hass):
+        """A near-full SF800 Pro should NOT switch to bypass; bypass is reserved for SOCFULL."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-nearlyfull-nobypass",
+            product_model="SolarFlow 800 Pro",
+            level=95,
+            soc_set=100,
+            home_input=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_bypass = AsyncMock(return_value=0)
+        device.power_discharge = AsyncMock(return_value=0)
+        device.power_charge = AsyncMock(return_value=0)
+
+        await manager.powerChanged(100, False, datetime.now())
+
+        assert device.state is DeviceState.SOCNEARLYFULL
+        device.power_bypass.assert_not_awaited()
+
+    async def test_near_full_sf800_pro_discharge_is_not_restricted(self, hass):
+        """A near-full SF800 Pro should discharge normally — SOCNEARLYFULL does not block discharge."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-nearlyfull-discharge",
+            product_model="SolarFlow 800 Pro",
+            level=96,
+            soc_set=100,
+            home_output=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            discharge_devices=(device,),
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        device.power_bypass = AsyncMock(return_value=0)
+
+        await manager.powerChanged(300, False, datetime.now())
+
+        assert device.state is DeviceState.SOCNEARLYFULL
+        device.power_discharge.assert_awaited_once()
+        called_power = device.power_discharge.call_args[0][0]
+        assert called_power > 0
+
+    @pytest.mark.parametrize(
+        ("level", "soc_set", "max_expected_charge"),
+        [
+            (94, 100, 200),
+            (96, 100, 150),
+            (98, 100, 100),
+            (74, 80, 200),
+            (76, 80, 150),
+            (78, 80, 100),
+        ],
+    )
+    def test_current_charge_surplus_limit_respects_taper(self, hass, level, soc_set, max_expected_charge):
+        """_current_charge_surplus_limit should be capped at the taper limit for near-full devices."""
+        from custom_components.zendure_ha.manager import ZendureManager
+
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-surplus",
+            product_model="SolarFlow 800 Pro",
+            level=level,
+            soc_set=soc_set,
+        )
+        device.pwr_produced = -500
+
+        assert device.state is DeviceState.SOCNEARLYFULL
+        result = ZendureManager._current_charge_surplus_limit(device)
+        assert result <= max_expected_charge
+        assert result > 0
+
+    def test_current_charge_surplus_limit_is_zero_for_socfull(self, hass):
+        """_current_charge_surplus_limit must return 0 for SOCFULL — device has already reached target."""
+        from custom_components.zendure_ha.manager import ZendureManager
+
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-full",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            soc_set=100,
+        )
+        device.pwr_produced = -500
+
+        assert device.state is DeviceState.SOCFULL
+        assert ZendureManager._current_charge_surplus_limit(device) == 0
+
+    def test_current_charge_surplus_limit_is_full_below_taper_range(self, hass):
+        """_current_charge_surplus_limit should use the full device limit below the taper range."""
+        from custom_components.zendure_ha.manager import ZendureManager
+
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-below-taper",
+            product_model="SolarFlow 800 Pro",
+            level=90,
+            soc_set=100,
+        )
+        device.pwr_produced = -800
+
+        assert device.state is DeviceState.INACTIVE
+        result = ZendureManager._current_charge_surplus_limit(device)
+        assert result == abs(device.pwr_produced)

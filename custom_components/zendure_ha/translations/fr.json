@@ -206,7 +206,8 @@
           "2": "Vide",
           "3": "Récupération de réserve",
           "4": "Réserve",
-          "5": "Hors ligne"
+          "5": "Hors ligne",
+          "6": "Presque plein"
         }
       },
       "hub_state": {
@@ -259,6 +260,19 @@
           "1": "En charge",
           "2": "En décharge",
           "3": "Éteint"
+        }
+      },
+      "device_state": {
+        "name": "État",
+        "state": {
+          "0": "Hors ligne",
+          "1": "Vide",
+          "2": "Normal",
+          "3": "Plein",
+          "4": "Actif",
+          "5": "Récupération de réserve",
+          "6": "Réserve",
+          "7": "Presque plein"
         }
       },
       "state": {

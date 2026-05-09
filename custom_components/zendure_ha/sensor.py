@@ -44,9 +44,10 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
         factor: int = 1,
         state: Any = None,
         icon: str | None = None,
+        translation_key: str | None = None,
     ) -> None:
         """Initialize a Zendure entity."""
-        super().__init__(device, uniqueid, "sensor")
+        super().__init__(device, uniqueid, "sensor", translation_key)
         self.entity_description = SensorEntityDescription(
             key=uniqueid,
             name=uniqueid,

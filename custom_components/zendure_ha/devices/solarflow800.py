@@ -10,6 +10,12 @@ from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSen
 
 _LOGGER = logging.getLogger(__name__)
 
+SF800_PRO_TAPER_LIMITS = (
+    (2, 100),
+    (4, 150),
+    (6, 200),
+)
+
 
 class SolarFlow800(ZendureZenSdk):
     def __init__(self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any) -> None:
@@ -45,6 +51,17 @@ class SolarFlow800Pro(ZendureZenSDKWithLocalMQTT):
     def supports_bypass(self) -> bool:
         """Return whether the device supports explicit bypass mode."""
         return True
+
+    @property
+    def taper_charge_limit(self) -> int | None:
+        """Return the charge rate cap in watts when near-full, or None below the taper range."""
+        distance_to_target = self.socSet.asNumber - self.electricLevel.asNumber
+        if distance_to_target <= 0:
+            return None
+        for distance, limit in SF800_PRO_TAPER_LIMITS:
+            if distance_to_target <= distance:
+                return limit
+        return None
 
     async def power_bypass(self) -> int:
         """Put the SF800 Pro into explicit bypass mode."""

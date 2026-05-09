@@ -35,6 +35,17 @@ class DeviceState(Enum):
     ACTIVE = 4
     RESERVE_RECOVERY = 5
     SOCRESERVE = 6
+    SOCNEARLYFULL = 7
+
+
+class SocLimitState(IntEnum):
+    NORMAL = 0
+    FULL = 1
+    EMPTY = 2
+    RESERVE_RECOVERY = 3
+    RESERVE = 4
+    OFFLINE = 5
+    NEARLY_FULL = 6
 
 
 class ManagerMode(Enum):
@@ -65,8 +76,6 @@ class ConnectionMode(IntEnum):
 
 
 class SmartMode:
-    SOCFULL = 1
-    SOCEMPTY = 2
     CONNECTED = 10
 
     TIMEFAST = 2.2  # Fast update interval after significant change
