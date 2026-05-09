@@ -44,8 +44,7 @@ class SocLimitState(IntEnum):
     EMPTY = 2
     RESERVE_RECOVERY = 3
     RESERVE = 4
-    OFFLINE = 5
-    NEARLY_FULL = 6
+    NEARLY_FULL = 5
 
 
 class ManagerMode(Enum):

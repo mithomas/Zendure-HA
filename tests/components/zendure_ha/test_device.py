@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
-from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SocLimitState
+from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SmartMode, SocLimitState
 from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.sensor import ZendureSensor
@@ -137,7 +137,7 @@ def test_device_state_distinguishes_empty_from_reserve_floor(
             DeviceState.RESERVE_RECOVERY,
             SocLimitState.RESERVE_RECOVERY,
         ),
-        (50, 10, 10, 80, 0, False, 0, False, DeviceState.OFFLINE, SocLimitState.OFFLINE),
+        (50, 10, 10, 80, 0, False, 0, False, DeviceState.OFFLINE, SocLimitState.NORMAL),
     ],
 )
 def test_soc_limit_sensor_exposes_effective_device_state(
@@ -166,6 +166,28 @@ def test_soc_limit_sensor_exposes_effective_device_state(
     assert device.state is expected_state
     assert device.socLimit.asInt == expected_soc_limit
     assert cast("ZendureSensor", device.entities["state"]).asInt == expected_state.value
+
+
+def test_soc_limit_sensor_keeps_last_value_while_device_offline(hass):
+    """SoC Limit should not expose offline while the device state does."""
+    device = make_device(hass, level=50, min_soc=10, reserve=10, soc_set=80)
+    device.entityUpdate("socLimit", SocLimitState.FULL)
+
+    assert device.state is DeviceState.SOCFULL
+    assert device.socLimit.asInt == SocLimitState.FULL
+
+    device.connectionStatus.update_value(0)
+    device.entityUpdate("socLimit", SocLimitState.EMPTY)
+
+    assert device.state is DeviceState.OFFLINE
+    assert cast("ZendureSensor", device.entities["state"]).asInt == DeviceState.OFFLINE.value
+    assert device.socLimit.asInt == SocLimitState.FULL
+
+    device.connectionStatus.update_value(SmartMode.CONNECTED)
+    device.refresh_discharge_state()
+
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
 
 
 def test_soc_limit_sensor_drops_threshold_full_when_soc_falls_below_target(hass):

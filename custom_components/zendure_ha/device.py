@@ -50,7 +50,6 @@ SOC_LIMIT_BY_DEVICE_STATE = {
     DeviceState.SOCEMPTY: SocLimitState.EMPTY,
     DeviceState.RESERVE_RECOVERY: SocLimitState.RESERVE_RECOVERY,
     DeviceState.SOCRESERVE: SocLimitState.RESERVE,
-    DeviceState.OFFLINE: SocLimitState.OFFLINE,
 }
 
 
@@ -399,7 +398,9 @@ class ZendureDevice(EntityDevice):
             self.state = DeviceState.RESERVE_RECOVERY
         else:
             self.state = DeviceState.INACTIVE
-        self.socLimit.update_value(self._soc_limit_value_for_state().value)
+        soc_limit_state = self._soc_limit_value_for_state()
+        if soc_limit_state is not None:
+            self.socLimit.update_value(soc_limit_state.value)
         self.deviceState.update_value(self.state.value)
 
     @property
@@ -415,8 +416,10 @@ class ZendureDevice(EntityDevice):
             return max(self.charge_limit, -taper)
         return self.charge_limit
 
-    def _soc_limit_value_for_state(self) -> SocLimitState:
+    def _soc_limit_value_for_state(self) -> SocLimitState | None:
         """Return the public SoC Limit sensor value for the effective device state."""
+        if self.state is DeviceState.OFFLINE:
+            return None
         return SOC_LIMIT_BY_DEVICE_STATE.get(self.state, SocLimitState.NORMAL)
 
     def refresh_discharge_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
