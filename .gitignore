@@ -17,6 +17,7 @@ snapshots/
 .coverage
 coverage.xml
 .ruff_cache
+.codex
 
 
 # Home Assistant configuration
