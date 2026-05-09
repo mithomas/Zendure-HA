@@ -154,6 +154,7 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.on_available_kwh_changed: Callable[[], None] | None = None
         self.discharge_recovery_margin_soc: float = 0.0
+        self._discharge_recovery_active: bool = False
         self._raw_soc_limit: int = 0
         self.state: DeviceState = DeviceState.OFFLINE
 
@@ -163,6 +164,15 @@ class ZendureDevice(EntityDevice):
     def initialize_derived_state(self) -> None:
         """Initialize derived entity state after entity creation completes."""
         self.refresh_discharge_state()
+
+    @property
+    def discharge_recovery_active(self) -> bool:
+        """Return whether discharge recovery is currently blocking planned discharge."""
+        return self._discharge_recovery_active
+
+    @discharge_recovery_active.setter
+    def discharge_recovery_active(self, value: bool) -> None:
+        self._discharge_recovery_active = bool(value)
 
     def create_entities(self) -> None:
         """Create the device entities."""
@@ -184,7 +194,6 @@ class ZendureDevice(EntityDevice):
         self.socLimit = ZendureSensor(self, "socLimit", state=SocLimitState.NORMAL.value)
         self.deviceState = ZendureSensor(self, "state", state=self.state.value, translation_key="device_state")
         self.byPass = ZendureBinarySensor(self, "pass")
-        self.discharge_recovery_active = ZendureBinarySensor(self, "dischargeRecoveryActive", initial_state=True)
 
         fuseGroups = {
             0: "unused",
@@ -386,7 +395,7 @@ class ZendureDevice(EntityDevice):
             self.state = DeviceState.SOCEMPTY
         elif min_soc < level <= reserve:
             self.state = DeviceState.SOCRESERVE
-        elif self.discharge_recovery_active.is_on and level < baseline:
+        elif self.discharge_recovery_active and level < baseline:
             self.state = DeviceState.RESERVE_RECOVERY
         else:
             self.state = DeviceState.INACTIVE
@@ -451,7 +460,7 @@ class ZendureDevice(EntityDevice):
     def available_discharge_baseline_soc(self, _entity: EntityZendure | None = None, _value: Any = None) -> float:
         """Return the SoC baseline that counts as available for planned discharge."""
         baseline = self.discharge_floor_soc(_entity, _value)
-        if self.discharge_recovery_active.is_on and self.discharge_recovery_margin_soc > 0:
+        if self.discharge_recovery_active and self.discharge_recovery_margin_soc > 0:
             baseline = min(100, baseline + self.discharge_recovery_margin_soc)
         return baseline
 
@@ -466,7 +475,7 @@ class ZendureDevice(EntityDevice):
         floor = self.discharge_floor_soc(_entity, _value)
         level = self.electricLevel.asNumber
         margin = max(0, self.discharge_recovery_margin_soc)
-        recovery_active = bool(self.discharge_recovery_active.is_on)
+        recovery_active = self.discharge_recovery_active
 
         if activate_margin_window and margin > 0 and floor <= level < floor + margin:
             recovery_active = True
@@ -486,8 +495,7 @@ class ZendureDevice(EntityDevice):
         else:
             blocked = False
 
-        if bool(self.discharge_recovery_active.is_on) != recovery_active:
-            self.discharge_recovery_active.update_value(recovery_active)
+        self.discharge_recovery_active = recovery_active
         self.refresh_discharge_state(_entity, _value)
         return blocked
 

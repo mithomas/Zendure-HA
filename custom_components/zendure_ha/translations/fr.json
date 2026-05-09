@@ -82,9 +82,6 @@
       "heat_state": {
         "name": "chauffage de batterie"
       },
-      "discharge_recovery_active": {
-        "name": "Reprise de decharge active"
-      },
       "rest_state": {
         "name": "mode d'économie d'énergie"
       }

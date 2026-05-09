@@ -78,9 +78,6 @@
       "heat_state": {
         "name": "batterijverwarming"
       },
-      "discharge_recovery_active": {
-        "name": "Ontlaadsherstel actief"
-      },
       "rest_state": {
         "name": "Energiebesparende modus"
       }

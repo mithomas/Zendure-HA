@@ -30,6 +30,14 @@ def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
     assert device.byPass.is_on is True
 
 
+def test_discharge_recovery_active_is_not_exposed_as_an_entity(hass):
+    """Recovery state should remain device-owned and surface through SoC Limit."""
+    device = make_device(hass)
+
+    assert "dischargeRecoveryActive" not in device.entities
+    assert device.discharge_recovery_active is False
+
+
 @pytest.mark.parametrize(
     ("min_soc", "reserve", "expected"),
     [
@@ -148,7 +156,7 @@ def test_soc_limit_sensor_exposes_effective_device_state(
     """SoC Limit should expose the effective derived device state."""
     device = make_device(hass, level=level, min_soc=min_soc, reserve=reserve, soc_set=soc_set)
     device.discharge_recovery_margin_soc = margin
-    device.discharge_recovery_active._attr_is_on = recovery_active
+    device.discharge_recovery_active = recovery_active
     device.entityUpdate("socLimit", raw_soc_limit)
     if not online:
         device.connectionStatus.update_value(0)
@@ -218,7 +226,7 @@ def test_available_discharge_baseline_soc_uses_margin_only_while_recovering(
     """The recovery margin only affects the discharge baseline while active."""
     device = make_device(hass, min_soc=floor, reserve=floor)
     device.discharge_recovery_margin_soc = margin
-    device.discharge_recovery_active._attr_is_on = recovery_active
+    device.discharge_recovery_active = recovery_active
 
     assert device.available_discharge_baseline_soc() == expected
 
@@ -262,7 +270,7 @@ def test_available_kwh_uses_recovery_baseline_when_active(
         kwh=kwh,
     )
     device.discharge_recovery_margin_soc = margin
-    device.discharge_recovery_active._attr_is_on = recovery_active
+    device.discharge_recovery_active = recovery_active
 
     device.refresh_discharge_state()
 
@@ -305,13 +313,13 @@ def test_recovery_window_keeps_blocking_state_and_available_energy_consistent(
     """Recovery transitions should keep the derived sensors aligned with the state."""
     device = make_device(hass, level=20, min_soc=min_soc, reserve=reserve, kwh=2.0)
     device.discharge_recovery_margin_soc = 5
-    device.discharge_recovery_active._attr_is_on = starting_recovery
+    device.discharge_recovery_active = starting_recovery
     device.electricLevel.update_value(level)
 
     blocked = device.is_discharge_blocked(activate_margin_window=activate_margin_window)
 
     assert blocked is expected_blocked
-    assert device.discharge_recovery_active._attr_is_on is expected_recovery
+    assert device.discharge_recovery_active is expected_recovery
     assert device.state is expected_state
     assert device.availableKwh.asNumber == pytest.approx(expected_available)
     assert device.actualKwh == pytest.approx(expected_available)
@@ -328,7 +336,7 @@ def test_remaining_time_uses_recovery_aware_discharge_baseline(hass, recovery_ac
     """Discharge remaining time should shrink while the recovery margin is active."""
     device = make_device(hass, level=20, min_soc=10, reserve=10, kwh=2.0, battery_input=0, battery_output=100)
     device.discharge_recovery_margin_soc = 5
-    device.discharge_recovery_active._attr_is_on = recovery_active
+    device.discharge_recovery_active = recovery_active
 
     assert device.calcRemainingTime() == pytest.approx(expected_hours)
 

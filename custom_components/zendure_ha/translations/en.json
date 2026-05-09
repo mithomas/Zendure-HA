@@ -94,9 +94,6 @@
       },
       "hems_state": {
         "name": "HEMS Active"
-      },
-      "discharge_recovery_active": {
-        "name": "Discharge Recovery Active"
       }
     },
     "number": {
