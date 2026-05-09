@@ -195,6 +195,41 @@ class _PowerRoutingSnapshot:
         return sum(self.route(device).active_chargeable_produced_home for device in self.discharge_devices)
 
     @property
+    def active_non_primary_chargeable_serving_pv_floor(self) -> int:
+        """Return non-primary produced home output that can move into local charging."""
+        return sum(
+            self.route(device).active_chargeable_produced_home
+            for device in self.discharge_devices
+            if device is not self.selected_primary
+        )
+
+    @property
+    def selected_primary_charge_replacement_capacity(self) -> int:
+        """Return current selected-primary PV charge that can replace non-primary home PV."""
+        if not self.primary_aware or self.selected_primary is None:
+            return 0
+        if self.selected_primary not in self.charge_devices:
+            return 0
+
+        route = self.route(self.selected_primary)
+        device = route.device
+        if not device.online or device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
+            return 0
+        if device.effective_charge_limit >= 0:
+            return 0
+
+        pv_evidence = max(0, device.solarInput.asInt, -device.pwr_produced)
+        return min(route.charge_floor, pv_evidence, -device.effective_charge_limit)
+
+    @property
+    def replaceable_non_primary_chargeable_serving_pv_floor(self) -> int:
+        """Return non-primary home-serving PV the selected primary can cover."""
+        return min(
+            self.active_non_primary_chargeable_serving_pv_floor,
+            self.selected_primary_charge_replacement_capacity,
+        )
+
+    @property
     def preserves_produced_floor(self) -> bool:
         """Return whether current discharge output should be treated as a production floor."""
         return self.primary_aware or all(
@@ -1322,9 +1357,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and setpoint < 0
             and -setpoint <= non_primary_local_chargeable_surplus
         )
+        uncovered_chargeable_serving_pv_floor = max(
+            0,
+            routing.active_chargeable_serving_pv_floor - routing.replaceable_non_primary_chargeable_serving_pv_floor,
+        )
         debounce_charge_flip = (
             self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
-            and routing.active_chargeable_serving_pv_floor > 0
+            and uncovered_chargeable_serving_pv_floor > 0
             and charge_transition_would_zero
             and setpoint < 0
             and not positive_demand_charge_lag
