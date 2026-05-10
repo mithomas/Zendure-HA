@@ -55,6 +55,9 @@ PV_CHARGE_FIRST_PRIMARY_AWARE_MODES = {
 }
 
 P1_CHARGE_LAG_FAST_DEVIATION = 20
+CHARGE_HOLDOFF_IDLE_SECONDS = 2
+CHARGE_HOLDOFF_RECENT_SECONDS = 60
+CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS = 300
 
 P1_CHARGE_LAG_FAST_PRIMARY_AWARE_MODES = {
     ManagerMode.MATCHING_PRIMARY_AWARE,
@@ -77,9 +80,26 @@ class _P1SpikeCandidate:
     started: datetime
 
 
+def _pv_evidence_for_charge_replacement(device: ZendureDevice) -> int:
+    """Return PV evidence safe for reducing selected-primary charge."""
+    return max(0, device.solarInput.asInt, -device.pwr_produced)
+
+
+def _pv_evidence_for_output_replacement(device: ZendureDevice) -> int:
+    """Return explicit PV evidence safe for increasing selected-primary output."""
+    return max(0, device.solarInput.asInt)
+
+
 @dataclass(frozen=True, slots=True)
 class _PowerRouteDevice:
-    """Per-cycle routing facts for one device."""
+    """
+    Per-cycle routing facts for one device.
+
+    A produced floor is PV/off-grid power already serving home output. A
+    charge floor is power already flowing into a device and should be reduced
+    before switching direction. Charge surplus is local PV left for the same
+    device's battery after current home output is covered.
+    """
 
     device: ZendureDevice
     selected_primary: bool
@@ -108,17 +128,15 @@ class _PowerRouteDevice:
     @property
     def active_chargeable_produced_home(self) -> int:
         """
-        Return produced home that should be preserved as a discharge target.
+        Return produced home that currently behaves like the active floor.
 
         SOCEMPTY devices are passing solar to home but should have that solar
         redirected to their own battery first; their contribution must not be
-        treated as a floor to preserve in charge mode.
+        treated as a floor to preserve in charge mode. Keep this separate from
+        active_produced_home so call sites can state whether they are preserving
+        current output or checking output that may move into local charging.
         """
-        if not self.discharging or self.device.state == DeviceState.SOCFULL:
-            return 0
-        if self.pv_charge_first and self.device.state in PV_CHARGE_FIRST_STATES:
-            return 0
-        return self.produced_home
+        return self.active_produced_home
 
     @property
     def home_output_is_only_produced(self) -> bool:
@@ -128,8 +146,49 @@ class _PowerRouteDevice:
 
 
 @dataclass(frozen=True, slots=True)
+class _PvFloorSummary:
+    """Grouped PV floor facts used before a cycle is allowed to switch direction."""
+
+    active_primary_produced_floor: int
+    active_non_primary_produced_floor: int
+    active_serving_pv_floor: int
+    active_chargeable_serving_pv_floor: int
+    active_non_primary_chargeable_serving_pv_floor: int
+    replaceable_non_primary_serving_pv: int
+    uncovered_chargeable_serving_pv_floor: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LocalChargeSummary:
+    """Grouped local-PV charge facts shared by setpoint shaping and charge execution."""
+
+    active_charge_local_surplus: int
+    active_non_primary_local_surplus: int
+    idle_non_primary_local_surplus: int
+    active_pv_charge_first_home: int
+    active_non_primary_empty_chargeable: int
+    non_primary_local_chargeable_surplus: int
+    selected_primary_local_surplus: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SetpointShapeResult:
+    """Primary-aware setpoint after PV-floor and debounce policy is applied."""
+
+    setpoint: int
+    discharge_candidate_setpoint: int
+
+
+@dataclass(frozen=True, slots=True)
 class _PowerRoutingSnapshot:
-    """Per-cycle routing view shared by primary-aware manager paths."""
+    """
+    Per-cycle routing view shared by primary-aware manager paths.
+
+    Replaceable secondary PV is secondary home-serving PV that may move to the
+    secondary battery because selected-primary PV can cover that home load.
+    Uncovered floor is home-serving PV that cannot be replaced yet and blocks
+    charge-mode debounce.
+    """
 
     selected_primary: ZendureDevice | None
     primary_aware: bool
@@ -227,7 +286,7 @@ class _PowerRoutingSnapshot:
         if device.effective_charge_limit >= 0:
             return 0
 
-        pv_evidence = max(0, device.solarInput.asInt, -device.pwr_produced)
+        pv_evidence = _pv_evidence_for_charge_replacement(device)
         return min(route.charge_floor, pv_evidence, -device.effective_charge_limit)
 
     @property
@@ -243,7 +302,7 @@ class _PowerRoutingSnapshot:
         if not device.online or device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
             return 0
 
-        pv_evidence = max(0, device.solarInput.asInt)
+        pv_evidence = _pv_evidence_for_output_replacement(device)
         available_output = min(pv_evidence, route.available_discharge_with_produced)
         return max(0, available_output - route.produced_home)
 
@@ -253,6 +312,80 @@ class _PowerRoutingSnapshot:
         return min(
             self.active_non_primary_chargeable_serving_pv_floor,
             self.selected_primary_charge_replacement_capacity + self.selected_primary_output_replacement_capacity,
+        )
+
+    def pv_floor_summary(self) -> _PvFloorSummary:
+        """Return floor and replacement facts for one routing cycle."""
+        active_primary = self.active_primary_produced_floor
+        active_non_primary = self.active_non_primary_produced_floor
+        active_serving = active_primary + active_non_primary
+        active_chargeable = self.active_chargeable_serving_pv_floor
+        active_non_primary_chargeable = self.active_non_primary_chargeable_serving_pv_floor
+        replaceable_non_primary = self.replaceable_non_primary_chargeable_serving_pv_floor
+        uncovered_chargeable = max(0, active_chargeable - replaceable_non_primary)
+        return _PvFloorSummary(
+            active_primary_produced_floor=active_primary,
+            active_non_primary_produced_floor=active_non_primary,
+            active_serving_pv_floor=active_serving,
+            active_chargeable_serving_pv_floor=active_chargeable,
+            active_non_primary_chargeable_serving_pv_floor=active_non_primary_chargeable,
+            replaceable_non_primary_serving_pv=replaceable_non_primary,
+            uncovered_chargeable_serving_pv_floor=uncovered_chargeable,
+        )
+
+    def local_charge_summary(
+        self,
+        selected_charge_primary: ZendureDevice | None,
+        *,
+        pv_charge_first_mode: bool,
+        include_charge_first_home: bool,
+    ) -> _LocalChargeSummary:
+        """Return local-PV charge facts using the same policy for all primary-aware paths."""
+        active_charge_local_surplus = sum(
+            self.charge_surplus(device) for device in self.charge_devices if device is not self.selected_primary
+        )
+        active_non_primary_local_surplus = sum(
+            self.charge_surplus(device) for device in self.discharge_devices if device is not self.selected_primary
+        )
+        idle_non_primary_local_surplus = sum(
+            self.charge_surplus(device) for device in self.idle_devices if device is not self.selected_primary
+        )
+        active_pv_charge_first_home = sum(
+            self.chargeable_produced_home(device)
+            for device in self.discharge_devices
+            if pv_charge_first_mode and device.state in PV_CHARGE_FIRST_STATES
+        )
+        active_non_primary_empty_chargeable = (
+            sum(
+                self.chargeable_produced_home(device)
+                for device in self.discharge_devices
+                if (
+                    pv_charge_first_mode
+                    and include_charge_first_home
+                    and device is not self.selected_primary
+                    and device.state in PV_CHARGE_FIRST_STATES
+                )
+            )
+            if include_charge_first_home
+            else 0
+        )
+        non_primary_local_chargeable_surplus = (
+            active_charge_local_surplus
+            + active_non_primary_local_surplus
+            + idle_non_primary_local_surplus
+            + active_non_primary_empty_chargeable
+        )
+        selected_primary_local_surplus = (
+            self.charge_surplus(selected_charge_primary) if selected_charge_primary is not None else 0
+        )
+        return _LocalChargeSummary(
+            active_charge_local_surplus=active_charge_local_surplus,
+            active_non_primary_local_surplus=active_non_primary_local_surplus,
+            idle_non_primary_local_surplus=idle_non_primary_local_surplus,
+            active_pv_charge_first_home=active_pv_charge_first_home,
+            active_non_primary_empty_chargeable=active_non_primary_empty_chargeable,
+            non_primary_local_chargeable_surplus=non_primary_local_chargeable_surplus,
+            selected_primary_local_surplus=selected_primary_local_surplus,
         )
 
     @property
@@ -966,6 +1099,149 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             devices=route_devices,
         )
 
+    def _apply_charge_holdoff(self, setpoint: int, time: datetime, *, allow_charge: bool) -> int:
+        """Apply the anti-oscillation charge holdoff and return the allowed setpoint."""
+        if self.charge_time <= time:
+            return setpoint
+
+        if self.charge_time == datetime.max:
+            recent_charge = (time - self.charge_last).total_seconds() <= CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS
+            delay = CHARGE_HOLDOFF_RECENT_SECONDS if recent_charge else CHARGE_HOLDOFF_IDLE_SECONDS
+            self.charge_time = time + timedelta(seconds=delay)
+            self.charge_last = self.charge_time
+            self.pwr_low = 0
+
+        return setpoint if allow_charge else 0
+
+    def _shape_primary_aware_setpoint(
+        self,
+        p1: int,
+        setpoint: int,
+        time: datetime,
+        routing: _PowerRoutingSnapshot,
+        pv_floors: _PvFloorSummary,
+        local_charge: _LocalChargeSummary,
+        *,
+        pv_charge_first_mode: bool,
+    ) -> _SetpointShapeResult:
+        """Apply PV-floor, local-charge, and debounce policy before dispatching."""
+        selected_primary = routing.selected_primary
+        selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
+        self.discharge_bypass += selected_primary_bypass_passthrough
+        if p1 > 0 and self.charge and routing.preserves_produced_floor:
+            self.discharge_bypass += max(
+                0,
+                pv_floors.active_serving_pv_floor - selected_primary_bypass_passthrough,
+            )
+
+        # discharge_bypass is already-served produced power. Removing it from
+        # the setpoint prevents discharging battery for load that PV has covered.
+        gross_discharge_setpoint = setpoint
+        if self.discharge_bypass > 0:
+            net_setpoint = setpoint - self.discharge_bypass
+            setpoint = max(0, net_setpoint) if p1 > 0 and not self.charge else net_setpoint
+            if (
+                self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+                and p1 > 0
+                and self.charge
+                and pv_floors.active_serving_pv_floor > 0
+                and setpoint >= 0
+            ):
+                setpoint = max(setpoint, gross_discharge_setpoint)
+        discharge_candidate_setpoint = setpoint
+
+        extra_surplus = self.produced - self.discharge_bypass
+        charge_transition_would_zero = self.charge_time > time
+        protects_selected_primary_floor = (
+            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+            and selected_primary is not None
+            and pv_floors.active_primary_produced_floor > 0
+            and p1 > -pv_floors.active_primary_produced_floor
+        )
+        primary_keeps_local_surplus = (
+            local_charge.selected_primary_local_surplus > 0
+            and selected_primary is not None
+            and not selected_primary.is_discharge_blocked()
+            and (pv_floors.active_primary_produced_floor == 0 or not charge_transition_would_zero)
+            and pv_floors.active_non_primary_produced_floor == 0
+        )
+        if p1 <= 0 and extra_surplus > 0:
+            surplus_setpoint = setpoint - extra_surplus
+            if (
+                setpoint <= 0
+                or local_charge.active_charge_local_surplus > 0
+                or local_charge.active_non_primary_local_surplus > 0
+                or (protects_selected_primary_floor and local_charge.idle_non_primary_local_surplus > 0)
+                or (p1 < 0 and local_charge.active_non_primary_empty_chargeable > 0)
+                or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
+            ):
+                local_chargeable_surplus = (
+                    local_charge.non_primary_local_chargeable_surplus + local_charge.selected_primary_local_surplus
+                )
+                if protects_selected_primary_floor:
+                    requested_charge = max(0, -surplus_setpoint)
+                    uncovered_primary_floor = max(
+                        0,
+                        pv_floors.active_primary_produced_floor - max(0, discharge_candidate_setpoint),
+                    )
+                    charge_without_primary_floor = max(
+                        local_chargeable_surplus,
+                        requested_charge - uncovered_primary_floor,
+                    )
+                    setpoint = (
+                        -charge_without_primary_floor
+                        if charge_without_primary_floor > 0
+                        else max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
+                    )
+                else:
+                    setpoint = surplus_setpoint
+
+        if (
+            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+            and p1 <= 0
+            and pv_floors.replaceable_non_primary_serving_pv > 0
+        ):
+            setpoint = min(
+                setpoint,
+                -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
+            )
+
+        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
+            setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
+
+        positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
+        non_primary_preservable_charge = (
+            local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv
+        )
+        charge_uses_only_non_primary_local_surplus = (
+            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+            and p1 <= 0
+            and (p1 < 0 or pv_floors.replaceable_non_primary_serving_pv > 0)
+            and non_primary_preservable_charge > 0
+            and setpoint < 0
+            and -setpoint <= non_primary_preservable_charge
+        )
+        debounce_charge_flip = (
+            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
+            and pv_floors.uncovered_chargeable_serving_pv_floor > 0
+            and charge_transition_would_zero
+            and setpoint < 0
+            and not positive_demand_charge_lag
+            and not charge_uses_only_non_primary_local_surplus
+        )
+        if debounce_charge_flip:
+            if self.charge_debounce_since is None:
+                self.charge_debounce_since = time
+            if time - self.charge_debounce_since < timedelta(seconds=SmartMode.TIMEZERO):
+                setpoint = max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
+        else:
+            self.charge_debounce_since = None
+
+        return _SetpointShapeResult(
+            setpoint=setpoint,
+            discharge_candidate_setpoint=discharge_candidate_setpoint,
+        )
+
     @staticmethod
     def _allocate_capped_targets(
         setpoint: int,
@@ -1370,146 +1646,23 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             primary_aware=primary_aware_mode,
             pv_charge_first=pv_charge_first_mode,
         )
-        selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
-        self.discharge_bypass += selected_primary_bypass_passthrough
-        active_primary_produced_floor = routing.active_primary_produced_floor
-        active_non_primary_produced_floor = routing.active_non_primary_produced_floor
-        active_serving_pv_floor = routing.active_serving_pv_floor
-        if p1 > 0 and self.charge and routing.preserves_produced_floor:
-            self.discharge_bypass += max(0, active_serving_pv_floor - selected_primary_bypass_passthrough)
-
-        # discharge_bypass accumulates already-served produced power from SOCFULL devices,
-        # explicit bypass, and produced pass-through during positive charge lag.
-        # Subtract it from setpoint to avoid over-discharging from grid. Clamp away a
-        # negative setpoint only when the cycle has not already entered charge mode.
-        gross_discharge_setpoint = setpoint
-        if self.discharge_bypass > 0:
-            net_setpoint = setpoint - self.discharge_bypass
-            setpoint = max(0, net_setpoint) if p1 > 0 and not self.charge else net_setpoint
-            if (
-                self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
-                and p1 > 0
-                and self.charge
-                and active_serving_pv_floor > 0
-                and setpoint >= 0
-            ):
-                setpoint = max(setpoint, gross_discharge_setpoint)
-        discharge_candidate_setpoint = setpoint
-
-        # In zero/negative-p1 cycles, treat non-bypass production as extra chargeable
-        # surplus when the cycle is already in surplus or the selected primary can
-        # keep a meaningful local surplus after current home pass-through.
-        extra_surplus = self.produced - self.discharge_bypass
-        charge_transition_would_zero = self.charge_time > time
         selected_charge_primary = self.get_primary_device(charging=True)
-        active_charge_local_surplus = sum(
-            routing.charge_surplus(device) for device in self.charge if device is not selected_primary
+        pv_floors = routing.pv_floor_summary()
+        local_charge = routing.local_charge_summary(
+            selected_charge_primary,
+            pv_charge_first_mode=pv_charge_first_mode,
+            include_charge_first_home=True,
         )
-        active_non_primary_local_surplus = sum(
-            routing.charge_surplus(device) for device in self.discharge if device is not selected_primary
+        shaped_setpoint = self._shape_primary_aware_setpoint(
+            p1,
+            setpoint,
+            time,
+            routing,
+            pv_floors,
+            local_charge,
+            pv_charge_first_mode=pv_charge_first_mode,
         )
-        idle_non_primary_local_surplus = sum(
-            routing.charge_surplus(device) for device in self.idle if device is not selected_primary
-        )
-        active_pv_charge_first_home = sum(
-            routing.chargeable_produced_home(device)
-            for device in self.discharge
-            if pv_charge_first_mode and device.state in PV_CHARGE_FIRST_STATES
-        )
-        # Non-primary SOCEMPTY devices whose solar exactly covers homeOutput have
-        # charge_surplus=0 but can still redirect that solar to their own battery.
-        active_non_primary_empty_chargeable = sum(
-            routing.chargeable_produced_home(device)
-            for device in self.discharge
-            if pv_charge_first_mode and device is not selected_primary and device.state in PV_CHARGE_FIRST_STATES
-        )
-        non_primary_local_chargeable_surplus = (
-            active_charge_local_surplus
-            + active_non_primary_local_surplus
-            + idle_non_primary_local_surplus
-            + active_non_primary_empty_chargeable
-        )
-        selected_primary_local_surplus = (
-            routing.charge_surplus(selected_charge_primary) if selected_charge_primary is not None else 0
-        )
-        replaceable_non_primary_serving_pv = routing.replaceable_non_primary_chargeable_serving_pv_floor
-        protects_selected_primary_floor = (
-            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
-            and selected_primary is not None
-            and active_primary_produced_floor > 0
-            and p1 > -active_primary_produced_floor
-        )
-        primary_keeps_local_surplus = (
-            selected_charge_primary is not None
-            and not selected_charge_primary.is_discharge_blocked()
-            and selected_primary_local_surplus > 0
-            and (active_primary_produced_floor == 0 or not charge_transition_would_zero)
-            and active_non_primary_produced_floor == 0
-        )
-        if p1 <= 0 and extra_surplus > 0:
-            surplus_setpoint = setpoint - extra_surplus
-            if (
-                setpoint <= 0
-                or active_charge_local_surplus > 0
-                or active_non_primary_local_surplus > 0
-                or (protects_selected_primary_floor and idle_non_primary_local_surplus > 0)
-                or (p1 < 0 and active_non_primary_empty_chargeable > 0)
-                or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
-            ):
-                local_chargeable_surplus = non_primary_local_chargeable_surplus + selected_primary_local_surplus
-                if protects_selected_primary_floor:
-                    requested_charge = max(0, -surplus_setpoint)
-                    uncovered_primary_floor = max(
-                        0,
-                        active_primary_produced_floor - max(0, discharge_candidate_setpoint),
-                    )
-                    charge_without_primary_floor = max(
-                        local_chargeable_surplus,
-                        requested_charge - uncovered_primary_floor,
-                    )
-                    setpoint = (
-                        -charge_without_primary_floor
-                        if charge_without_primary_floor > 0
-                        else max(0, discharge_candidate_setpoint, active_serving_pv_floor)
-                    )
-                else:
-                    setpoint = surplus_setpoint
-
-        if self.operation == ManagerMode.MATCHING_PRIMARY_AWARE and p1 <= 0 and replaceable_non_primary_serving_pv > 0:
-            setpoint = min(setpoint, -(non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv))
-
-        if pv_charge_first_mode and active_pv_charge_first_home > 0:
-            setpoint = min(setpoint, -active_pv_charge_first_home)
-
-        positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
-        non_primary_preservable_charge = non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv
-        charge_uses_only_non_primary_local_surplus = (
-            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
-            and p1 <= 0
-            and (p1 < 0 or replaceable_non_primary_serving_pv > 0)
-            and non_primary_preservable_charge > 0
-            and setpoint < 0
-            and -setpoint <= non_primary_preservable_charge
-        )
-        uncovered_chargeable_serving_pv_floor = max(
-            0,
-            routing.active_chargeable_serving_pv_floor - replaceable_non_primary_serving_pv,
-        )
-        debounce_charge_flip = (
-            self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
-            and uncovered_chargeable_serving_pv_floor > 0
-            and charge_transition_would_zero
-            and setpoint < 0
-            and not positive_demand_charge_lag
-            and not charge_uses_only_non_primary_local_surplus
-        )
-        if debounce_charge_flip:
-            if self.charge_debounce_since is None:
-                self.charge_debounce_since = time
-            if time - self.charge_debounce_since < timedelta(seconds=SmartMode.TIMEZERO):
-                setpoint = max(0, discharge_candidate_setpoint, active_serving_pv_floor)
-        else:
-            self.charge_debounce_since = None
+        setpoint = shaped_setpoint.setpoint
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
@@ -1583,14 +1736,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 await d.power_discharge(-10)
 
         # prevent hysteria
-        if self.charge_time > time:
-            if self.charge_time == datetime.max:
-                self.charge_time = time + timedelta(
-                    seconds=2 if (time - self.charge_last).total_seconds() > 300 else 60
-                )
-                self.charge_last = self.charge_time
-                self.pwr_low = 0
-            setpoint = 0
+        setpoint = self._apply_charge_holdoff(setpoint, time, allow_charge=False)
         self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
 
         charge_devices, idle_devices = self._collect_charge_candidates(
@@ -1659,25 +1805,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing.route(device).charge_floor > 0 for device in self.charge
         )
         allow_home_pv_charge = not positive_demand_charge_lag
-        non_primary_local_chargeable_surplus = sum(
-            max(
-                routing.charge_surplus(device),
-                routing.chargeable_produced_home(device)
-                if (
-                    allow_home_pv_charge
-                    and self.operation in PV_CHARGE_FIRST_PRIMARY_AWARE_MODES
-                    and device.state in PV_CHARGE_FIRST_STATES
-                )
-                else 0,
-            )
-            for device in [*self.charge, *self.discharge, *self.idle]
-            if device is not selected_primary
+        primary = self.get_primary_device(charging=True)
+        pv_floors = routing.pv_floor_summary()
+        local_charge = routing.local_charge_summary(
+            primary,
+            pv_charge_first_mode=self.operation in PV_CHARGE_FIRST_PRIMARY_AWARE_MODES,
+            include_charge_first_home=allow_home_pv_charge,
         )
-        replaceable_non_primary_serving_pv = routing.replaceable_non_primary_chargeable_serving_pv_floor
         keeps_non_primary_local_charge = (
             requested_setpoint < 0
-            and non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv > 0
-            and -requested_setpoint <= non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv
+            and local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv > 0
+            and -requested_setpoint
+            <= local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv
         )
         # In surplus mode, SOCEMPTY devices should redirect their solar to their
         # own battery instead of continuing to pass it to the home.  Zero their
@@ -1689,18 +1828,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             }
 
         # prevent hysteria
-        if self.charge_time > time:
-            if self.charge_time == datetime.max:
-                self.charge_time = time + timedelta(
-                    seconds=2 if (time - self.charge_last).total_seconds() > 300 else 60
-                )
-                self.charge_last = self.charge_time
-                self.pwr_low = 0
-            if not adjusts_active_charge and not keeps_non_primary_local_charge:
-                setpoint = 0
+        setpoint = self._apply_charge_holdoff(
+            setpoint,
+            time,
+            allow_charge=adjusts_active_charge or keeps_non_primary_local_charge,
+        )
         self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
 
-        primary = self.get_primary_device(charging=True)
         charge_devices, idle_devices = self._collect_charge_candidates(
             [device for device in self.charge if device is not primary],
             [device for device in self.idle if device is not primary],
