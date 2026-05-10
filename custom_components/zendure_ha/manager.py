@@ -506,7 +506,27 @@ class _PowerRoutingSnapshot:
 
 
 class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
-    """Class to regular update devices."""
+    """
+    Coordinate Zendure devices and route P1 meter changes into power commands.
+
+    P1 sensor events enter through _p1_changed(), which parses the
+    HomeAssistant event, delegates to _route_p1_update(), and returns whether
+    routing actually ran. _route_p1_update() writes simulation rows, applies the
+    spike filter, fast-delay debounce, and fast-change checks, then calls
+    _run_power_routing_pipeline() when a route should be handled. Primary
+    selection changes also use _route_p1_update(force=True) so they share
+    simulation and reset/restore handling while bypassing event suppression.
+
+    _run_power_routing_pipeline() is the routing organizer. It resets per-cycle
+    state, calls _poll_and_classify_power_routes(), reads _routing_policy(),
+    checks _selected_primary_routing_enabled(), builds _power_routing_snapshot(),
+    shapes the signed setpoint in _shape_primary_aware_setpoint(), applies
+    _clamp_setpoint_for_routing_policy(), turns the result into
+    _routing_intent(), calls _execute_power_routing(), and restores debounce
+    timing after the cycle. _execute_power_routing() dispatches to
+    _apply_standard_input(), _apply_primary_input(), _apply_standard_home_output(),
+    or _apply_primary_home_output().
+    """
 
     devices: list[ZendureDevice] = []
     fuseGroups: list[FuseGroup] = []
@@ -991,11 +1011,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         except (TypeError, ValueError):
             return
 
-        try:
-            self._reset_power_distribution_state()
-            await self._route_power_change(p1, False, datetime.now())
-        finally:
-            self._restore_p1_update_timing()
+        await self._route_p1_update(p1, datetime.now(), force=True, raise_on_error=True)
 
     def refresh_primary_device_options(self) -> None:
         """Refresh the selectable primary device list."""
@@ -1015,23 +1031,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if device_id in (None, PRIMARY_DEVICE_DISABLED):
             return None
         return next((device for device in self.devices if device.deviceId == device_id), None)
-
-    def _routing_policy(self) -> _RoutingPolicy:
-        """Return the input/output clamps for the active manager mode."""
-        return ROUTING_POLICIES.get(self.operation, DEFAULT_ROUTING_POLICY)
-
-    def _operation_supports_selected_primary(self) -> bool:
-        """Return whether the current operation may route through a selected primary."""
-        policy = self._routing_policy()
-        return policy.selected_primary_charge or policy.selected_primary_output
-
-    def _selected_primary_routing_enabled(self) -> bool:
-        """Return whether the active operation should route through the selected primary."""
-        return self._operation_supports_selected_primary() and self.resolve_primary_device() is not None
-
-    def _selected_primary_pv_charge_first_enabled(self) -> bool:
-        """Return whether selected-primary routing should move low-SOC home PV into charge."""
-        return self._selected_primary_routing_enabled() and self.operation in PV_CHARGE_FIRST_OPERATIONS
 
     def get_primary_device(self, charging: bool) -> ZendureDevice | None:
         """Return the selected primary device when it can participate in the requested direction."""
@@ -1130,68 +1129,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return 0
         return min(-device.effective_charge_limit, max(0, -device.pwr_produced - max(0, device.homeOutput.asInt)))
 
-    def _power_routing_snapshot(
-        self,
-        selected_primary: ZendureDevice | None,
-        *,
-        primary_aware: bool,
-        pv_charge_first: bool = False,
-    ) -> _PowerRoutingSnapshot:
-        """Build a per-cycle route snapshot from the current device classification."""
-        devices = [*self.charge, *self.discharge, *self.idle]
-        if selected_primary is not None and selected_primary not in devices:
-            devices.append(selected_primary)
-
-        route_devices: dict[ZendureDevice, _PowerRouteDevice] = {}
-        for device in devices:
-            produced_limit = (
-                self._current_produced_output_limit(device, primary_aware=primary_aware)
-                if primary_aware or device in self.discharge
-                else 0
-            )
-            home_output = max(0, device.homeOutput.asInt)
-            produced_home = min(home_output, produced_limit)
-            bypass_passthrough = 0
-            if (
-                getattr(device, "byPass", None) is not None
-                and device.byPass.is_on
-                and home_output > 0
-                and device.pwr_produced < 0
-            ):
-                bypass_passthrough = min(home_output, -device.pwr_produced)
-
-            route_devices[device] = _PowerRouteDevice(
-                device=device,
-                selected_primary=device is selected_primary,
-                pv_charge_first=pv_charge_first,
-                charging=device in self.charge,
-                discharging=device in self.discharge,
-                idle=device in self.idle,
-                produced_limit=produced_limit,
-                produced_home=produced_home,
-                battery_home_output=max(0, home_output - produced_home),
-                charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
-                charge_surplus=self._current_charge_surplus_limit(device),
-                bypass_passthrough=bypass_passthrough,
-                available_discharge=(
-                    self._available_discharge_power(device, primary_aware=primary_aware) if primary_aware else 0
-                ),
-                available_discharge_with_produced=self._available_discharge_power(
-                    device, primary_aware=primary_aware, allow_produced_only=True
-                )
-                if primary_aware
-                else 0,
-            )
-
-        return _PowerRoutingSnapshot(
-            selected_primary=selected_primary,
-            primary_aware=primary_aware,
-            charge_devices=tuple(self.charge),
-            discharge_devices=tuple(self.discharge),
-            idle_devices=tuple(self.idle),
-            devices=route_devices,
-        )
-
     def _apply_charge_holdoff(self, setpoint: int, time: datetime, *, allow_charge: bool) -> int:
         """Apply the anti-oscillation charge holdoff and return the allowed setpoint."""
         if self.charge_time <= time:
@@ -1205,129 +1142,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.pwr_low = 0
 
         return setpoint if allow_charge else 0
-
-    def _shape_primary_aware_setpoint(
-        self,
-        p1: int,
-        setpoint: int,
-        time: datetime,
-        routing: _PowerRoutingSnapshot,
-        pv_floors: _PvFloorSummary,
-        local_charge: _LocalChargeSummary,
-        *,
-        pv_charge_first_mode: bool,
-    ) -> int:
-        """Apply PV-floor, local-charge, and debounce policy before dispatching."""
-        selected_primary = routing.selected_primary
-        matching_primary_aware = routing.primary_aware and self.operation == ManagerMode.MATCHING
-        selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
-        self.discharge_bypass += selected_primary_bypass_passthrough
-        if p1 > 0 and self.charge and routing.preserves_produced_floor:
-            self.discharge_bypass += max(
-                0,
-                pv_floors.active_serving_pv_floor - selected_primary_bypass_passthrough,
-            )
-
-        # discharge_bypass is already-served produced power. Removing it from
-        # the setpoint prevents discharging battery for load that PV has covered.
-        gross_discharge_setpoint = setpoint
-        if self.discharge_bypass > 0:
-            net_setpoint = setpoint - self.discharge_bypass
-            setpoint = max(0, net_setpoint) if p1 > 0 and not self.charge else net_setpoint
-            if (
-                matching_primary_aware
-                and p1 > 0
-                and self.charge
-                and pv_floors.active_serving_pv_floor > 0
-                and setpoint >= 0
-            ):
-                setpoint = max(setpoint, gross_discharge_setpoint)
-        discharge_candidate_setpoint = setpoint
-
-        extra_surplus = self.produced - self.discharge_bypass
-        charge_transition_would_zero = self.charge_time > time
-        protects_selected_primary_floor = (
-            matching_primary_aware
-            and selected_primary is not None
-            and pv_floors.active_primary_produced_floor > 0
-            and p1 > -pv_floors.active_primary_produced_floor
-        )
-        primary_keeps_local_surplus = (
-            local_charge.selected_primary_local_surplus > 0
-            and selected_primary is not None
-            and not selected_primary.is_discharge_blocked()
-            and (pv_floors.active_primary_produced_floor == 0 or not charge_transition_would_zero)
-            and pv_floors.active_non_primary_produced_floor == 0
-        )
-        if p1 <= 0 and extra_surplus > 0:
-            surplus_setpoint = setpoint - extra_surplus
-            if (
-                setpoint <= 0
-                or local_charge.active_charge_local_surplus > 0
-                or local_charge.active_non_primary_local_surplus > 0
-                or (protects_selected_primary_floor and local_charge.idle_non_primary_local_surplus > 0)
-                or (p1 < 0 and local_charge.active_non_primary_empty_chargeable > 0)
-                or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
-            ):
-                local_chargeable_surplus = (
-                    local_charge.non_primary_local_chargeable_surplus + local_charge.selected_primary_local_surplus
-                )
-                if protects_selected_primary_floor:
-                    requested_charge = max(0, -surplus_setpoint)
-                    uncovered_primary_floor = max(
-                        0,
-                        pv_floors.active_primary_produced_floor - max(0, discharge_candidate_setpoint),
-                    )
-                    charge_without_primary_floor = max(
-                        local_chargeable_surplus,
-                        requested_charge - uncovered_primary_floor,
-                    )
-                    setpoint = (
-                        -charge_without_primary_floor
-                        if charge_without_primary_floor > 0
-                        else max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
-                    )
-                else:
-                    setpoint = surplus_setpoint
-
-        if matching_primary_aware and p1 <= 0 and pv_floors.replaceable_non_primary_serving_pv > 0:
-            setpoint = min(
-                setpoint,
-                -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
-            )
-
-        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
-            setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
-
-        positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
-        non_primary_preservable_charge = (
-            local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv
-        )
-        charge_uses_only_non_primary_local_surplus = (
-            matching_primary_aware
-            and p1 <= 0
-            and (p1 < 0 or pv_floors.replaceable_non_primary_serving_pv > 0)
-            and non_primary_preservable_charge > 0
-            and setpoint < 0
-            and -setpoint <= non_primary_preservable_charge
-        )
-        debounce_charge_flip = (
-            matching_primary_aware
-            and pv_floors.uncovered_chargeable_serving_pv_floor > 0
-            and charge_transition_would_zero
-            and setpoint < 0
-            and not positive_demand_charge_lag
-            and not charge_uses_only_non_primary_local_surplus
-        )
-        if debounce_charge_flip:
-            if self.charge_debounce_since is None:
-                self.charge_debounce_since = time
-            if time - self.charge_debounce_since < timedelta(seconds=SmartMode.TIMEZERO):
-                setpoint = max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
-        else:
-            self.charge_debounce_since = None
-
-        return setpoint
 
     @staticmethod
     def _allocate_capped_targets(
@@ -1413,46 +1227,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
         else:
             await device.power_discharge(-10)
-
-    def _clamp_setpoint_for_routing_policy(self, setpoint: int, policy: _RoutingPolicy) -> tuple[int, bool]:
-        """Apply the mode's input/output clamps and return whether output is PV-only."""
-        if setpoint < 0:
-            return (setpoint if policy.charge_allowed else 0), False
-        if setpoint == 0:
-            return 0, False
-
-        match policy.output_clamp:
-            case _OutputClamp.FULL:
-                return setpoint, False
-            case _OutputClamp.PRODUCED_ONLY:
-                return (min(self.produced, setpoint) if self.produced > SmartMode.POWER_START else 0), True
-            case _OutputClamp.NONE:
-                return 0, False
-            case _:
-                return 0, False
-
-    def _routing_intent(
-        self,
-        requested_setpoint: int,
-        setpoint: int,
-        policy: _RoutingPolicy,
-        *,
-        selected_primary_routing: bool,
-        produced_only: bool,
-    ) -> _RoutingIntent:
-        """Build the per-cycle routing intent consumed by the unified executor."""
-        route_input = setpoint < 0 or (
-            setpoint == 0 and policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed
-        )
-        return _RoutingIntent(
-            input_budget=setpoint if route_input else 0,
-            home_output_budget=max(0, setpoint),
-            route_input=route_input,
-            produced_only_output=produced_only,
-            strict_home_output_stop=policy.strict_output_stop,
-            selected_primary_input=selected_primary_routing and policy.selected_primary_charge,
-            selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
-        )
 
     def _allocate_produced_floor(
         self,
@@ -1670,24 +1444,61 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n"
             )
 
-    async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
-        # exit if there is nothing to do
-        if not self.hass.is_running or not self.hass.is_running or (new_state := event.data["new_state"]) is None:
-            return
+    def _p1_value_from_event(self, event: Event[EventStateChangedData]) -> int | None:
+        """Return the P1 watt value from a HomeAssistant state-change event."""
+        if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
+            return None
 
-        try:  # convert the state to a float
-            p1 = int(self.p1_factor * float(new_state.state))
-        except ValueError:
-            return
+        try:
+            return int(self.p1_factor * float(new_state.state))
+        except (TypeError, ValueError):
+            return None
 
-        # Get time & update simulation
-        time = datetime.now()
+    def _record_p1_history_and_detect_fast(self, p1: int) -> bool:
+        """Update P1 history and return whether the new value is a fast change."""
+        if len(self.p1_history) > 1:
+            avg = self._p1_history_average()
+            stddev = SmartMode.P1_STDDEV_FACTOR * max(
+                SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
+            )
+            if fast_change := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
+                self.p1_history.clear()
+        else:
+            fast_change = False
+        self.p1_history.append(p1)
+        return fast_change
+
+    async def _p1_changed(self, event: Event[EventStateChangedData]) -> bool:
+        """Parse a P1 sensor update and return whether it triggered routing."""
+        if (p1 := self._p1_value_from_event(event)) is None:
+            return False
+        return await self._route_p1_update(p1, datetime.now())
+
+    async def _route_p1_update(
+        self,
+        p1: int,
+        time: datetime,
+        *,
+        force: bool = False,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """
+        Run the high-level P1 routing pipeline and return whether routing ran.
+
+        Normal P1 events pass through suppression and debounce first. Forced
+        updates reuse the same simulation and routing lifecycle but bypass those
+        filters; this is used when a primary selection change must immediately
+        re-evaluate the current P1 value.
+        """
         if ZendureManager.simulation:
             self.writeSimulation(time, p1)
 
+        if force:
+            return await self._run_power_routing_pipeline(p1, time, raise_on_error=raise_on_error)
+
         spike_suppressed, spike_confirmed = self._evaluate_p1_spike_filter(p1, time)
         if spike_suppressed:
-            return
+            return False
 
         fast_charge_lag_correction = self._should_fast_track_charge_lag_p1(p1, time)
 
@@ -1695,37 +1506,90 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if time < self.zero_fast and not fast_charge_lag_correction and not spike_confirmed:
             _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
             self.p1_history.append(p1)
-            return
+            return False
 
-        # calculate the standard deviation
-        if len(self.p1_history) > 1:
-            avg = self._p1_history_average()
-            stddev = SmartMode.P1_STDDEV_FACTOR * max(
-                SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
+        fast_change = self._record_p1_history_and_detect_fast(p1)
+        # Check minimal time between updates aka debounce.
+        if not (fast_change or fast_charge_lag_correction or spike_confirmed or time > self.zero_next):
+            return False
+
+        return await self._run_power_routing_pipeline(
+            p1,
+            time,
+            charge_lag_fast=fast_charge_lag_correction,
+            raise_on_error=raise_on_error,
+        )
+
+    async def _run_power_routing_pipeline(
+        self,
+        p1: int,
+        time: datetime,
+        *,
+        charge_lag_fast: bool = False,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """Orchestrate one complete routing cycle from a P1 watt value."""
+        try:
+            # prevent updates during power distribution changes
+            self._reset_power_distribution_state()
+
+            setpoint = await self._poll_and_classify_power_routes(p1)
+
+            policy = self._routing_policy()
+            selected_primary_routing = self._selected_primary_routing_enabled()
+            pv_charge_first_mode = selected_primary_routing and self.operation in PV_CHARGE_FIRST_OPERATIONS
+            selected_primary = self.resolve_primary_device() if selected_primary_routing else None
+            routing = self._power_routing_snapshot(
+                selected_primary,
+                primary_aware=selected_primary_routing,
+                pv_charge_first=pv_charge_first_mode,
             )
-            if is_fast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
-                self.p1_history.clear()
-        else:
-            is_fast = False
-        self.p1_history.append(p1)
+            selected_charge_primary = self.get_primary_device(charging=True)
+            pv_floors = routing.pv_floor_summary()
+            local_charge = routing.local_charge_summary(
+                selected_charge_primary,
+                pv_charge_first_mode=pv_charge_first_mode,
+                include_charge_first_home=True,
+            )
+            setpoint = self._shape_primary_aware_setpoint(
+                p1,
+                setpoint,
+                time,
+                routing,
+                pv_floors,
+                local_charge,
+                pv_charge_first_mode=pv_charge_first_mode,
+            )
+            if self.operation == ManagerMode.MANUAL:
+                setpoint = int(self.manualpower.asNumber)
 
-        # check minimal time between updates
-        if is_fast or fast_charge_lag_correction or spike_confirmed or time > self.zero_next:
-            try:
-                # prevent updates during power distribution changes
-                self._reset_power_distribution_state()
-                await self._route_power_change(p1, is_fast or fast_charge_lag_correction or spike_confirmed, time)
-            except Exception as err:
-                _LOGGER.error(err)
-                _LOGGER.error(traceback.format_exc())
-            finally:
-                time = datetime.now()
-                if fast_charge_lag_correction:
-                    self.p1_charge_lag_last_update = time
-                self._restore_p1_update_timing(time)
+            requested_setpoint = setpoint
+            setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
+            intent = self._routing_intent(
+                requested_setpoint,
+                setpoint,
+                policy,
+                selected_primary_routing=selected_primary_routing,
+                produced_only=produced_only,
+            )
 
-    async def _route_power_change(self, p1: int, is_fast: bool, time: datetime) -> None:
-        """Return the distribution setpoint."""
+            _LOGGER.info("P1 ======> p1:%s, setpoint:%sW stored:%sW", p1, setpoint, self.produced)
+            await self._execute_power_routing(intent, time, routing)
+        except Exception as err:
+            if raise_on_error:
+                raise
+            _LOGGER.error(err)
+            _LOGGER.error(traceback.format_exc())
+            return False
+        finally:
+            time = datetime.now()
+            if charge_lag_fast:
+                self.p1_charge_lag_last_update = time
+            self._restore_p1_update_timing(time)
+        return True
+
+    async def _poll_and_classify_power_routes(self, p1: int) -> int:
+        """Poll devices, classify active flows, and return the adjusted setpoint."""
         setpoint = p1
         power = 0
 
@@ -1767,47 +1631,261 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update the power entities
         self.power.update_value(power)
         self.refresh_energy_kwh()
+        return setpoint
 
+    def _routing_policy(self) -> _RoutingPolicy:
+        """Return the mode-level input and home-output clamps for this cycle."""
+        return ROUTING_POLICIES.get(self.operation, DEFAULT_ROUTING_POLICY)
+
+    def _operation_supports_selected_primary(self) -> bool:
+        """Return whether the active mode has any selected-primary route branch."""
         policy = self._routing_policy()
-        selected_primary_routing = self._selected_primary_routing_enabled()
-        pv_charge_first_mode = selected_primary_routing and self.operation in PV_CHARGE_FIRST_OPERATIONS
-        selected_primary = self.resolve_primary_device() if selected_primary_routing else None
-        routing = self._power_routing_snapshot(
-            selected_primary,
-            primary_aware=selected_primary_routing,
-            pv_charge_first=pv_charge_first_mode,
-        )
-        selected_charge_primary = self.get_primary_device(charging=True)
-        pv_floors = routing.pv_floor_summary()
-        local_charge = routing.local_charge_summary(
-            selected_charge_primary,
-            pv_charge_first_mode=pv_charge_first_mode,
-            include_charge_first_home=True,
-        )
-        setpoint = self._shape_primary_aware_setpoint(
-            p1,
-            setpoint,
-            time,
-            routing,
-            pv_floors,
-            local_charge,
-            pv_charge_first_mode=pv_charge_first_mode,
-        )
-        if self.operation == ManagerMode.MANUAL:
-            setpoint = int(self.manualpower.asNumber)
-        requested_setpoint = setpoint
-        setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
-        intent = self._routing_intent(
-            requested_setpoint,
-            setpoint,
-            policy,
-            selected_primary_routing=selected_primary_routing,
-            produced_only=produced_only,
+        return policy.selected_primary_charge or policy.selected_primary_output
+
+    def _selected_primary_routing_enabled(self) -> bool:
+        """Return whether selected-primary routing is active for this cycle."""
+        return self._operation_supports_selected_primary() and self.resolve_primary_device() is not None
+
+    def _selected_primary_pv_charge_first_enabled(self) -> bool:
+        """Return whether selected-primary input should prioritize low-SOC local PV."""
+        return self._selected_primary_routing_enabled() and self.operation in PV_CHARGE_FIRST_OPERATIONS
+
+    def _power_routing_snapshot(
+        self,
+        selected_primary: ZendureDevice | None,
+        *,
+        primary_aware: bool,
+        pv_charge_first: bool = False,
+    ) -> _PowerRoutingSnapshot:
+        """
+        Build immutable per-device route facts from the current classification.
+
+        The snapshot is the shared source for produced floors, charge floors,
+        local charge surplus, bypass passthrough, and primary-aware discharge
+        capacity so shaping and execution do not recompute those facts.
+        """
+        devices = [*self.charge, *self.discharge, *self.idle]
+        if selected_primary is not None and selected_primary not in devices:
+            devices.append(selected_primary)
+
+        route_devices: dict[ZendureDevice, _PowerRouteDevice] = {}
+        for device in devices:
+            produced_limit = (
+                self._current_produced_output_limit(device, primary_aware=primary_aware)
+                if primary_aware or device in self.discharge
+                else 0
+            )
+            home_output = max(0, device.homeOutput.asInt)
+            produced_home = min(home_output, produced_limit)
+            bypass_passthrough = 0
+            if (
+                getattr(device, "byPass", None) is not None
+                and device.byPass.is_on
+                and home_output > 0
+                and device.pwr_produced < 0
+            ):
+                bypass_passthrough = min(home_output, -device.pwr_produced)
+
+            route_devices[device] = _PowerRouteDevice(
+                device=device,
+                selected_primary=device is selected_primary,
+                pv_charge_first=pv_charge_first,
+                charging=device in self.charge,
+                discharging=device in self.discharge,
+                idle=device in self.idle,
+                produced_limit=produced_limit,
+                produced_home=produced_home,
+                battery_home_output=max(0, home_output - produced_home),
+                charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
+                charge_surplus=self._current_charge_surplus_limit(device),
+                bypass_passthrough=bypass_passthrough,
+                available_discharge=(
+                    self._available_discharge_power(device, primary_aware=primary_aware) if primary_aware else 0
+                ),
+                available_discharge_with_produced=self._available_discharge_power(
+                    device, primary_aware=primary_aware, allow_produced_only=True
+                )
+                if primary_aware
+                else 0,
+            )
+
+        return _PowerRoutingSnapshot(
+            selected_primary=selected_primary,
+            primary_aware=primary_aware,
+            charge_devices=tuple(self.charge),
+            discharge_devices=tuple(self.discharge),
+            idle_devices=tuple(self.idle),
+            devices=route_devices,
         )
 
-        # Update power distribution.
-        _LOGGER.info("P1 ======> p1:%s is_fast:%s, setpoint:%sW stored:%sW", p1, is_fast, setpoint, self.produced)
-        await self._execute_power_routing(intent, time, routing)
+    def _shape_primary_aware_setpoint(
+        self,
+        p1: int,
+        setpoint: int,
+        time: datetime,
+        routing: _PowerRoutingSnapshot,
+        pv_floors: _PvFloorSummary,
+        local_charge: _LocalChargeSummary,
+        *,
+        pv_charge_first_mode: bool,
+    ) -> int:
+        """
+        Shape the signed setpoint before manager-mode clamps are applied.
+
+        This keeps already-serving PV on home output where required, moves safe
+        local surplus into device input, and debounces direction changes that
+        would otherwise zero an active produced floor too early.
+        """
+        selected_primary = routing.selected_primary
+        matching_primary_aware = routing.primary_aware and self.operation == ManagerMode.MATCHING
+        selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
+        self.discharge_bypass += selected_primary_bypass_passthrough
+        if p1 > 0 and self.charge and routing.preserves_produced_floor:
+            self.discharge_bypass += max(
+                0,
+                pv_floors.active_serving_pv_floor - selected_primary_bypass_passthrough,
+            )
+
+        # discharge_bypass is already-served produced power. Removing it from
+        # the setpoint prevents discharging battery for load that PV has covered.
+        gross_discharge_setpoint = setpoint
+        if self.discharge_bypass > 0:
+            net_setpoint = setpoint - self.discharge_bypass
+            setpoint = max(0, net_setpoint) if p1 > 0 and not self.charge else net_setpoint
+            if (
+                matching_primary_aware
+                and p1 > 0
+                and self.charge
+                and pv_floors.active_serving_pv_floor > 0
+                and setpoint >= 0
+            ):
+                setpoint = max(setpoint, gross_discharge_setpoint)
+        discharge_candidate_setpoint = setpoint
+
+        extra_surplus = self.produced - self.discharge_bypass
+        charge_transition_would_zero = self.charge_time > time
+        protects_selected_primary_floor = (
+            matching_primary_aware
+            and selected_primary is not None
+            and pv_floors.active_primary_produced_floor > 0
+            and p1 > -pv_floors.active_primary_produced_floor
+        )
+        primary_keeps_local_surplus = (
+            local_charge.selected_primary_local_surplus > 0
+            and selected_primary is not None
+            and not selected_primary.is_discharge_blocked()
+            and (pv_floors.active_primary_produced_floor == 0 or not charge_transition_would_zero)
+            and pv_floors.active_non_primary_produced_floor == 0
+        )
+        if p1 <= 0 and extra_surplus > 0:
+            surplus_setpoint = setpoint - extra_surplus
+            if (
+                setpoint <= 0
+                or local_charge.active_charge_local_surplus > 0
+                or local_charge.active_non_primary_local_surplus > 0
+                or (protects_selected_primary_floor and local_charge.idle_non_primary_local_surplus > 0)
+                or (p1 < 0 and local_charge.active_non_primary_empty_chargeable > 0)
+                or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
+            ):
+                local_chargeable_surplus = (
+                    local_charge.non_primary_local_chargeable_surplus + local_charge.selected_primary_local_surplus
+                )
+                if protects_selected_primary_floor:
+                    requested_charge = max(0, -surplus_setpoint)
+                    uncovered_primary_floor = max(
+                        0,
+                        pv_floors.active_primary_produced_floor - max(0, discharge_candidate_setpoint),
+                    )
+                    charge_without_primary_floor = max(
+                        local_chargeable_surplus,
+                        requested_charge - uncovered_primary_floor,
+                    )
+                    setpoint = (
+                        -charge_without_primary_floor
+                        if charge_without_primary_floor > 0
+                        else max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
+                    )
+                else:
+                    setpoint = surplus_setpoint
+
+        if matching_primary_aware and p1 <= 0 and pv_floors.replaceable_non_primary_serving_pv > 0:
+            setpoint = min(
+                setpoint,
+                -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
+            )
+
+        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
+            setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
+
+        positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
+        non_primary_preservable_charge = (
+            local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv
+        )
+        charge_uses_only_non_primary_local_surplus = (
+            matching_primary_aware
+            and p1 <= 0
+            and (p1 < 0 or pv_floors.replaceable_non_primary_serving_pv > 0)
+            and non_primary_preservable_charge > 0
+            and setpoint < 0
+            and -setpoint <= non_primary_preservable_charge
+        )
+        debounce_charge_flip = (
+            matching_primary_aware
+            and pv_floors.uncovered_chargeable_serving_pv_floor > 0
+            and charge_transition_would_zero
+            and setpoint < 0
+            and not positive_demand_charge_lag
+            and not charge_uses_only_non_primary_local_surplus
+        )
+        if debounce_charge_flip:
+            if self.charge_debounce_since is None:
+                self.charge_debounce_since = time
+            if time - self.charge_debounce_since < timedelta(seconds=SmartMode.TIMEZERO):
+                setpoint = max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
+        else:
+            self.charge_debounce_since = None
+
+        return setpoint
+
+    def _clamp_setpoint_for_routing_policy(self, setpoint: int, policy: _RoutingPolicy) -> tuple[int, bool]:
+        """Apply manager-mode input/output permissions and identify PV-only output."""
+        if setpoint < 0:
+            return (setpoint if policy.charge_allowed else 0), False
+        if setpoint == 0:
+            return 0, False
+
+        match policy.output_clamp:
+            case _OutputClamp.FULL:
+                return setpoint, False
+            case _OutputClamp.PRODUCED_ONLY:
+                return (min(self.produced, setpoint) if self.produced > SmartMode.POWER_START else 0), True
+            case _OutputClamp.NONE:
+                return 0, False
+            case _:
+                return 0, False
+
+    def _routing_intent(
+        self,
+        requested_setpoint: int,
+        setpoint: int,
+        policy: _RoutingPolicy,
+        *,
+        selected_primary_routing: bool,
+        produced_only: bool,
+    ) -> _RoutingIntent:
+        """Build the compact input-or-home-output decision consumed by the executor."""
+        route_input = setpoint < 0 or (
+            setpoint == 0 and policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed
+        )
+        return _RoutingIntent(
+            input_budget=setpoint if route_input else 0,
+            home_output_budget=max(0, setpoint),
+            route_input=route_input,
+            produced_only_output=produced_only,
+            strict_home_output_stop=policy.strict_output_stop,
+            selected_primary_input=selected_primary_routing and policy.selected_primary_charge,
+            selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
+        )
 
     async def _execute_power_routing(
         self,
@@ -1815,7 +1893,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         time: datetime,
         routing: _PowerRoutingSnapshot,
     ) -> None:
-        """Execute one cycle's input and home-output intent."""
+        """Dispatch the routing intent to the one matching input or home-output executor."""
         if self.operation == ManagerMode.OFF:
             self.operationstate.update_value(ManagerState.OFF.value)
             return
@@ -1849,7 +1927,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
 
     async def _apply_standard_input(self, setpoint: int, time: datetime, *, strict_output_stop: bool = False) -> None:
-        """Apply a non-primary device-input budget."""
+        """
+        Apply an input budget without selected-primary ordering.
+
+        Existing home output is stopped as required, charge holdoff is applied,
+        and the remaining negative setpoint is allocated across active and
+        promotable idle charge candidates.
+        """
         _LOGGER.info("Input => setpoint %sW", setpoint)
 
         # stop discharging devices
@@ -1920,7 +2004,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         strict_output_stop: bool = False,
     ) -> None:
-        """Apply a device-input budget using the selected primary first."""
+        """
+        Apply an input budget while preserving selected-primary PV behavior.
+
+        Current produced home output can be kept running unless strict stop is
+        requested. Selected-primary charge, secondary local surplus, and active
+        produced targets are then balanced before fallback charge allocation.
+        """
         _LOGGER.info("Input (primary-aware) => setpoint %sW", setpoint)
 
         selected_primary = routing.selected_primary
@@ -2189,7 +2279,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.pwr_low: int = 0
 
     async def _apply_standard_home_output(self, setpoint: int, *, produced_only: bool = False) -> None:
-        """Apply a non-primary home-output budget."""
+        """
+        Apply a home-output budget without selected-primary ordering.
+
+        Active charging is stopped, produced output is assigned first, and any
+        remaining demand may be filled from battery-backed discharge unless the
+        route was clamped to produced-only output.
+        """
         _LOGGER.info("Home output => setpoint %sW", setpoint)
 
         # reset hysteria time
@@ -2229,7 +2325,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     async def _apply_primary_home_output(
         self, setpoint: int, routing: _PowerRoutingSnapshot, *, produced_only: bool = False
     ) -> None:
-        """Apply a home-output budget using the selected primary first."""
+        """
+        Apply a home-output budget with selected-primary ordering.
+
+        The selected primary keeps or increases PV-backed home output first,
+        secondary produced floors are preserved where possible, and battery
+        remainder is added only when the route is not produced-only.
+        """
         _LOGGER.info("Home output (primary-aware) => setpoint %sW", setpoint)
         requested_setpoint = setpoint
 

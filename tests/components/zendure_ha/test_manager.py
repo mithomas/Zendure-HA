@@ -220,7 +220,7 @@ class TestPrimaryAwareModeFolding:
     async def test_matching_uses_normal_paths_without_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.home_output_budget == 200  # noqa: PLR2004
@@ -228,7 +228,7 @@ class TestPrimaryAwareModeFolding:
         assert not intent.selected_primary_home_output
 
         mocks["execute"].reset_mock()
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.input_budget == -200  # noqa: PLR2004
@@ -238,7 +238,7 @@ class TestPrimaryAwareModeFolding:
     async def test_matching_uses_primary_aware_paths_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING, primary=True)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.home_output_budget == 200  # noqa: PLR2004
@@ -246,7 +246,7 @@ class TestPrimaryAwareModeFolding:
         assert intent.selected_primary_home_output
 
         mocks["execute"].reset_mock()
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.input_budget == -200  # noqa: PLR2004
@@ -259,8 +259,8 @@ class TestPrimaryAwareModeFolding:
             hass, operation=ManagerMode.MATCHING_DISCHARGE, primary=True
         )
 
-        await normal._route_power_change(200, False, datetime.now())
-        await primary._route_power_change(200, False, datetime.now())
+        await normal._run_power_routing_pipeline(200, datetime.now())
+        await primary._run_power_routing_pipeline(200, datetime.now())
 
         normal_intent = self._routing_intent(normal_mocks)
         primary_intent = self._routing_intent(primary_mocks)
@@ -275,8 +275,8 @@ class TestPrimaryAwareModeFolding:
             hass, operation=ManagerMode.MATCHING_CHARGE, primary=True
         )
 
-        await normal._route_power_change(-200, False, datetime.now())
-        await primary._route_power_change(-200, False, datetime.now())
+        await normal._run_power_routing_pipeline(-200, datetime.now())
+        await primary._run_power_routing_pipeline(-200, datetime.now())
 
         normal_intent = self._routing_intent(normal_mocks)
         primary_intent = self._routing_intent(primary_mocks)
@@ -300,8 +300,8 @@ class TestPrimaryAwareModeFolding:
             hass, operation=ManagerMode.MANUAL, primary=True, manual_power=manual_power
         )
 
-        await normal._route_power_change(0, False, datetime.now())
-        await primary._route_power_change(0, False, datetime.now())
+        await normal._run_power_routing_pipeline(0, datetime.now())
+        await primary._run_power_routing_pipeline(0, datetime.now())
 
         normal_intent = self._routing_intent(normal_mocks)
         primary_intent = self._routing_intent(primary_mocks)
@@ -317,7 +317,7 @@ class TestPrimaryAwareModeFolding:
     async def test_store_solar_uses_strict_primary_charge_path_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
 
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.input_budget == -200  # noqa: PLR2004
@@ -328,7 +328,7 @@ class TestPrimaryAwareModeFolding:
     async def test_store_solar_uses_strict_normal_charge_path_without_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR)
 
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.input_budget == -200  # noqa: PLR2004
@@ -339,7 +339,7 @@ class TestPrimaryAwareModeFolding:
     async def test_store_solar_clamps_positive_output_to_zero_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         intent = self._routing_intent(mocks)
         assert intent.home_output_budget == 0
@@ -373,7 +373,7 @@ class TestStoreSolarRouting:
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
         device.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         device.power_discharge.assert_awaited_once_with(0)
         device.power_charge.assert_not_awaited()
@@ -402,7 +402,7 @@ class TestStoreSolarRouting:
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
         device.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-500, False, datetime.now())
+        await manager._run_power_routing_pipeline(-500, datetime.now())
 
         device.power_discharge.assert_awaited_once_with(0)
         device.power_charge.assert_not_awaited()
@@ -435,7 +435,7 @@ class TestStoreSolarRouting:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-300, False, datetime.now())
+        await manager._run_power_routing_pipeline(-300, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-300)
         secondary.power_charge.assert_not_awaited()
@@ -478,7 +478,7 @@ class TestSmartMatchingPrimaryAware:
         idle_produced.power_discharge = AsyncMock(side_effect=lambda power: power)
         idle_plain.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         idle_produced.power_discharge.assert_awaited_once_with(100)
         active.power_discharge.assert_not_awaited()
@@ -514,7 +514,7 @@ class TestSmartMatchingPrimaryAware:
         other.power_discharge = AsyncMock(side_effect=lambda power: power)
         primary.is_discharge_blocked = Mock(return_value=True)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.power_discharge.await_args_list[0] == call(0)
         other.power_discharge.assert_awaited_once_with(200)
@@ -548,7 +548,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         other.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_discharge.assert_awaited_once_with(200)
         other.power_discharge.assert_awaited_once_with(0)
@@ -575,7 +575,7 @@ class TestSmartMatchingPrimaryAware:
         device.power_bypass = AsyncMock(return_value=0)
         device.power_discharge = AsyncMock(return_value=0)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         device.power_bypass.assert_awaited_once()
         device.power_discharge.assert_not_called()
@@ -602,7 +602,7 @@ class TestSmartMatchingPrimaryAware:
         device.power_bypass = AsyncMock(return_value=0)
         device.power_discharge = AsyncMock(return_value=0)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         device.power_bypass.assert_not_awaited()
         device.power_discharge.assert_not_called()
@@ -629,7 +629,7 @@ class TestSmartMatchingPrimaryAware:
         device.power_get = AsyncMock(return_value=True)
         device.power_discharge = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         device.power_discharge.assert_not_awaited()
 
@@ -673,7 +673,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(return_value=0)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert secondary.state is DeviceState.SOCFULL
         primary.power_discharge.assert_awaited_once_with(210)
@@ -722,7 +722,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
         assert secondary.state is DeviceState.SOCNEARLYFULL
@@ -775,7 +775,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         assert secondary.state is DeviceState.SOCNEARLYFULL
@@ -826,7 +826,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_bypass = AsyncMock(return_value=0)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-10, False, datetime.now())
+        await manager._run_power_routing_pipeline(-10, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
         assert secondary.state is DeviceState.RESERVE_RECOVERY
@@ -881,7 +881,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_bypass = AsyncMock(return_value=0)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(1000, False, datetime.now())
+        await manager._run_power_routing_pipeline(1000, datetime.now())
 
         assert secondary.state is DeviceState.RESERVE_RECOVERY
         primary.power_discharge.assert_awaited_once_with(800)
@@ -928,7 +928,7 @@ class TestSmartMatchingPrimaryAware:
         first.power_bypass = AsyncMock(return_value=0)
         second.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(81, False, datetime.now())
+        await manager._run_power_routing_pipeline(81, datetime.now())
 
         assert first.state is DeviceState.SOCNEARLYFULL
         assert second.state is DeviceState.RESERVE_RECOVERY
@@ -978,7 +978,7 @@ class TestSmartMatchingPrimaryAware:
         first.power_bypass = AsyncMock(return_value=0)
         second.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(81, False, datetime.now())
+        await manager._run_power_routing_pipeline(81, datetime.now())
 
         assert first.state is low_soc_state
         assert second.state is DeviceState.SOCNEARLYFULL
@@ -1028,7 +1028,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(400, False, datetime.now())
+        await manager._run_power_routing_pipeline(400, datetime.now())
 
         primary.power_discharge.assert_awaited_once_with(800)
         secondary.power_discharge.assert_awaited_once_with(400)
@@ -1056,7 +1056,7 @@ class TestSmartMatchingPrimaryAware:
         device.power_get = AsyncMock(return_value=True)
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert device.state is DeviceState.SOCFULL
         device.power_discharge.assert_awaited_once_with(200)
@@ -1106,7 +1106,7 @@ class TestSmartMatchingPrimaryAware:
         system_1.power_discharge = AsyncMock(side_effect=lambda power: power)
         system_2_primary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(400, False, datetime.now())
+        await manager._run_power_routing_pipeline(400, datetime.now())
 
         system_1.power_discharge.assert_awaited_once_with(50)
         system_2_primary.power_discharge.assert_awaited_once_with(350)
@@ -1172,7 +1172,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         spill_secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(700, False, datetime.now())
+        await manager._run_power_routing_pipeline(700, datetime.now())
 
         secondary_solar.power_discharge.assert_awaited_once_with(70)
         primary.power_discharge.assert_awaited_once_with(800)
@@ -1217,7 +1217,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(300)
         secondary.power_discharge.assert_not_awaited()
@@ -1261,7 +1261,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(300)
         secondary.power_discharge.assert_not_awaited()
@@ -1303,7 +1303,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(100)
         assert secondary.power_discharge.await_args_list[-1] == call(200)
@@ -1347,7 +1347,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(200)
         assert secondary.power_discharge.await_args_list[-1] == call(100)
@@ -1392,7 +1392,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(300)
@@ -1438,7 +1438,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(300)
@@ -1484,7 +1484,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(100)
@@ -1530,7 +1530,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(200)
@@ -1576,7 +1576,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         primary.power_discharge.assert_not_awaited()
@@ -1622,7 +1622,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(500, False, datetime.now())
+        await manager._run_power_routing_pipeline(500, datetime.now())
 
         assert primary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(200)
@@ -1668,7 +1668,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         primary.power_discharge.assert_not_awaited()
@@ -1714,7 +1714,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(200)
@@ -1760,7 +1760,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -1807,7 +1807,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -1854,7 +1854,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -1901,7 +1901,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -1960,7 +1960,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
 
         # p1 = -200: secondary is exporting 300 W to home, home only needs 100 W
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         secondary.power_charge.assert_awaited_once_with(-300)
         secondary.power_discharge.assert_not_awaited()
@@ -2003,7 +2003,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda p: p)
         secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
 
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         secondary.power_discharge.assert_awaited_once_with(100)
         secondary.power_charge.assert_not_awaited()
@@ -2051,7 +2051,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(300)
         assert secondary.power_discharge.await_args_list[-1] == call(0)
@@ -2099,7 +2099,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(300)
         assert secondary.power_discharge.await_args_list[-1] == call(0)
@@ -2145,7 +2145,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(100)
         assert secondary.power_discharge.await_args_list[-1] == call(200)
@@ -2193,7 +2193,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(200)
         assert secondary.power_discharge.await_args_list[-1] == call(100)
@@ -2241,7 +2241,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert primary.power_discharge.await_args_list[-1] == call(300)
         assert secondary.power_discharge.await_args_list[-1] == call(100)
@@ -2286,7 +2286,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         intent = _manager_routing_intent(manager)
         assert intent.home_output_budget == 200  # noqa: PLR2004
@@ -2335,7 +2335,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
@@ -2382,7 +2382,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         intent = _manager_routing_intent(manager)
         assert intent.home_output_budget == 250  # noqa: PLR2004
@@ -2428,7 +2428,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(-250, False, datetime.now())
+        await manager._run_power_routing_pipeline(-250, datetime.now())
 
         intent = _manager_routing_intent(manager)
         assert intent.home_output_budget == 250  # noqa: PLR2004
@@ -2475,7 +2475,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(-250, False, start)
+        await manager._run_power_routing_pipeline(-250, start)
 
         manager.charge.clear()
         manager.charge_limit = 0
@@ -2494,7 +2494,7 @@ class TestSmartMatchingPrimaryAware:
         for fg in manager.fuseGroups:
             fg.initPower = True
 
-        await manager._route_power_change(-250, False, start + timedelta(seconds=SmartMode.TIMEZERO - 1))
+        await manager._run_power_routing_pipeline(-250, start + timedelta(seconds=SmartMode.TIMEZERO - 1))
 
         manager.charge.clear()
         manager.charge_limit = 0
@@ -2513,7 +2513,7 @@ class TestSmartMatchingPrimaryAware:
         for fg in manager.fuseGroups:
             fg.initPower = True
 
-        await manager._route_power_change(-250, False, start + timedelta(seconds=SmartMode.TIMEZERO))
+        await manager._run_power_routing_pipeline(-250, start + timedelta(seconds=SmartMode.TIMEZERO))
 
         intents = [await_args.args[0] for await_args in manager._execute_power_routing.await_args_list]
         assert [(intent.route_input, intent.home_output_budget, intent.input_budget) for intent in intents] == [
@@ -2561,7 +2561,7 @@ class TestSmartMatchingPrimaryAware:
         initial_primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         initial_secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await initial_manager._route_power_change(250, False, datetime.now())
+        await initial_manager._run_power_routing_pipeline(250, datetime.now())
 
         assert initial_primary.power_discharge.await_args_list[-1] == call(250)
         assert initial_secondary.power_discharge.await_args_list[-1] == call(0)
@@ -2608,7 +2608,7 @@ class TestSmartMatchingPrimaryAware:
         follow_on_primary.power_charge = AsyncMock(side_effect=lambda power: power)
         follow_on_secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await follow_on_manager._route_power_change(0, False, datetime.now())
+        await follow_on_manager._run_power_routing_pipeline(0, datetime.now())
 
         follow_on_primary.power_charge.assert_not_awaited()
         follow_on_secondary.power_charge.assert_not_awaited()
@@ -2660,7 +2660,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-250, False, datetime.now())
+        await manager._run_power_routing_pipeline(-250, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
@@ -2704,7 +2704,7 @@ class TestSmartMatchingPrimaryAware:
         initial_primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         initial_secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await initial_manager._route_power_change(200, False, datetime.now())
+        await initial_manager._run_power_routing_pipeline(200, datetime.now())
 
         assert initial_primary.power_discharge.await_args_list[-1] == call(150)
         assert initial_secondary.power_discharge.await_args_list[-1] == call(50)
@@ -2751,7 +2751,7 @@ class TestSmartMatchingPrimaryAware:
         follow_on_primary.power_charge = AsyncMock(side_effect=lambda power: power)
         follow_on_secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await follow_on_manager._route_power_change(0, False, datetime.now())
+        await follow_on_manager._run_power_routing_pipeline(0, datetime.now())
 
         follow_on_primary.power_charge.assert_not_awaited()
         follow_on_secondary.power_charge.assert_not_awaited()
@@ -2803,7 +2803,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
@@ -2854,7 +2854,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(300)
@@ -2904,7 +2904,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(300)
@@ -2954,7 +2954,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert secondary.state is low_soc_state
         primary.power_discharge.assert_not_awaited()
@@ -3004,7 +3004,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert secondary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(200)
@@ -3054,7 +3054,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert primary.state is low_soc_state
         primary.power_discharge.assert_not_awaited()
@@ -3104,7 +3104,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(300)
@@ -3154,7 +3154,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert primary.state is low_soc_state
         primary.power_discharge.assert_not_awaited()
@@ -3204,7 +3204,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert primary.power_discharge.await_args_list[-1] == call(300)
@@ -3254,7 +3254,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -3305,7 +3305,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -3356,7 +3356,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(200, False, datetime.now())
+        await manager._run_power_routing_pipeline(200, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -3407,7 +3407,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is low_soc_state
         assert secondary.state is low_soc_state
@@ -3451,7 +3451,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         primary.power_discharge.assert_awaited_once_with(800)
         secondary.power_discharge.assert_not_awaited()
@@ -3485,7 +3485,7 @@ class TestSmartMatchingPrimaryAware:
         device.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert device.state is DeviceState.SOCFULL
         intent = _manager_routing_intent(manager)
@@ -3540,7 +3540,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(150, False, datetime.now())
+        await manager._run_power_routing_pipeline(150, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
         secondary.power_charge.assert_not_awaited()
@@ -3594,7 +3594,7 @@ class TestSmartMatchingPrimaryAware:
         charging_device.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(20, False, datetime.now())
+        await manager._run_power_routing_pipeline(20, datetime.now())
 
         intent = _manager_routing_intent(manager)
         assert intent.input_budget == -260  # noqa: PLR2004
@@ -3639,7 +3639,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
         primary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-60)
@@ -3683,7 +3683,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is DeviceState.RESERVE_RECOVERY
         primary.power_discharge.assert_awaited_once_with(100)
@@ -3745,7 +3745,7 @@ class TestSmartMatchingPrimaryAware:
         secondary_solar.power_discharge = AsyncMock(side_effect=lambda power: power)
         discharge_secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert primary.state is DeviceState.RESERVE_RECOVERY
         primary.power_discharge.assert_awaited_once_with(100)
@@ -3777,7 +3777,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_get = AsyncMock(return_value=True)
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.state is DeviceState.RESERVE_RECOVERY
         primary.power_discharge.assert_awaited_once_with(200)
@@ -3822,7 +3822,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.state is DeviceState.RESERVE_RECOVERY
         assert secondary.state is DeviceState.RESERVE_RECOVERY
@@ -3868,7 +3868,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.state is DeviceState.RESERVE_RECOVERY
         primary.power_discharge.assert_awaited_once_with(200)
@@ -3921,7 +3921,7 @@ class TestSmartMatchingPrimaryAware:
         first.power_charge = AsyncMock(side_effect=lambda power: power)
         second.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert first.state is DeviceState.SOCFULL
         assert second.state is DeviceState.INACTIVE
@@ -3970,7 +3970,7 @@ class TestSmartMatchingPrimaryAware:
         first.power_charge = AsyncMock(side_effect=lambda power: power)
         second.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert first.state is DeviceState.SOCFULL
         first.power_bypass.assert_awaited_once()
@@ -4025,7 +4025,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
         primary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-400)
@@ -4072,7 +4072,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_bypass.assert_awaited_once()
         primary.power_charge.assert_not_awaited()
@@ -4127,7 +4127,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-250)
         secondary.power_charge.assert_awaited_once_with(-100)
@@ -4183,7 +4183,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-50)
@@ -4239,9 +4239,9 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-20, False, datetime.now())
+        await manager._run_power_routing_pipeline(-20, datetime.now())
         manager._reset_power_distribution_state()
-        await manager._route_power_change(-20, False, datetime.now())
+        await manager._run_power_routing_pipeline(-20, datetime.now())
 
         assert primary.state is expected_primary_state
         primary.power_charge.assert_not_awaited()
@@ -4288,7 +4288,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-20, False, datetime.now())
+        await manager._run_power_routing_pipeline(-20, datetime.now())
 
         assert primary.state is DeviceState.INACTIVE
         primary.power_charge.assert_not_awaited()
@@ -4338,7 +4338,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is low_soc_state
         primary.power_discharge.assert_awaited_once_with(100)
@@ -4386,7 +4386,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert primary.state is DeviceState.SOCEMPTY
         primary.power_discharge.assert_awaited_once_with(0)
@@ -4443,7 +4443,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-300, False, datetime.now())
+        await manager._run_power_routing_pipeline(-300, datetime.now())
 
         assert secondary.state is expected_state
         primary.power_charge.assert_not_awaited()
@@ -4492,7 +4492,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
         primary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
         assert secondary.state is DeviceState.RESERVE_RECOVERY
@@ -4544,7 +4544,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
         primary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
         assert secondary.state is low_soc_state
@@ -4596,7 +4596,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-300, False, datetime.now())
+        await manager._run_power_routing_pipeline(-300, datetime.now())
 
         assert primary.state is DeviceState.INACTIVE
         assert secondary.state is DeviceState.SOCFULL
@@ -4650,7 +4650,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=primary_power_charge)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-300)
         secondary.power_charge.assert_not_awaited()
@@ -4703,7 +4703,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_awaited_once_with(-300)
@@ -4757,7 +4757,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_awaited_once_with(-300)
@@ -4812,7 +4812,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-355)
         secondary.power_charge.assert_awaited_once_with(-50)
@@ -4866,7 +4866,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
@@ -4926,7 +4926,7 @@ class TestSmartMatchingPrimaryAware:
         charging.power_discharge = AsyncMock(side_effect=lambda power: power)
         full_bypass.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-200, False, datetime.now())
+        await manager._run_power_routing_pipeline(-200, datetime.now())
 
         assert full_bypass.state is DeviceState.SOCFULL
         charging.power_charge.assert_awaited_once_with(-300)
@@ -4983,7 +4983,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         primary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-460, False, datetime.now())
+        await manager._run_power_routing_pipeline(-460, datetime.now())
 
         assert primary.state is DeviceState.SOCFULL
         primary.power_charge.assert_not_awaited()
@@ -5036,7 +5036,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-20, False, datetime.now())
+        await manager._run_power_routing_pipeline(-20, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_awaited_once_with(-100)
@@ -5091,7 +5091,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         assert secondary.state is DeviceState.SOCFULL
         primary.power_charge.assert_awaited_once_with(-150)
@@ -5151,7 +5151,7 @@ class TestSmartMatchingPrimaryAware:
         full_bypass.power_discharge = AsyncMock(side_effect=lambda power: power)
         full_bypass.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(70, False, datetime.now())
+        await manager._run_power_routing_pipeline(70, datetime.now())
 
         assert full_bypass.state is DeviceState.SOCFULL
         charging.power_charge.assert_awaited_once_with(-130)
@@ -5207,7 +5207,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         assert secondary.state is DeviceState.INACTIVE
         primary.power_charge.assert_awaited_once_with(-150)
@@ -5265,7 +5265,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-50)
         secondary.power_charge.assert_not_awaited()
@@ -5322,7 +5322,7 @@ class TestSmartMatchingPrimaryAware:
         charging.power_discharge = AsyncMock(side_effect=lambda power: power)
         mixed.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(150, False, datetime.now())
+        await manager._run_power_routing_pipeline(150, datetime.now())
 
         charging.power_charge.assert_not_awaited()
         mixed.power_charge.assert_not_awaited()
@@ -5376,7 +5376,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         mixed.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(250, False, datetime.now())
+        await manager._run_power_routing_pipeline(250, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         mixed.power_charge.assert_not_awaited()
@@ -5440,7 +5440,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         assert secondary.state is expected_state
         primary.power_charge.assert_awaited_once_with(-150)
@@ -5495,7 +5495,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         assert secondary.state is DeviceState.SOCEMPTY
         primary.power_charge.assert_awaited_once_with(-100)
@@ -5546,7 +5546,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-150)
@@ -5598,7 +5598,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-200)
@@ -5653,7 +5653,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(150, False, datetime.now())
+        await manager._run_power_routing_pipeline(150, datetime.now())
 
         assert primary.state is DeviceState.RESERVE_RECOVERY
         assert secondary.state is DeviceState.RESERVE_RECOVERY
@@ -5730,7 +5730,7 @@ class TestSmartMatchingPrimaryAware:
         full_secondary.power_bypass = AsyncMock(return_value=0)
         blocked_secondary.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(50, False, datetime.now())
+        await manager._run_power_routing_pipeline(50, datetime.now())
 
         assert full_secondary.state is DeviceState.SOCFULL
         assert blocked_secondary.state is DeviceState.RESERVE_RECOVERY
@@ -5791,7 +5791,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_awaited_once_with(-50)
@@ -5847,7 +5847,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         secondary.power_charge.assert_awaited_once_with(-60)
         primary.power_charge.assert_awaited_once_with(-440)
@@ -5895,7 +5895,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-100)
@@ -5947,7 +5947,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         manager._execute_power_routing = AsyncMock()
 
-        await manager._route_power_change(120, False, datetime.now())
+        await manager._run_power_routing_pipeline(120, datetime.now())
 
         intent = _manager_routing_intent(manager)
         assert intent.input_budget == -170  # noqa: PLR2004
@@ -6001,7 +6001,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(120, False, datetime.now())
+        await manager._run_power_routing_pipeline(120, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-30)
         secondary.power_charge.assert_awaited_once_with(-140)
@@ -6058,7 +6058,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(220, False, datetime.now())
+        await manager._run_power_routing_pipeline(220, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_awaited_once_with(-70)
@@ -6112,7 +6112,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(120, False, datetime.now())
+        await manager._run_power_routing_pipeline(120, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-30)
         secondary.power_charge.assert_awaited_once_with(-140)
@@ -6166,7 +6166,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(120, False, datetime.now())
+        await manager._run_power_routing_pipeline(120, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_awaited_once_with(-60)
@@ -6219,7 +6219,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(120, False, datetime.now())
+        await manager._run_power_routing_pipeline(120, datetime.now())
 
         primary.power_charge.assert_awaited_once_with(-30)
         secondary.power_charge.assert_awaited_once_with(-50)
@@ -6273,7 +6273,7 @@ class TestSmartMatchingPrimaryAware:
         first.power_discharge = AsyncMock(side_effect=lambda power: power)
         second.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(120, False, datetime.now())
+        await manager._run_power_routing_pipeline(120, datetime.now())
 
         first.power_charge.reset_mock()
         second.power_charge.reset_mock()
@@ -6341,7 +6341,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(return_value=0)
 
-        await manager._route_power_change(-300, False, datetime.now())
+        await manager._run_power_routing_pipeline(-300, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_discharge.assert_not_awaited()
@@ -6402,7 +6402,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(0, False, datetime.now())
+        await manager._run_power_routing_pipeline(0, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_charge.assert_awaited_once_with(-100)
@@ -6447,7 +6447,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(81, False, datetime.now())
+        await manager._run_power_routing_pipeline(81, datetime.now())
 
         secondary.power_discharge.assert_awaited_once_with(336)
 
@@ -6490,9 +6490,50 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_get = AsyncMock(return_value=True)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await manager._route_power_change(-300, False, datetime.now())
+        await manager._run_power_routing_pipeline(-300, datetime.now())
 
         secondary.power_charge.assert_awaited_once_with(-300)
+
+
+class TestP1RoutingPipeline:
+    """Verify the high-level P1 routing pipeline."""
+
+    async def test_p1_changed_returns_true_when_update_routes(self, hass):
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        manager.zero_fast = datetime.min
+        manager.zero_next = datetime.min
+        manager._run_power_routing_pipeline = AsyncMock(return_value=True)
+
+        routed = await manager._p1_changed(make_p1_event(100))
+
+        assert routed is True
+        manager._run_power_routing_pipeline.assert_awaited_once()
+
+    async def test_p1_changed_returns_false_when_fast_delay_suppresses_update(self, hass):
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        manager.zero_fast = datetime.now() + timedelta(seconds=SmartMode.TIMEFAST)
+        manager.zero_next = datetime.now() + timedelta(seconds=SmartMode.TIMEZERO)
+        manager._run_power_routing_pipeline = AsyncMock()
+
+        routed = await manager._p1_changed(make_p1_event(10))
+
+        assert routed is False
+        manager._run_power_routing_pipeline.assert_not_awaited()
+
+    async def test_route_p1_update_writes_simulation_before_forced_route(self, hass):
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        manager._run_power_routing_pipeline = AsyncMock(return_value=True)
+        time = datetime.now()
+
+        with (
+            patch.object(ZendureManager, "simulation", True),
+            patch.object(manager, "writeSimulation") as write_simulation,
+        ):
+            routed = await manager._route_p1_update(200, time, force=True)
+
+        assert routed is True
+        write_simulation.assert_called_once_with(time, 200)
+        manager._run_power_routing_pipeline.assert_awaited_once_with(200, time, raise_on_error=False)
 
 
 class TestP1SpikeFilter:
@@ -6516,18 +6557,18 @@ class TestP1SpikeFilter:
     async def test_suppresses_upward_spike_before_duration(self, hass):
         manager = make_manager(hass)
         self._enable_spike_filter(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
-        manager._route_power_change.assert_not_awaited()
+        manager._run_power_routing_pipeline.assert_not_awaited()
         assert list(manager.p1_history) == [0, 0]
         assert manager.p1_spike_candidate is not None
 
     async def test_processes_sustained_spike_after_duration(self, hass):
         manager = make_manager(hass)
         self._enable_spike_filter(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
         candidate = manager.p1_spike_candidate
@@ -6539,23 +6580,22 @@ class TestP1SpikeFilter:
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
-        manager._route_power_change.assert_awaited_once()
-        await_args = manager._route_power_change.await_args
+        manager._run_power_routing_pipeline.assert_awaited_once()
+        await_args = manager._run_power_routing_pipeline.await_args
         assert await_args is not None
         assert await_args.args[0] == self.SPIKE_POWER
-        assert await_args.args[1] is True
         assert manager.p1_spike_candidate is None
 
     async def test_drops_spike_candidate_when_reading_returns_before_duration(self, hass):
         manager = make_manager(hass)
         self._enable_spike_filter(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
         await manager._p1_changed(make_p1_event(0))
 
-        manager._route_power_change.assert_awaited_once()
-        await_args = manager._route_power_change.await_args
+        manager._run_power_routing_pipeline.assert_awaited_once()
+        await_args = manager._run_power_routing_pipeline.await_args
         assert await_args is not None
         assert await_args.args[0] == 0
         assert manager.p1_spike_candidate is None
@@ -6563,11 +6603,11 @@ class TestP1SpikeFilter:
     async def test_uses_configured_threshold(self, hass):
         manager = make_manager(hass)
         self._enable_spike_filter(manager, threshold=self.HIGH_THRESHOLD)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
-        manager._route_power_change.assert_awaited_once()
+        manager._run_power_routing_pipeline.assert_awaited_once()
         assert manager.p1_spike_candidate is None
 
     async def test_filter_switch_off_preserves_existing_p1_handling(self, hass):
@@ -6577,11 +6617,11 @@ class TestP1SpikeFilter:
         manager.p1_spike_filter.update_value(0)
         manager.p1_spike_filter_threshold.update_value(self.DEFAULT_THRESHOLD)
         manager.p1_spike_filter_duration.update_value(self.DEFAULT_DURATION)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
-        manager._route_power_change.assert_awaited_once()
+        manager._run_power_routing_pipeline.assert_awaited_once()
         assert manager.p1_spike_candidate is None
 
     async def test_turning_filter_off_clears_pending_candidate(self, hass):
@@ -6632,15 +6672,15 @@ class TestP1ChargeLagFastPath:
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(p1_value))
 
-        manager._route_power_change.assert_awaited_once()
-        await_args = manager._route_power_change.await_args
+        manager._run_power_routing_pipeline.assert_awaited_once()
+        await_args = manager._run_power_routing_pipeline.await_args
         assert await_args is not None
         assert await_args.args[0] == p1_value
-        assert await_args.args[1] is True
+        assert await_args.kwargs["charge_lag_fast"] is True
 
     async def test_active_charge_deviation_without_primary_keeps_existing_p1_debounce(self, hass):
         device = make_device(
@@ -6664,11 +6704,11 @@ class TestP1ChargeLagFastPath:
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(150))
 
-        manager._route_power_change.assert_not_awaited()
+        manager._run_power_routing_pipeline.assert_not_awaited()
 
     @pytest.mark.parametrize("charging_device_is_primary", [True, False])
     async def test_charge_telemetry_bypasses_p1_debounce_without_previous_manager_bucket(
@@ -6707,15 +6747,15 @@ class TestP1ChargeLagFastPath:
             primary_device_id=charging.deviceId if charging_device_is_primary else full_bypass.deviceId,
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(p1_value))
 
-        manager._route_power_change.assert_awaited_once()
-        await_args = manager._route_power_change.await_args
+        manager._run_power_routing_pipeline.assert_awaited_once()
+        await_args = manager._run_power_routing_pipeline.await_args
         assert await_args is not None
         assert await_args.args[0] == p1_value
-        assert await_args.args[1] is True
+        assert await_args.kwargs["charge_lag_fast"] is True
 
     async def test_first_charge_lag_deviation_after_normal_update_bypasses_p1_debounce(self, hass):
         device = make_device(
@@ -6740,11 +6780,11 @@ class TestP1ChargeLagFastPath:
         )
         self._block_normal_p1_debounce(manager)
         manager.p1_last_update = datetime.now()
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(150))
 
-        manager._route_power_change.assert_awaited_once()
+        manager._run_power_routing_pipeline.assert_awaited_once()
 
     async def test_active_charge_without_pv_keeps_existing_p1_debounce(self, hass):
         device = make_device(
@@ -6768,11 +6808,11 @@ class TestP1ChargeLagFastPath:
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(150))
 
-        manager._route_power_change.assert_not_awaited()
+        manager._run_power_routing_pipeline.assert_not_awaited()
 
     async def test_bypassing_primary_with_charge_candidate_bypasses_p1_debounce(self, hass):
         p1_value = -100
@@ -6804,15 +6844,15 @@ class TestP1ChargeLagFastPath:
             idle_devices=(secondary,),
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(p1_value))
 
-        manager._route_power_change.assert_awaited_once()
-        await_args = manager._route_power_change.await_args
+        manager._run_power_routing_pipeline.assert_awaited_once()
+        await_args = manager._run_power_routing_pipeline.await_args
         assert await_args is not None
         assert await_args.args[0] == p1_value
-        assert await_args.args[1] is True
+        assert await_args.kwargs["charge_lag_fast"] is True
 
     @pytest.mark.parametrize(
         "p1_value",
@@ -6846,11 +6886,11 @@ class TestP1ChargeLagFastPath:
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(p1_value))
 
-        manager._route_power_change.assert_not_awaited()
+        manager._run_power_routing_pipeline.assert_not_awaited()
 
     async def test_charge_lag_fast_path_respects_minimum_p1_interval(self, hass):
         device = make_device(
@@ -6876,11 +6916,11 @@ class TestP1ChargeLagFastPath:
         )
         self._block_normal_p1_debounce(manager)
         manager.p1_charge_lag_last_update = datetime.now()
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(150))
 
-        manager._route_power_change.assert_not_awaited()
+        manager._run_power_routing_pipeline.assert_not_awaited()
 
     async def test_charge_lag_fast_path_requires_active_charge_state(self, hass):
         device = make_device(
@@ -6898,17 +6938,17 @@ class TestP1ChargeLagFastPath:
             primary_device_id=device.deviceId,
         )
         self._block_normal_p1_debounce(manager)
-        manager._route_power_change = AsyncMock()
+        manager._run_power_routing_pipeline = AsyncMock()
 
         await manager._p1_changed(make_p1_event(150))
 
-        manager._route_power_change.assert_not_awaited()
+        manager._run_power_routing_pipeline.assert_not_awaited()
 
 
 class TestZeroFastRecovery:
     """Verify that zero_fast is always restored after power distribution calls."""
 
-    async def test_p1_changed_resets_zero_fast_after_successful_route_power_change(self, hass):
+    async def test_p1_changed_resets_zero_fast_after_successful_routing_pipeline(self, hass):
         """zero_fast must not stay at datetime.max after a normal _p1_changed cycle."""
         device = make_device(hass, level=50, home_output=100, battery_output=100)
         manager = make_manager(
@@ -6934,8 +6974,8 @@ class TestZeroFastRecovery:
         assert manager.zero_fast != datetime.max
         assert manager.zero_fast < datetime.now() + timedelta(seconds=10)
 
-    async def test_p1_changed_resets_zero_fast_after_route_power_change_raises(self, hass):
-        """zero_fast must be restored even when _route_power_change raises an exception."""
+    async def test_p1_changed_resets_zero_fast_after_routing_stage_raises(self, hass):
+        """zero_fast must be restored even when a routing pipeline stage raises an exception."""
         device = make_device(hass, level=50)
         manager = make_manager(
             hass,
@@ -6950,14 +6990,14 @@ class TestZeroFastRecovery:
         event = Mock()
         event.data = {"new_state": state, "old_state": None, "entity_id": "sensor.power_actual"}
 
-        with patch.object(manager, "_route_power_change", side_effect=RuntimeError("boom")):
+        with patch.object(manager, "_poll_and_classify_power_routes", side_effect=RuntimeError("boom")):
             await manager._p1_changed(event)
 
         assert manager.zero_fast != datetime.max
         assert manager.zero_fast < datetime.now() + timedelta(seconds=10)
 
     async def test_p1_changed_resets_zero_fast_after_cancelled_error(self, hass):
-        """zero_fast must be restored even when _route_power_change is cancelled."""
+        """zero_fast must be restored even when a routing pipeline stage is cancelled."""
         device = make_device(hass, level=50)
         manager = make_manager(
             hass,
@@ -6973,7 +7013,7 @@ class TestZeroFastRecovery:
         event.data = {"new_state": state, "old_state": None, "entity_id": "sensor.power_actual"}
 
         with (
-            patch.object(manager, "_route_power_change", side_effect=asyncio.CancelledError),
+            patch.object(manager, "_poll_and_classify_power_routes", side_effect=asyncio.CancelledError),
             pytest.raises(asyncio.CancelledError),
         ):
             await manager._p1_changed(event)
@@ -7015,7 +7055,7 @@ class TestZeroFastRecovery:
         assert manager.zero_fast < datetime.now() + timedelta(seconds=10)
 
     async def test_update_primary_device_resets_zero_fast_on_error(self, hass):
-        """zero_fast must be restored even when _route_power_change raises during update_primary_device."""
+        """zero_fast must be restored even when a forced routing stage raises during update_primary_device."""
         device = make_device(
             hass,
             device_id="primary",
@@ -7038,7 +7078,7 @@ class TestZeroFastRecovery:
         manager.zero_fast = datetime.min
 
         with (
-            patch.object(manager, "_route_power_change", side_effect=RuntimeError("boom")),
+            patch.object(manager, "_poll_and_classify_power_routes", side_effect=RuntimeError("boom")),
             pytest.raises(RuntimeError),
         ):
             await manager.update_primary_device(manager.primarydevice, device.deviceId)
@@ -7071,7 +7111,7 @@ class TestNearFullChargeTaper:
         device.power_discharge = AsyncMock(return_value=0)
         device.power_charge = AsyncMock(return_value=0)
 
-        await manager._route_power_change(100, False, datetime.now())
+        await manager._run_power_routing_pipeline(100, datetime.now())
 
         assert device.state is DeviceState.SOCNEARLYFULL
         device.power_bypass.assert_not_awaited()
@@ -7098,7 +7138,7 @@ class TestNearFullChargeTaper:
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
         device.power_bypass = AsyncMock(return_value=0)
 
-        await manager._route_power_change(300, False, datetime.now())
+        await manager._run_power_routing_pipeline(300, datetime.now())
 
         assert device.state is DeviceState.SOCNEARLYFULL
         device.power_discharge.assert_awaited_once()
