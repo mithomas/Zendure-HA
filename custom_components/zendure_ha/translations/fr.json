@@ -450,11 +450,7 @@
           "smart": "Couplage intelligent",
           "smart_discharging": "Décharge intelligente",
           "smart_charging": "Charge intelligente",
-          "store_solar": "Stocker le solaire",
-          "manual_primary_aware": "Puissance manuelle (Appareil principal)",
-          "smart_primary_aware": "Couplage intelligent (Appareil principal)",
-          "smart_discharging_primary_aware": "Décharge intelligente (Appareil principal)",
-          "smart_charging_primary_aware": "Charge intelligente (Appareil principal)"
+          "store_solar": "Stocker le solaire"
         }
       },
       "primary_device": {

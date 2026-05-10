@@ -12,6 +12,7 @@ import pytest
 from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, SmartMode
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.fusegroup import FuseGroup
+from custom_components.zendure_ha.manager import ZendureManager
 
 from .common import (
     attach_devices,
@@ -176,6 +177,134 @@ class TestUpdateOperation:
             power_off_mock.assert_not_awaited()
 
 
+class TestPrimaryAwareModeFolding:
+    """Verify primary-aware routing is selected by primary device, not by mode."""
+
+    @staticmethod
+    def _manager_with_dispatch_mocks(
+        hass,
+        *,
+        operation: ManagerMode,
+        primary: bool = False,
+        manual_power: int = 0,
+    ) -> tuple[ZendureManager, dict[str, AsyncMock]]:
+        device = make_device(hass, device_id="folded-primary", device_name="folded primary", level=50)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=operation,
+            manual_power=manual_power,
+            primary_device_id=device.deviceId if primary else None,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        mocks = {
+            "power_charge": AsyncMock(),
+            "power_discharge": AsyncMock(),
+            "power_charge_primary_aware": AsyncMock(),
+            "power_discharge_primary_aware": AsyncMock(),
+        }
+        manager.power_charge = mocks["power_charge"]
+        manager.power_discharge = mocks["power_discharge"]
+        manager.power_charge_primary_aware = mocks["power_charge_primary_aware"]
+        manager.power_discharge_primary_aware = mocks["power_discharge_primary_aware"]
+        return manager, mocks
+
+    async def test_matching_uses_normal_paths_without_primary(self, hass):
+        manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING)
+
+        await manager.powerChanged(200, False, datetime.now())
+
+        mocks["power_discharge"].assert_awaited_once_with(200)
+        mocks["power_discharge_primary_aware"].assert_not_awaited()
+
+        mocks["power_discharge"].reset_mock()
+        await manager.powerChanged(-200, False, datetime.now())
+
+        mocks["power_charge"].assert_awaited_once_with(-200, ANY)
+        mocks["power_charge_primary_aware"].assert_not_awaited()
+
+    async def test_matching_uses_primary_aware_paths_with_primary(self, hass):
+        manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING, primary=True)
+
+        await manager.powerChanged(200, False, datetime.now())
+
+        mocks["power_discharge_primary_aware"].assert_awaited_once_with(200)
+        mocks["power_discharge"].assert_not_awaited()
+
+        mocks["power_discharge_primary_aware"].reset_mock()
+        await manager.powerChanged(-200, False, datetime.now())
+
+        mocks["power_charge_primary_aware"].assert_awaited_once_with(-200, ANY)
+        mocks["power_charge"].assert_not_awaited()
+
+    async def test_matching_discharge_uses_primary_aware_path_only_with_primary(self, hass):
+        normal, normal_mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING_DISCHARGE)
+        primary, primary_mocks = self._manager_with_dispatch_mocks(
+            hass, operation=ManagerMode.MATCHING_DISCHARGE, primary=True
+        )
+
+        await normal.powerChanged(200, False, datetime.now())
+        await primary.powerChanged(200, False, datetime.now())
+
+        normal_mocks["power_discharge"].assert_awaited_once_with(200)
+        normal_mocks["power_discharge_primary_aware"].assert_not_awaited()
+        primary_mocks["power_discharge_primary_aware"].assert_awaited_once_with(200)
+        primary_mocks["power_discharge"].assert_not_awaited()
+
+    async def test_matching_charge_uses_primary_aware_path_only_with_primary(self, hass):
+        normal, normal_mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING_CHARGE)
+        primary, primary_mocks = self._manager_with_dispatch_mocks(
+            hass, operation=ManagerMode.MATCHING_CHARGE, primary=True
+        )
+
+        await normal.powerChanged(-200, False, datetime.now())
+        await primary.powerChanged(-200, False, datetime.now())
+
+        normal_mocks["power_charge"].assert_awaited_once_with(-200, ANY)
+        normal_mocks["power_charge_primary_aware"].assert_not_awaited()
+        primary_mocks["power_charge_primary_aware"].assert_awaited_once_with(-200, ANY)
+        primary_mocks["power_charge"].assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("manual_power", "normal_method", "primary_method", "expected"),
+        [
+            pytest.param(200, "power_discharge", "power_discharge_primary_aware", 200, id="discharge"),
+            pytest.param(-200, "power_charge", "power_charge_primary_aware", -200, id="charge"),
+        ],
+    )
+    async def test_manual_uses_primary_aware_path_only_with_primary(
+        self, hass, manual_power, normal_method, primary_method, expected
+    ):
+        normal, normal_mocks = self._manager_with_dispatch_mocks(
+            hass, operation=ManagerMode.MANUAL, manual_power=manual_power
+        )
+        primary, primary_mocks = self._manager_with_dispatch_mocks(
+            hass, operation=ManagerMode.MANUAL, primary=True, manual_power=manual_power
+        )
+
+        await normal.powerChanged(0, False, datetime.now())
+        await primary.powerChanged(0, False, datetime.now())
+
+        normal_mocks[normal_method].assert_awaited_once()
+        normal_args = normal_mocks[normal_method].await_args
+        assert normal_args is not None
+        assert normal_args.args[0] == expected
+        normal_mocks[primary_method].assert_not_awaited()
+        primary_mocks[primary_method].assert_awaited_once()
+        primary_args = primary_mocks[primary_method].await_args
+        assert primary_args is not None
+        assert primary_args.args[0] == expected
+        primary_mocks[normal_method].assert_not_awaited()
+
+    async def test_store_solar_keeps_normal_charge_path_with_primary(self, hass):
+        manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
+
+        await manager.powerChanged(-200, False, datetime.now())
+
+        mocks["power_charge"].assert_awaited_once_with(-200, ANY)
+        mocks["power_charge_primary_aware"].assert_not_awaited()
+
+
 class TestSmartMatchingPrimaryAware:
     async def test_includes_idle_devices_that_already_have_produced_power(self, hass):
         """Idle devices that already contribute produced power should still join discharge candidate selection."""
@@ -203,7 +332,8 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(active, idle_produced, idle_plain),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=active.deviceId,
         )
         active.power_get = AsyncMock(return_value=True)
         idle_produced.power_get = AsyncMock(return_value=True)
@@ -215,8 +345,8 @@ class TestSmartMatchingPrimaryAware:
         await manager.powerChanged(0, False, datetime.now())
 
         idle_produced.power_discharge.assert_awaited_once_with(100)
-        active.power_discharge.assert_awaited_once_with(0)
-        idle_plain.power_discharge.assert_awaited_once_with(0)
+        active.power_discharge.assert_not_awaited()
+        idle_plain.power_discharge.assert_not_awaited()
 
     async def test_stops_a_blocked_primary_before_discharge_allocation(self, hass):
         """A selected primary blocked at its floor should be stopped before the manager allocates discharge elsewhere."""
@@ -239,7 +369,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, other),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -274,7 +404,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, other),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -302,7 +432,8 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
         )
         device.power_get = AsyncMock(return_value=True)
         device.power_bypass = AsyncMock(return_value=0)
@@ -327,7 +458,8 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
         )
         device.byPass.update_value(1)
         device.power_get = AsyncMock(return_value=True)
@@ -353,7 +485,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             charge_time=datetime.min,
             discharge_devices=(device,),
         )
@@ -395,7 +527,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -442,7 +574,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.byPass.update_value(1)
@@ -495,7 +627,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.byPass.update_value(1)
@@ -546,7 +678,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -600,7 +732,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -648,7 +780,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(first, second),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=second.deviceId,
         )
@@ -698,7 +830,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(first, second),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=first.deviceId,
         )
@@ -751,7 +883,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -781,7 +913,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=device.deviceId,
         )
         device.power_get = AsyncMock(return_value=True)
@@ -828,7 +960,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(system_1, system_2_primary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=system_2_primary.deviceId,
         )
@@ -892,7 +1024,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(secondary_solar, primary, spill_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -939,7 +1071,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -983,7 +1115,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1025,7 +1157,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1069,7 +1201,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1114,7 +1246,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1160,7 +1292,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1206,7 +1338,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1252,7 +1384,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1298,7 +1430,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1344,7 +1476,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1390,7 +1522,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1436,7 +1568,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1482,7 +1614,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1529,7 +1661,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1576,7 +1708,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1623,7 +1755,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1680,7 +1812,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -1726,7 +1858,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -1773,7 +1905,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1821,7 +1953,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1867,7 +1999,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1915,7 +2047,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -1963,7 +2095,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2009,7 +2141,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2055,7 +2187,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2105,7 +2237,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2151,7 +2283,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2198,7 +2330,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2282,7 +2414,7 @@ class TestSmartMatchingPrimaryAware:
         initial_manager = make_manager(
             hass,
             devices=(initial_primary, initial_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=initial_primary.deviceId,
         )
@@ -2327,7 +2459,7 @@ class TestSmartMatchingPrimaryAware:
         follow_on_manager = make_manager(
             hass,
             devices=(follow_on_primary, follow_on_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=follow_on_primary.deviceId,
         )
@@ -2379,7 +2511,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2425,7 +2557,7 @@ class TestSmartMatchingPrimaryAware:
         initial_manager = make_manager(
             hass,
             devices=(initial_primary, initial_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=initial_primary.deviceId,
         )
@@ -2470,7 +2602,7 @@ class TestSmartMatchingPrimaryAware:
         follow_on_manager = make_manager(
             hass,
             devices=(follow_on_primary, follow_on_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=follow_on_primary.deviceId,
         )
@@ -2522,7 +2654,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2575,7 +2707,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2625,7 +2757,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2675,7 +2807,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2725,7 +2857,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2775,7 +2907,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2825,7 +2957,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2875,7 +3007,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2925,7 +3057,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -2975,7 +3107,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3026,7 +3158,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3077,7 +3209,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3128,7 +3260,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3173,7 +3305,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -3209,7 +3341,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=device.deviceId,
         )
         device.power_get = AsyncMock(return_value=True)
@@ -3260,7 +3392,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -3316,7 +3448,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(full_device, charging_device),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=charging_device.deviceId,
             charge_time=datetime.min,
         )
@@ -3359,7 +3491,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -3404,7 +3536,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3464,7 +3596,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary_solar, discharge_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3500,7 +3632,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3542,7 +3674,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3589,7 +3721,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -3641,7 +3773,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(first, second),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=first.deviceId,
             charge_time=datetime.min,
         )
@@ -3691,7 +3823,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(first, second),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=first.deviceId,
         )
         first.power_get = AsyncMock(return_value=True)
@@ -3745,7 +3877,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -3793,7 +3925,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -3846,7 +3978,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -3902,7 +4034,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -3958,7 +4090,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -4008,7 +4140,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4059,7 +4191,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -4104,7 +4236,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
@@ -4163,7 +4295,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
@@ -4211,7 +4343,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
@@ -4263,7 +4395,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
@@ -4316,7 +4448,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -4370,7 +4502,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -4422,7 +4554,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -4477,7 +4609,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4532,7 +4664,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4586,7 +4718,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4645,7 +4777,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(full_bypass, charging),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=full_bypass.deviceId if full_bypass_device_is_primary else charging.deviceId,
         )
         full_bypass.power_get = AsyncMock(return_value=True)
@@ -4702,7 +4834,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4755,7 +4887,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -4810,7 +4942,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4870,7 +5002,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(charging, full_bypass),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=charging.deviceId if charging_device_is_primary else full_bypass.deviceId,
         )
         charging.power_get = AsyncMock(return_value=True)
@@ -4926,7 +5058,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -4985,7 +5117,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5042,7 +5174,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(charging, mixed),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=charging.deviceId if selected_device == "charging" else mixed.deviceId,
         )
         charging.power_get = AsyncMock(return_value=True)
@@ -5096,7 +5228,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, mixed),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5158,7 +5290,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=recovery_margin,
             primary_device_id=primary.deviceId,
         )
@@ -5215,7 +5347,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5266,7 +5398,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5318,7 +5450,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5372,7 +5504,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -5444,7 +5576,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, full_secondary, blocked_secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             discharge_recovery_margin=5,
             primary_device_id=primary.deviceId,
         )
@@ -5510,7 +5642,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -5566,7 +5698,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -5615,7 +5747,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5669,7 +5801,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -5720,7 +5852,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -5777,7 +5909,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -5832,7 +5964,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5886,7 +6018,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=True)
@@ -5938,7 +6070,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -5993,7 +6125,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(first, second),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=first.deviceId,
         )
         first.power_get = AsyncMock(return_value=True)
@@ -6060,7 +6192,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -6121,7 +6253,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -6170,7 +6302,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
         )
         primary.power_get = AsyncMock(return_value=False)
@@ -6212,7 +6344,7 @@ class TestSmartMatchingPrimaryAware:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             charge_time=datetime.min,
         )
@@ -6357,7 +6489,8 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
@@ -6370,6 +6503,34 @@ class TestP1ChargeLagFastPath:
         assert await_args is not None
         assert await_args.args[0] == p1_value
         assert await_args.args[1] is True
+
+    async def test_active_charge_deviation_without_primary_keeps_existing_p1_debounce(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-charge-without-primary",
+            device_name="sf800 pro fast charge without primary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        device.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            charge_devices=(device,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(150))
+
+        manager.powerChanged.assert_not_awaited()
 
     @pytest.mark.parametrize("charging_device_is_primary", [True, False])
     async def test_charge_telemetry_bypasses_p1_debounce_without_previous_manager_bucket(
@@ -6404,7 +6565,7 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(charging, full_bypass),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=charging.deviceId if charging_device_is_primary else full_bypass.deviceId,
         )
         self._block_normal_p1_debounce(manager)
@@ -6436,7 +6597,8 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
         )
         self._block_normal_p1_debounce(manager)
         manager.p1_last_update = datetime.now()
@@ -6463,7 +6625,8 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
@@ -6497,7 +6660,7 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(primary, secondary),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
             discharge_devices=(primary,),
             idle_devices=(secondary,),
@@ -6540,7 +6703,8 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
@@ -6568,7 +6732,8 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
             charge_devices=(device,),
         )
         self._block_normal_p1_debounce(manager)
@@ -6591,7 +6756,8 @@ class TestP1ChargeLagFastPath:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
         )
         self._block_normal_p1_debounce(manager)
         manager.powerChanged = AsyncMock()
@@ -6610,7 +6776,7 @@ class TestZeroFastRecovery:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
         )
         device.power_get = AsyncMock(return_value=True)
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
@@ -6636,7 +6802,7 @@ class TestZeroFastRecovery:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
         )
         manager.zero_next = datetime.min
         manager.zero_fast = datetime.min
@@ -6658,7 +6824,7 @@ class TestZeroFastRecovery:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
         )
         manager.zero_next = datetime.min
         manager.zero_fast = datetime.min
@@ -6690,7 +6856,7 @@ class TestZeroFastRecovery:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=device.deviceId,
         )
         device.power_get = AsyncMock(return_value=True)
@@ -6721,7 +6887,7 @@ class TestZeroFastRecovery:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
             primary_device_id=device.deviceId,
         )
 
@@ -6760,7 +6926,7 @@ class TestNearFullChargeTaper:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
         )
         device.power_get = AsyncMock(return_value=True)
         device.power_bypass = AsyncMock(return_value=0)
@@ -6786,7 +6952,8 @@ class TestNearFullChargeTaper:
         manager = make_manager(
             hass,
             devices=(device,),
-            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
             discharge_devices=(device,),
         )
         device.power_get = AsyncMock(return_value=True)

@@ -385,11 +385,7 @@
           "smart": "Slimme Matching",
           "smart_discharging": "Slim ontladen",
           "smart_charging": "Slim opladen",
-          "store_solar": "Zonne-energie opslaan",
-          "manual_primary_aware": "Handmatig vermogen (Primair-bewust)",
-          "smart_primary_aware": "Slimme Matching (Primair-bewust)",
-          "smart_discharging_primary_aware": "Slim ontladen (Primair-bewust)",
-          "smart_charging_primary_aware": "Slim opladen (Primair-bewust)"
+          "store_solar": "Zonne-energie opslaan"
         }
       },
       "primary_device": {

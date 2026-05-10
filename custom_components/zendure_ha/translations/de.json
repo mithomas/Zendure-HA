@@ -470,11 +470,7 @@
           "smart": "Smarte Leistungsregelung",
           "smart_discharging": "Smartes nur Entladen",
           "smart_charging": "Smartes nur Laden",
-          "store_solar": "Solar speichern",
-          "manual_primary_aware": "Manuelle Leistungsregelung (Primärbewusst)",
-          "smart_primary_aware": "Smarte Leistungsregelung (Primärbewusst)",
-          "smart_discharging_primary_aware": "Smartes nur Entladen (Primärbewusst)",
-          "smart_charging_primary_aware": "Smartes nur Laden (Primärbewusst)"
+          "store_solar": "Solar speichern"
         }
       },
       "primary_device": {
