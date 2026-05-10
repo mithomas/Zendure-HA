@@ -296,13 +296,122 @@ class TestPrimaryAwareModeFolding:
         assert primary_args.args[0] == expected
         primary_mocks[normal_method].assert_not_awaited()
 
-    async def test_store_solar_keeps_normal_charge_path_with_primary(self, hass):
+    async def test_store_solar_uses_strict_primary_charge_path_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
 
         await manager.powerChanged(-200, False, datetime.now())
 
-        mocks["power_charge"].assert_awaited_once_with(-200, ANY)
+        mocks["power_charge_primary_aware"].assert_awaited_once_with(-200, ANY, strict_output_stop=True)
+        mocks["power_charge"].assert_not_awaited()
+
+    async def test_store_solar_uses_strict_normal_charge_path_without_primary(self, hass):
+        manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR)
+
+        await manager.powerChanged(-200, False, datetime.now())
+
+        mocks["power_charge"].assert_awaited_once_with(-200, ANY, strict_output_stop=True)
         mocks["power_charge_primary_aware"].assert_not_awaited()
+
+    async def test_store_solar_clamps_positive_output_to_zero_with_primary(self, hass):
+        manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
+
+        await manager.powerChanged(200, False, datetime.now())
+
+        mocks["power_discharge"].assert_awaited_once_with(0)
+        mocks["power_discharge_primary_aware"].assert_not_awaited()
+
+
+class TestStoreSolarRouting:
+    """Verify store-solar treats home output as clamped to zero."""
+
+    async def test_positive_pv_output_is_stopped_instead_of_forwarded_to_home(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="store-solar-pv-output",
+            device_name="store solar pv output",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            home_output=300,
+        )
+        device.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.STORE_SOLAR,
+            primary_device_id=device.deviceId,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        device.power_bypass = AsyncMock(return_value=0)
+
+        await manager.powerChanged(100, False, datetime.now())
+
+        device.power_discharge.assert_awaited_once_with(0)
+        device.power_charge.assert_not_awaited()
+        device.power_bypass.assert_not_awaited()
+
+    async def test_strict_charge_stops_bypassing_output_device(self, hass):
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="store-solar-bypass-output",
+            device_name="store solar bypass output",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            home_output=300,
+            battery_output=300,
+        )
+        device.byPass.update_value(1)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.STORE_SOLAR,
+            primary_device_id=device.deviceId,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        device.power_bypass = AsyncMock(return_value=0)
+
+        await manager.powerChanged(-500, False, datetime.now())
+
+        device.power_discharge.assert_awaited_once_with(0)
+        device.power_charge.assert_not_awaited()
+        device.power_bypass.assert_not_awaited()
+
+    async def test_selected_primary_charges_before_idle_secondary(self, hass):
+        primary = make_device(
+            hass,
+            device_id="store-solar-primary-charge",
+            device_name="store solar primary charge",
+            level=70,
+        )
+        secondary = make_device(
+            hass,
+            device_id="store-solar-secondary-charge",
+            device_name="store solar secondary charge",
+            level=40,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.STORE_SOLAR,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(-300, False, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-300)
+        secondary.power_charge.assert_not_awaited()
 
 
 class TestSmartMatchingPrimaryAware:
