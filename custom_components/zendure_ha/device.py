@@ -370,6 +370,53 @@ class ZendureDevice(EntityDevice):
         baseline = self.available_discharge_baseline_soc(_entity, _value)
         self.availableKwh.update_value((self.electricLevel.asNumber - baseline) / 100 * self.kWh)
 
+    def available_kwh_contribution(self) -> float:
+        """Return the non-negative available energy contribution for manager aggregates."""
+        if self.state in {DeviceState.SOCEMPTY, DeviceState.SOCRESERVE, DeviceState.RESERVE_RECOVERY}:
+            return 0
+        return max(0, self.actualKwh)
+
+    def is_discharge_capable(self) -> bool:
+        """Return whether this device is generally capable of planned discharge."""
+        return (
+            self.state not in {DeviceState.OFFLINE, DeviceState.SOCEMPTY, DeviceState.SOCRESERVE}
+            and self.discharge_limit > 0
+        )
+
+    def reports_pv(self) -> bool:
+        """Return whether telemetry or previous routing shows current PV production."""
+        return self.solarInput.asInt > 0 or self.pwr_produced < 0
+
+    def reports_active_pv_charge(self) -> bool:
+        """Return whether telemetry shows the device is currently charging from PV."""
+        return (
+            self.online
+            and self.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
+            and self.charge_limit < 0
+            and self.reports_pv()
+            and (self.homeInput.asInt > max(0, self.pwr_offgrid) or self.batteryInput.asInt > self.batteryOutput.asInt)
+        )
+
+    def reports_full_bypass_pv(self) -> bool:
+        """Return whether telemetry shows a full bypassing device passing PV home."""
+        bypass = getattr(self, "byPass", None)
+        return (
+            self.online
+            and self.state == DeviceState.SOCFULL
+            and self.reports_pv()
+            and bypass is not None
+            and bool(bypass.is_on)
+            and self.homeOutput.asInt > 0
+        )
+
+    def current_charge_surplus_limit(self) -> int:
+        """Return current locally produced surplus that can stay on this device for charging."""
+        if not self.online or self.effective_charge_limit >= 0:
+            return 0
+        if self.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
+            return 0
+        return min(-self.effective_charge_limit, max(0, -self.pwr_produced - max(0, self.homeOutput.asInt)))
+
     def update_device_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
         """Refresh the cached runtime state from the current device values."""
         min_soc = self.minSoc.asNumber

@@ -108,7 +108,7 @@ class _RoutingPolicy:
 
 
 @dataclass(frozen=True, slots=True)
-class _RoutingIntent:
+class _PowerRoutingIntent:
     """
     Per-cycle input and home-output intent after mode clamps are applied.
 
@@ -116,12 +116,19 @@ class _RoutingIntent:
     may be PV-only or battery-backed depending on the output clamp.
     """
 
+    # Signed charging target. Negative watts mean device input; zero when not using the input path.
     input_budget: int
+    # Non-negative home-output target after mode output clamps.
     home_output_budget: int
+    # True when this cycle must use the input/charge executor, including zero-charge hold modes.
     route_input: bool
+    # True when home output may use only current PV/off-grid production, not battery power.
     produced_only_output: bool
+    # True when switching to input must stop current home output even if bypass is active.
     strict_home_output_stop: bool
+    # True when charging should use the selected-primary executor ordering.
     selected_primary_input: bool
+    # True when home output should use the selected-primary executor ordering.
     selected_primary_home_output: bool
 
 
@@ -182,7 +189,7 @@ def _pv_evidence_for_output_replacement(device: ZendureDevice) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class _PowerRouteDevice:
+class _PowerRoutingDevice:
     """
     Per-cycle routing facts for one device.
 
@@ -194,17 +201,29 @@ class _PowerRouteDevice:
 
     device: ZendureDevice
     selected_primary: bool
+    # Whether this cycle should send low-SOC PV to charging before preserving home output.
     pv_charge_first: bool
+    # Whether polling classified the device as currently taking input.
     charging: bool
+    # Whether polling classified the device as currently serving home output.
     discharging: bool
+    # Whether polling classified the device as neither charging nor outputting.
     idle: bool
+    # Production-backed output limit allowed for this device in this cycle.
     produced_limit: int
+    # Portion of current home output already covered by PV/off-grid production.
     produced_home: int
+    # Portion of current home output that is battery-backed.
     battery_home_output: int
+    # Current device input that should be reduced before switching direction.
     charge_floor: int
+    # Local production left for this device's own battery after current home output.
     charge_surplus: int
+    # Explicit bypass production already passing through to home.
     bypass_passthrough: int
+    # Discharge capacity available after device, fusegroup, and primary-aware limits.
     available_discharge: int
+    # Discharge capacity including production that can output even when battery discharge is blocked.
     available_discharge_with_produced: int
 
     @property
@@ -278,9 +297,9 @@ class _PowerRoutingSnapshot:
     charge_devices: tuple[ZendureDevice, ...]
     discharge_devices: tuple[ZendureDevice, ...]
     idle_devices: tuple[ZendureDevice, ...]
-    devices: dict[ZendureDevice, _PowerRouteDevice]
+    devices: dict[ZendureDevice, _PowerRoutingDevice]
 
-    def route(self, device: ZendureDevice) -> _PowerRouteDevice:
+    def route(self, device: ZendureDevice) -> _PowerRoutingDevice:
         """Return routing facts for a device."""
         return self.devices[device]
 
@@ -512,19 +531,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     P1 sensor events enter through _p1_changed(), which parses the
     HomeAssistant event, delegates to _route_p1_update(), and returns whether
     routing actually ran. _route_p1_update() writes simulation rows, applies the
-    spike filter, fast-delay debounce, and fast-change checks, then calls
-    _run_power_routing_pipeline() when a route should be handled. Primary
-    selection changes also use _route_p1_update(force=True) so they share
-    simulation and reset/restore handling while bypassing event suppression.
+    spike filter, fast-delay debounce, and fast-change checks, then owns the
+    prepare/execute lifecycle when a route should be handled. Primary selection
+    changes also use _route_p1_update(force=True) so they share simulation and
+    reset/restore handling while bypassing event suppression.
 
-    _run_power_routing_pipeline() is the routing organizer. It resets per-cycle
-    state, calls _poll_and_classify_power_routes(), reads _routing_policy(),
+    _route_p1_update() resets per-cycle state, calls
+    _poll_devices_and_prepare_routing_state(), and passes that setpoint to
+    _prepare_power_routing(). _prepare_power_routing() reads _routing_policy(),
     checks _selected_primary_routing_enabled(), builds _power_routing_snapshot(),
     shapes the signed setpoint in _shape_primary_aware_setpoint(), applies
-    _clamp_setpoint_for_routing_policy(), turns the result into
-    _routing_intent(), calls _execute_power_routing(), and restores debounce
-    timing after the cycle. _execute_power_routing() dispatches to
-    _apply_standard_input(), _apply_primary_input(), _apply_standard_home_output(),
+    _clamp_setpoint_for_routing_policy(), and turns the result into
+    _power_routing_intent(). _route_p1_update() then calls _execute_power_routing() and
+    restores debounce timing after the cycle. _execute_power_routing() dispatches
+    to _apply_standard_input(), _apply_primary_input(), _apply_standard_home_output(),
     or _apply_primary_home_output().
     """
 
@@ -614,12 +634,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Return the current recent P1 baseline."""
         return int(sum(self.p1_history) / len(self.p1_history)) if self.p1_history else 0
 
-    def _evaluate_p1_spike_filter(self, p1: int, time: datetime) -> tuple[bool, bool]:
-        """Return whether the P1 event should be suppressed, and whether a spike was confirmed."""
+    def _is_p1_spike_increase(self, p1: int, time: datetime) -> bool:
+        """Return whether a short upward P1 increase should still be suppressed as a spike."""
         enabled, threshold, duration = self._p1_spike_filter_settings()
         if not enabled:
             self.p1_spike_candidate = None
-            return False, False
+            return False
 
         if self.p1_spike_candidate is not None:
             candidate = self.p1_spike_candidate
@@ -632,17 +652,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         threshold,
                         duration,
                     )
-                    return True, False
-
-                self.p1_spike_candidate = None
-                _LOGGER.debug(
-                    "P1 spike confirmed after duration: p1=%sW baseline=%sW threshold=%sW duration=%s",
-                    p1,
-                    candidate.baseline,
-                    threshold,
-                    duration,
-                )
-                return False, True
+                    return True
+                return False
 
             _LOGGER.debug(
                 "P1 spike ended before duration: p1=%sW baseline=%sW threshold=%sW",
@@ -651,6 +662,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 threshold,
             )
             self.p1_spike_candidate = None
+            return False
 
         baseline = self._p1_history_average()
         if p1 - baseline >= threshold:
@@ -662,68 +674,53 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 threshold,
                 duration,
             )
-            return True, False
-
-        return False, False
-
-    def _has_charge_lag_fast_path_state(self) -> bool:
-        """Return whether recent routing state can benefit from faster charge correction."""
-        if self.operation not in P1_CHARGE_LAG_FAST_OPERATIONS:
-            return False
-        if not self._selected_primary_routing_enabled():
-            return False
-        if any(self._device_reports_active_pv_charge(device) for device in self.devices):
-            return True
-        if any(self._device_reports_pv(device) for device in self.charge):
             return True
 
-        full_bypass_pv = any(self._device_reports_full_bypass_pv(device) for device in self.devices)
-        if not full_bypass_pv:
+        return False
+
+    def _is_p1_permanent_increase(self, p1: int, time: datetime) -> bool:
+        """Return whether a pending upward P1 increase persisted past the spike duration."""
+        enabled, threshold, duration = self._p1_spike_filter_settings()
+        if not enabled:
+            self.p1_spike_candidate = None
+            return False
+        if self.p1_spike_candidate is None:
             return False
 
-        return any(
-            device.online and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL} and device.charge_limit < 0
-            for device in self.devices
-        )
+        candidate = self.p1_spike_candidate
+        if p1 - candidate.baseline < threshold:
+            self.p1_spike_candidate = None
+            return False
+        if time - candidate.started < duration:
+            return False
 
-    @staticmethod
-    def _device_reports_full_bypass_pv(device: ZendureDevice) -> bool:
-        """Return whether telemetry shows a full bypassing device passing PV home."""
-        bypass = getattr(device, "byPass", None)
-        return (
-            device.online
-            and device.state == DeviceState.SOCFULL
-            and ZendureManager._device_reports_pv(device)
-            and bypass is not None
-            and bool(bypass.is_on)
-            and device.homeOutput.asInt > 0
+        self.p1_spike_candidate = None
+        _LOGGER.debug(
+            "P1 spike confirmed after duration: p1=%sW baseline=%sW threshold=%sW duration=%s",
+            p1,
+            candidate.baseline,
+            threshold,
+            duration,
         )
-
-    @staticmethod
-    def _device_reports_pv(device: ZendureDevice) -> bool:
-        """Return whether telemetry or previous routing shows current PV production."""
-        return device.solarInput.asInt > 0 or device.pwr_produced < 0
-
-    @staticmethod
-    def _device_reports_active_pv_charge(device: ZendureDevice) -> bool:
-        """Return whether telemetry shows the device is currently charging from PV."""
-        return (
-            device.online
-            and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL}
-            and device.charge_limit < 0
-            and ZendureManager._device_reports_pv(device)
-            and (
-                device.homeInput.asInt > max(0, device.pwr_offgrid)
-                or device.batteryInput.asInt > device.batteryOutput.asInt
-            )
-        )
+        return True
 
     def _should_fast_track_charge_lag_p1(self, p1: int, time: datetime) -> bool:
         """Return whether P1 should bypass the normal debounce for charge-lag correction."""
-        return (
-            abs(p1) > P1_CHARGE_LAG_FAST_DEVIATION
-            and time - self.p1_charge_lag_last_update >= SmartMode.P1_MIN_UPDATE
-            and self._has_charge_lag_fast_path_state()
+        if (
+            abs(p1) <= P1_CHARGE_LAG_FAST_DEVIATION
+            or time - self.p1_charge_lag_last_update < SmartMode.P1_MIN_UPDATE
+            or self.operation not in P1_CHARGE_LAG_FAST_OPERATIONS
+            or not self._selected_primary_routing_enabled()
+        ):
+            return False
+        if any(device.reports_active_pv_charge() for device in self.devices):
+            return True
+        if any(device.reports_pv() for device in self.charge):
+            return True
+
+        return any(device.reports_full_bypass_pv() for device in self.devices) and any(
+            device.online and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL} and device.charge_limit < 0
+            for device in self.devices
         )
 
     async def loadDevices(self) -> None:
@@ -1023,21 +1020,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             options[device.deviceId] = device.name
         self.primarydevice.setDict(options)
 
-    def resolve_primary_device(self) -> ZendureDevice | None:
-        """Return the currently selected primary device."""
-        if not hasattr(self, "primarydevice"):
-            return None
-        device_id = self.primarydevice.value
-        if device_id in (None, PRIMARY_DEVICE_DISABLED):
-            return None
-        return next((device for device in self.devices if device.deviceId == device_id), None)
+    def _selected_primary_device(self, charging: bool | None = None) -> ZendureDevice | None:
+        """Return the selected primary device, optionally filtered by routing direction."""
+        device = None
+        if hasattr(self, "primarydevice"):
+            device_id = self.primarydevice.value
+            if device_id not in (None, PRIMARY_DEVICE_DISABLED):
+                device = next((candidate for candidate in self.devices if candidate.deviceId == device_id), None)
 
-    def get_primary_device(self, charging: bool) -> ZendureDevice | None:
-        """Return the selected primary device when it can participate in the requested direction."""
-        if not self._selected_primary_routing_enabled():
-            return None
+        if charging is None or device is None:
+            return device
 
-        if (device := self.resolve_primary_device()) is None or not device.online:
+        if not device.online or not self._operation_supports_selected_primary():
             return None
 
         if charging:
@@ -1060,27 +1054,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.refresh_available_kwh()
         self.refresh_total_available_kwh()
 
-    @staticmethod
-    def _available_device_kwh(device: ZendureDevice) -> float:
-        """Return the non-negative available energy contribution for manager aggregates."""
-        if device.state in LOW_SOC_STATES:
-            return 0
-        return max(0, device.actualKwh)
-
     def refresh_available_kwh(self) -> None:
         """Refresh the manager aggregate for currently online device energy."""
         self.availableKwh.update_value(
-            sum(self._available_device_kwh(device) for device in self.devices if device.state != DeviceState.OFFLINE)
+            sum(device.available_kwh_contribution() for device in self.devices if device.state != DeviceState.OFFLINE)
         )
 
     def refresh_total_available_kwh(self) -> None:
         """Refresh the stable manager aggregate for all managed device energy."""
-        self.totalAvailableKwh.update_value(sum(self._available_device_kwh(device) for device in self.devices))
-
-    @staticmethod
-    def _is_discharge_capable(device: ZendureDevice) -> bool:
-        """Return whether the device is generally capable of discharging."""
-        return device.state not in {DeviceState.OFFLINE, *EMPTY_SOC_STATES} and device.discharge_limit > 0
+        self.totalAvailableKwh.update_value(sum(device.available_kwh_contribution() for device in self.devices))
 
     def _available_discharge_power(
         self,
@@ -1090,7 +1072,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         allow_produced_only: bool = False,
     ) -> int:
         """Return the currently available discharge contribution for a device."""
-        if not self._is_discharge_capable(device):
+        if not device.is_discharge_capable():
             return 0
         if device.is_discharge_blocked():
             return (
@@ -1119,15 +1101,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Return the maximum discharge power for the primary within its fusegroup."""
         other_output = sum(max(0, other.homeOutput.asInt) for other in device.fuseGrp.devices if other is not device)
         return max(0, min(device.discharge_limit, device.fuseGrp.maxpower - other_output))
-
-    @staticmethod
-    def _current_charge_surplus_limit(device: ZendureDevice) -> int:
-        """Return current locally produced surplus that can stay on this device for charging."""
-        if not device.online or device.effective_charge_limit >= 0:
-            return 0
-        if device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
-            return 0
-        return min(-device.effective_charge_limit, max(0, -device.pwr_produced - max(0, device.homeOutput.asInt)))
 
     def _apply_charge_holdoff(self, setpoint: int, time: datetime, *, allow_charge: bool) -> int:
         """Apply the anti-oscillation charge holdoff and return the allowed setpoint."""
@@ -1454,19 +1427,22 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         except (TypeError, ValueError):
             return None
 
-    def _record_p1_history_and_detect_fast(self, p1: int) -> bool:
-        """Update P1 history and return whether the new value is a fast change."""
-        if len(self.p1_history) > 1:
-            avg = self._p1_history_average()
-            stddev = SmartMode.P1_STDDEV_FACTOR * max(
-                SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
-            )
-            if fast_change := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
-                self.p1_history.clear()
-        else:
-            fast_change = False
+    def _is_fast_p1_change(self, p1: int) -> bool:
+        """Return whether the new P1 value is a fast change without mutating history."""
+        if len(self.p1_history) <= 1:
+            return False
+
+        avg = self._p1_history_average()
+        stddev = SmartMode.P1_STDDEV_FACTOR * max(
+            SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
+        )
+        return abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev
+
+    def _record_p1_history(self, p1: int, *, reset: bool = False) -> None:
+        """Append a P1 value to recent history, optionally starting a new window."""
+        if reset:
+            self.p1_history.clear()
         self.p1_history.append(p1)
-        return fast_change
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> bool:
         """Parse a P1 sensor update and return whether it triggered routing."""
@@ -1493,86 +1469,34 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if ZendureManager.simulation:
             self.writeSimulation(time, p1)
 
-        if force:
-            return await self._run_power_routing_pipeline(p1, time, raise_on_error=raise_on_error)
+        should_route = force
+        charge_lag_fast = False
 
-        spike_suppressed, spike_confirmed = self._evaluate_p1_spike_filter(p1, time)
-        if spike_suppressed:
+        if not force:
+            if self._is_p1_spike_increase(p1, time):
+                return False
+
+            permanent_increase = self._is_p1_permanent_increase(p1, time)
+            charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
+
+            # Check for fast delay
+            if time < self.zero_fast and not charge_lag_fast and not permanent_increase:
+                _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
+                self._record_p1_history(p1)
+                return False
+
+            fast_change = self._is_fast_p1_change(p1)
+            self._record_p1_history(p1, reset=fast_change)
+            # Check minimal time between updates aka debounce.
+            should_route = fast_change or charge_lag_fast or permanent_increase or time > self.zero_next
+
+        if not should_route:
             return False
 
-        fast_charge_lag_correction = self._should_fast_track_charge_lag_p1(p1, time)
-
-        # Check for fast delay
-        if time < self.zero_fast and not fast_charge_lag_correction and not spike_confirmed:
-            _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
-            self.p1_history.append(p1)
-            return False
-
-        fast_change = self._record_p1_history_and_detect_fast(p1)
-        # Check minimal time between updates aka debounce.
-        if not (fast_change or fast_charge_lag_correction or spike_confirmed or time > self.zero_next):
-            return False
-
-        return await self._run_power_routing_pipeline(
-            p1,
-            time,
-            charge_lag_fast=fast_charge_lag_correction,
-            raise_on_error=raise_on_error,
-        )
-
-    async def _run_power_routing_pipeline(
-        self,
-        p1: int,
-        time: datetime,
-        *,
-        charge_lag_fast: bool = False,
-        raise_on_error: bool = False,
-    ) -> bool:
-        """Orchestrate one complete routing cycle from a P1 watt value."""
         try:
-            # prevent updates during power distribution changes
             self._reset_power_distribution_state()
-
-            setpoint = await self._poll_and_classify_power_routes(p1)
-
-            policy = self._routing_policy()
-            selected_primary_routing = self._selected_primary_routing_enabled()
-            pv_charge_first_mode = selected_primary_routing and self.operation in PV_CHARGE_FIRST_OPERATIONS
-            selected_primary = self.resolve_primary_device() if selected_primary_routing else None
-            routing = self._power_routing_snapshot(
-                selected_primary,
-                primary_aware=selected_primary_routing,
-                pv_charge_first=pv_charge_first_mode,
-            )
-            selected_charge_primary = self.get_primary_device(charging=True)
-            pv_floors = routing.pv_floor_summary()
-            local_charge = routing.local_charge_summary(
-                selected_charge_primary,
-                pv_charge_first_mode=pv_charge_first_mode,
-                include_charge_first_home=True,
-            )
-            setpoint = self._shape_primary_aware_setpoint(
-                p1,
-                setpoint,
-                time,
-                routing,
-                pv_floors,
-                local_charge,
-                pv_charge_first_mode=pv_charge_first_mode,
-            )
-            if self.operation == ManagerMode.MANUAL:
-                setpoint = int(self.manualpower.asNumber)
-
-            requested_setpoint = setpoint
-            setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
-            intent = self._routing_intent(
-                requested_setpoint,
-                setpoint,
-                policy,
-                selected_primary_routing=selected_primary_routing,
-                produced_only=produced_only,
-            )
-
+            setpoint = await self._poll_devices_and_prepare_routing_state(p1)
+            intent, routing, setpoint = self._prepare_power_routing(p1, time, setpoint)
             _LOGGER.info("P1 ======> p1:%s, setpoint:%sW stored:%sW", p1, setpoint, self.produced)
             await self._execute_power_routing(intent, time, routing)
         except Exception as err:
@@ -1588,7 +1512,54 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self._restore_p1_update_timing(time)
         return True
 
-    async def _poll_and_classify_power_routes(self, p1: int) -> int:
+    def _prepare_power_routing(
+        self,
+        p1: int,
+        time: datetime,
+        setpoint: int,
+    ) -> tuple[_PowerRoutingIntent, _PowerRoutingSnapshot, int]:
+        """Prepare one routing cycle from a polled P1 routing setpoint."""
+        policy = self._routing_policy()
+        selected_primary_routing = self._selected_primary_routing_enabled()
+        pv_charge_first_mode = selected_primary_routing and self.operation in PV_CHARGE_FIRST_OPERATIONS
+        selected_primary = self._selected_primary_device() if selected_primary_routing else None
+        routing = self._power_routing_snapshot(
+            selected_primary,
+            primary_aware=selected_primary_routing,
+            pv_charge_first=pv_charge_first_mode,
+        )
+        selected_charge_primary = self._selected_primary_device(charging=True)
+        pv_floors = routing.pv_floor_summary()
+        local_charge = routing.local_charge_summary(
+            selected_charge_primary,
+            pv_charge_first_mode=pv_charge_first_mode,
+            include_charge_first_home=True,
+        )
+        setpoint = self._shape_primary_aware_setpoint(
+            p1,
+            setpoint,
+            time,
+            routing,
+            pv_floors,
+            local_charge,
+            pv_charge_first_mode=pv_charge_first_mode,
+        )
+        if self.operation == ManagerMode.MANUAL:
+            setpoint = int(self.manualpower.asNumber)
+
+        requested_setpoint = setpoint
+        setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
+        intent = self._power_routing_intent(
+            requested_setpoint,
+            setpoint,
+            policy,
+            selected_primary_routing=selected_primary_routing,
+            produced_only=produced_only,
+        )
+
+        return intent, routing, setpoint
+
+    async def _poll_devices_and_prepare_routing_state(self, p1: int) -> int:
         """Poll devices, classify active flows, and return the adjusted setpoint."""
         setpoint = p1
         power = 0
@@ -1644,7 +1615,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _selected_primary_routing_enabled(self) -> bool:
         """Return whether selected-primary routing is active for this cycle."""
-        return self._operation_supports_selected_primary() and self.resolve_primary_device() is not None
+        return self._operation_supports_selected_primary() and self._selected_primary_device() is not None
 
     def _selected_primary_pv_charge_first_enabled(self) -> bool:
         """Return whether selected-primary input should prioritize low-SOC local PV."""
@@ -1668,7 +1639,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if selected_primary is not None and selected_primary not in devices:
             devices.append(selected_primary)
 
-        route_devices: dict[ZendureDevice, _PowerRouteDevice] = {}
+        routing_devices: dict[ZendureDevice, _PowerRoutingDevice] = {}
         for device in devices:
             produced_limit = (
                 self._current_produced_output_limit(device, primary_aware=primary_aware)
@@ -1686,7 +1657,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             ):
                 bypass_passthrough = min(home_output, -device.pwr_produced)
 
-            route_devices[device] = _PowerRouteDevice(
+            routing_devices[device] = _PowerRoutingDevice(
                 device=device,
                 selected_primary=device is selected_primary,
                 pv_charge_first=pv_charge_first,
@@ -1697,7 +1668,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 produced_home=produced_home,
                 battery_home_output=max(0, home_output - produced_home),
                 charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
-                charge_surplus=self._current_charge_surplus_limit(device),
+                charge_surplus=device.current_charge_surplus_limit(),
                 bypass_passthrough=bypass_passthrough,
                 available_discharge=(
                     self._available_discharge_power(device, primary_aware=primary_aware) if primary_aware else 0
@@ -1715,7 +1686,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             charge_devices=tuple(self.charge),
             discharge_devices=tuple(self.discharge),
             idle_devices=tuple(self.idle),
-            devices=route_devices,
+            devices=routing_devices,
         )
 
     def _shape_primary_aware_setpoint(
@@ -1864,7 +1835,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             case _:
                 return 0, False
 
-    def _routing_intent(
+    def _power_routing_intent(
         self,
         requested_setpoint: int,
         setpoint: int,
@@ -1872,12 +1843,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         selected_primary_routing: bool,
         produced_only: bool,
-    ) -> _RoutingIntent:
+    ) -> _PowerRoutingIntent:
         """Build the compact input-or-home-output decision consumed by the executor."""
         route_input = setpoint < 0 or (
             setpoint == 0 and policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed
         )
-        return _RoutingIntent(
+        return _PowerRoutingIntent(
             input_budget=setpoint if route_input else 0,
             home_output_budget=max(0, setpoint),
             route_input=route_input,
@@ -1889,7 +1860,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     async def _execute_power_routing(
         self,
-        intent: _RoutingIntent,
+        intent: _PowerRoutingIntent,
         time: datetime,
         routing: _PowerRoutingSnapshot,
     ) -> None:
@@ -2023,7 +1994,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing.route(device).charge_floor > 0 for device in self.charge
         )
         allow_home_pv_charge = not positive_demand_charge_lag
-        primary = self.get_primary_device(charging=True)
+        primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
         local_charge = routing.local_charge_summary(
             primary,

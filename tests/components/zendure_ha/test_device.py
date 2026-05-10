@@ -78,6 +78,194 @@ def test_available_kwh_uses_reserve_aware_floor(hass, level, min_soc, reserve, k
 
 
 @pytest.mark.parametrize(
+    ("state", "actual_kwh", "expected"),
+    [
+        (DeviceState.INACTIVE, 0.4, 0.4),
+        (DeviceState.INACTIVE, -0.1, 0),
+        (DeviceState.SOCEMPTY, 0.4, 0),
+        (DeviceState.SOCRESERVE, 0.4, 0),
+        (DeviceState.RESERVE_RECOVERY, 0.4, 0),
+        (DeviceState.OFFLINE, 0.4, 0.4),
+    ],
+)
+def test_available_kwh_contribution_is_device_owned(hass, state, actual_kwh, expected):
+    """Manager aggregate contribution should be derived from device state."""
+    device = make_device(hass)
+    device.state = state
+    device.actualKwh = actual_kwh
+
+    assert device.available_kwh_contribution() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("state", "discharge_limit", "expected"),
+    [
+        (DeviceState.OFFLINE, 800, False),
+        (DeviceState.SOCEMPTY, 800, False),
+        (DeviceState.SOCRESERVE, 800, False),
+        (DeviceState.INACTIVE, 0, False),
+        (DeviceState.INACTIVE, 800, True),
+        (DeviceState.RESERVE_RECOVERY, 800, True),
+    ],
+)
+def test_discharge_capability_is_device_owned(hass, state, discharge_limit, expected):
+    """General discharge capability should be derived from device state."""
+    device = make_device(hass)
+    device.state = state
+    device.discharge_limit = discharge_limit
+
+    assert device.is_discharge_capable() is expected
+
+
+@pytest.mark.parametrize(
+    ("solar_input", "produced_power", "expected"),
+    [
+        (120, 0, True),
+        (0, -80, True),
+        (0, 0, False),
+    ],
+)
+def test_reports_pv_is_device_owned(hass, solar_input, produced_power, expected):
+    """PV evidence should be derived from device telemetry."""
+    device = make_device(hass)
+    device.solarInput.update_value(solar_input)
+    device.pwr_produced = produced_power
+
+    assert device.reports_pv() is expected
+
+
+@pytest.mark.parametrize(
+    (
+        "state",
+        "connection_status",
+        "charge_limit",
+        "solar_input",
+        "produced_power",
+        "home_input",
+        "battery_input",
+        "battery_output",
+        "expected",
+    ),
+    [
+        (DeviceState.INACTIVE, SmartMode.CONNECTED, -1000, 120, 0, 80, 0, 0, True),
+        (DeviceState.INACTIVE, SmartMode.CONNECTED, -1000, 0, -120, 0, 80, 10, True),
+        (DeviceState.OFFLINE, SmartMode.CONNECTED, -1000, 120, 0, 80, 0, 0, False),
+        (DeviceState.SOCFULL, SmartMode.CONNECTED, -1000, 120, 0, 80, 0, 0, False),
+        (DeviceState.INACTIVE, 0, -1000, 120, 0, 80, 0, 0, False),
+        (DeviceState.INACTIVE, SmartMode.CONNECTED, 0, 120, 0, 80, 0, 0, False),
+        (DeviceState.INACTIVE, SmartMode.CONNECTED, -1000, 0, 0, 80, 0, 0, False),
+    ],
+)
+def test_reports_active_pv_charge_is_device_owned(
+    hass,
+    state,
+    connection_status,
+    charge_limit,
+    solar_input,
+    produced_power,
+    home_input,
+    battery_input,
+    battery_output,
+    expected,
+):
+    """Active PV charge evidence should be derived from device telemetry."""
+    device = make_device(hass, home_input=home_input, battery_input=battery_input, battery_output=battery_output)
+    device.state = state
+    device.connectionStatus.update_value(connection_status)
+    device.charge_limit = charge_limit
+    device.solarInput.update_value(solar_input)
+    device.pwr_produced = produced_power
+
+    assert device.reports_active_pv_charge() is expected
+
+
+@pytest.mark.parametrize(
+    ("state", "bypass_on", "has_bypass", "home_output", "solar_input", "expected"),
+    [
+        (DeviceState.SOCFULL, True, True, 120, 120, True),
+        (DeviceState.SOCFULL, False, True, 120, 120, False),
+        (DeviceState.SOCFULL, True, False, 120, 120, False),
+        (DeviceState.INACTIVE, True, True, 120, 120, False),
+        (DeviceState.SOCFULL, True, True, 0, 120, False),
+        (DeviceState.SOCFULL, True, True, 120, 0, False),
+    ],
+)
+def test_reports_full_bypass_pv_is_device_owned(hass, state, bypass_on, has_bypass, home_output, solar_input, expected):
+    """Full bypass PV evidence should be derived from device telemetry."""
+    device = make_device(hass, level=100, soc_set=100, home_output=home_output)
+    device.state = state
+    device.solarInput.update_value(solar_input)
+    if has_bypass:
+        device.byPass.update_value(bypass_on)
+    else:
+        delattr(device, "byPass")
+
+    assert device.reports_full_bypass_pv() is expected
+
+
+@pytest.mark.parametrize(
+    ("level", "soc_set", "max_expected_charge"),
+    [
+        (94, 100, 200),
+        (96, 100, 150),
+        (98, 100, 100),
+        (74, 80, 200),
+        (76, 80, 150),
+        (78, 80, 100),
+    ],
+)
+def test_current_charge_surplus_limit_respects_taper(hass, level, soc_set, max_expected_charge):
+    """Current charge surplus should be capped at the device taper limit."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-surplus",
+        product_model="SolarFlow 800 Pro",
+        level=level,
+        soc_set=soc_set,
+    )
+    device.pwr_produced = -500
+
+    assert device.state is DeviceState.SOCNEARLYFULL
+    result = device.current_charge_surplus_limit()
+    assert result <= max_expected_charge
+    assert result > 0
+
+
+def test_current_charge_surplus_limit_is_zero_for_socfull(hass):
+    """Current charge surplus should be 0 once the device has reached target SoC."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-full",
+        product_model="SolarFlow 800 Pro",
+        level=100,
+        soc_set=100,
+    )
+    device.pwr_produced = -500
+
+    assert device.state is DeviceState.SOCFULL
+    assert device.current_charge_surplus_limit() == 0
+
+
+def test_current_charge_surplus_limit_is_full_below_taper_range(hass):
+    """Current charge surplus should use the full produced surplus below taper range."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-below-taper",
+        product_model="SolarFlow 800 Pro",
+        level=90,
+        soc_set=100,
+    )
+    device.pwr_produced = -800
+
+    assert device.state is DeviceState.INACTIVE
+    result = device.current_charge_surplus_limit()
+    assert result == abs(device.pwr_produced)
+
+
+@pytest.mark.parametrize(
     ("level", "min_soc", "reserve", "soc_limit", "expected_state"),
     [
         (4, 5, 10, 0, DeviceState.SOCEMPTY),
