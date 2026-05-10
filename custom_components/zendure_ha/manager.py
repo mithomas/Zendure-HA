@@ -231,11 +231,28 @@ class _PowerRoutingSnapshot:
         return min(route.charge_floor, pv_evidence, -device.effective_charge_limit)
 
     @property
+    def selected_primary_output_replacement_capacity(self) -> int:
+        """Return extra selected-primary PV output that can replace non-primary home PV."""
+        if not self.primary_aware or self.selected_primary is None:
+            return 0
+        if self.selected_primary not in self.discharge_devices:
+            return 0
+
+        route = self.route(self.selected_primary)
+        device = route.device
+        if not device.online or device.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
+            return 0
+
+        pv_evidence = max(0, device.solarInput.asInt)
+        available_output = min(pv_evidence, route.available_discharge_with_produced)
+        return max(0, available_output - route.produced_home)
+
+    @property
     def replaceable_non_primary_chargeable_serving_pv_floor(self) -> int:
         """Return non-primary home-serving PV the selected primary can cover."""
         return min(
             self.active_non_primary_chargeable_serving_pv_floor,
-            self.selected_primary_charge_replacement_capacity,
+            self.selected_primary_charge_replacement_capacity + self.selected_primary_output_replacement_capacity,
         )
 
     @property
@@ -1415,6 +1432,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_primary_local_surplus = (
             routing.charge_surplus(selected_charge_primary) if selected_charge_primary is not None else 0
         )
+        replaceable_non_primary_serving_pv = routing.replaceable_non_primary_chargeable_serving_pv_floor
         protects_selected_primary_floor = (
             self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
             and selected_primary is not None
@@ -1457,20 +1475,25 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 else:
                     setpoint = surplus_setpoint
 
+        if self.operation == ManagerMode.MATCHING_PRIMARY_AWARE and p1 <= 0 and replaceable_non_primary_serving_pv > 0:
+            setpoint = min(setpoint, -(non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv))
+
         if pv_charge_first_mode and active_pv_charge_first_home > 0:
             setpoint = min(setpoint, -active_pv_charge_first_home)
 
         positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
+        non_primary_preservable_charge = non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv
         charge_uses_only_non_primary_local_surplus = (
             self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
-            and p1 < 0
-            and non_primary_local_chargeable_surplus > 0
+            and p1 <= 0
+            and (p1 < 0 or replaceable_non_primary_serving_pv > 0)
+            and non_primary_preservable_charge > 0
             and setpoint < 0
-            and -setpoint <= non_primary_local_chargeable_surplus
+            and -setpoint <= non_primary_preservable_charge
         )
         uncovered_chargeable_serving_pv_floor = max(
             0,
-            routing.active_chargeable_serving_pv_floor - routing.replaceable_non_primary_chargeable_serving_pv_floor,
+            routing.active_chargeable_serving_pv_floor - replaceable_non_primary_serving_pv,
         )
         debounce_charge_flip = (
             self.operation == ManagerMode.MATCHING_PRIMARY_AWARE
@@ -1650,10 +1673,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in [*self.charge, *self.discharge, *self.idle]
             if device is not selected_primary
         )
+        replaceable_non_primary_serving_pv = routing.replaceable_non_primary_chargeable_serving_pv_floor
         keeps_non_primary_local_charge = (
             requested_setpoint < 0
-            and non_primary_local_chargeable_surplus > 0
-            and -requested_setpoint <= non_primary_local_chargeable_surplus
+            and non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv > 0
+            and -requested_setpoint <= non_primary_local_chargeable_surplus + replaceable_non_primary_serving_pv
         )
         # In surplus mode, SOCEMPTY devices should redirect their solar to their
         # own battery instead of continuing to pass it to the home.  Zero their
@@ -1768,20 +1792,33 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         def active_charge_lag_capacity(device: ZendureDevice) -> int:
             return routing.route(device).charge_floor if positive_demand_charge_lag and device in self.charge else 0
 
+        def local_charge_capacity(device: ZendureDevice) -> int:
+            capacity = max(routing.charge_surplus(device), active_charge_lag_capacity(device))
+            if allow_home_pv_charge:
+                capacity += routing.chargeable_produced_home(device)
+            return capacity
+
         surplus_floor_devices = [*active_secondary_charge_devices, *charge_devices, *idle_secondary_surplus_devices]
         charge_targets, setpoint = self._allocate_capped_targets(
             setpoint,
             surplus_floor_devices,
-            {
-                device: max(
-                    routing.charge_surplus(device),
-                    active_charge_lag_capacity(device),
-                    routing.chargeable_produced_home(device) if allow_home_pv_charge else 0,
-                )
-                for device in surplus_floor_devices
-            },
+            {device: local_charge_capacity(device) for device in surplus_floor_devices},
             direction=-1,
         )
+        selected_primary_output_replacement_target = 0
+        if selected_primary is not None and selected_primary in active_discharge_targets:
+            replaced_non_primary_home_pv = sum(
+                min(
+                    routing.chargeable_produced_home(device),
+                    max(0, -charge_targets.get(device, 0) - routing.charge_surplus(device)),
+                )
+                for device in active_secondary_charge_devices
+            )
+            selected_primary_output_replacement_target = min(
+                routing.selected_primary_output_replacement_capacity,
+                replaced_non_primary_home_pv,
+            )
+            active_discharge_targets[selected_primary] += selected_primary_output_replacement_target
         if move_primary_charge_to_secondary and not pure_secondary_charge_devices:
             setpoint = 0
 

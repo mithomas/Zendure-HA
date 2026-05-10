@@ -5584,6 +5584,54 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
+    async def test_moves_secondary_home_pv_to_charge_when_primary_output_can_cover_demand(self, hass):
+        """A secondary PV floor should charge locally when the primary can increase PV-backed home output."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-output-replaces-secondary-home-pv",
+            device_name="sf800 pro primary output replaces secondary home pv",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=200,
+        )
+        primary.solarInput.update_value(300)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-home-pv-replaced-by-primary-output",
+            device_name="sf800 pro secondary home pv replaced by primary output",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=50,
+            battery_input=50,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING_PRIMARY_AWARE,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager.powerChanged(0, False, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-100)
+        primary.power_discharge.assert_awaited_once_with(250)
+        secondary.power_discharge.assert_not_awaited()
+
     async def test_positive_p1_charge_lag_stays_on_the_primary_aware_charge_path(self, hass):
         """A positive-demand lag cycle should stay on the charge path when both systems are still reporting charging telemetry."""
         primary = make_device(
