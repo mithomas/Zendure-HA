@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from unittest.mock import ANY, AsyncMock, Mock, call, patch
+from typing import cast
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
 from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, SmartMode
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.fusegroup import FuseGroup
-from custom_components.zendure_ha.manager import ZendureManager
+from custom_components.zendure_ha.manager import ZendureManager, _RoutingIntent
 
 from .common import (
     attach_devices,
@@ -27,6 +28,16 @@ LOW_SOC_DEVICE_CASES = (
 )
 
 PV_HOME_PRIORITY_DEVICE_CASES = (pytest.param(10, DeviceState.SOCRESERVE, id="socreserve"),)
+
+
+def _routing_intent_from_execute(execute: AsyncMock) -> _RoutingIntent:
+    execute_args = execute.await_args
+    assert execute_args is not None
+    return execute_args.args[0]
+
+
+def _manager_routing_intent(manager: ZendureManager) -> _RoutingIntent:
+    return _routing_intent_from_execute(cast("AsyncMock", manager._execute_power_routing))
 
 
 class TestAvailableKwh:
@@ -197,45 +208,50 @@ class TestPrimaryAwareModeFolding:
             primary_device_id=device.deviceId if primary else None,
         )
         device.power_get = AsyncMock(return_value=True)
-        mocks = {
-            "power_charge": AsyncMock(),
-            "power_discharge": AsyncMock(),
-            "power_charge_primary_aware": AsyncMock(),
-            "power_discharge_primary_aware": AsyncMock(),
-        }
-        manager.power_charge = mocks["power_charge"]
-        manager.power_discharge = mocks["power_discharge"]
-        manager.power_charge_primary_aware = mocks["power_charge_primary_aware"]
-        manager.power_discharge_primary_aware = mocks["power_discharge_primary_aware"]
+        mocks = {"execute": AsyncMock()}
+        manager._execute_power_routing = mocks["execute"]
         return manager, mocks
+
+    @staticmethod
+    def _routing_intent(mocks: dict[str, AsyncMock]) -> _RoutingIntent:
+        mocks["execute"].assert_awaited_once()
+        return _routing_intent_from_execute(mocks["execute"])
 
     async def test_matching_uses_normal_paths_without_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING)
 
         await manager.powerChanged(200, False, datetime.now())
 
-        mocks["power_discharge"].assert_awaited_once_with(200)
-        mocks["power_discharge_primary_aware"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.home_output_budget == 200  # noqa: PLR2004
+        assert not intent.route_input
+        assert not intent.selected_primary_home_output
 
-        mocks["power_discharge"].reset_mock()
+        mocks["execute"].reset_mock()
         await manager.powerChanged(-200, False, datetime.now())
 
-        mocks["power_charge"].assert_awaited_once_with(-200, ANY)
-        mocks["power_charge_primary_aware"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.route_input
+        assert not intent.selected_primary_input
 
     async def test_matching_uses_primary_aware_paths_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING, primary=True)
 
         await manager.powerChanged(200, False, datetime.now())
 
-        mocks["power_discharge_primary_aware"].assert_awaited_once_with(200)
-        mocks["power_discharge"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.home_output_budget == 200  # noqa: PLR2004
+        assert not intent.route_input
+        assert intent.selected_primary_home_output
 
-        mocks["power_discharge_primary_aware"].reset_mock()
+        mocks["execute"].reset_mock()
         await manager.powerChanged(-200, False, datetime.now())
 
-        mocks["power_charge_primary_aware"].assert_awaited_once_with(-200, ANY)
-        mocks["power_charge"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.route_input
+        assert intent.selected_primary_input
 
     async def test_matching_discharge_uses_primary_aware_path_only_with_primary(self, hass):
         normal, normal_mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING_DISCHARGE)
@@ -246,10 +262,12 @@ class TestPrimaryAwareModeFolding:
         await normal.powerChanged(200, False, datetime.now())
         await primary.powerChanged(200, False, datetime.now())
 
-        normal_mocks["power_discharge"].assert_awaited_once_with(200)
-        normal_mocks["power_discharge_primary_aware"].assert_not_awaited()
-        primary_mocks["power_discharge_primary_aware"].assert_awaited_once_with(200)
-        primary_mocks["power_discharge"].assert_not_awaited()
+        normal_intent = self._routing_intent(normal_mocks)
+        primary_intent = self._routing_intent(primary_mocks)
+        assert normal_intent.home_output_budget == 200  # noqa: PLR2004
+        assert not normal_intent.selected_primary_home_output
+        assert primary_intent.home_output_budget == 200  # noqa: PLR2004
+        assert primary_intent.selected_primary_home_output
 
     async def test_matching_charge_uses_primary_aware_path_only_with_primary(self, hass):
         normal, normal_mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING_CHARGE)
@@ -260,21 +278,21 @@ class TestPrimaryAwareModeFolding:
         await normal.powerChanged(-200, False, datetime.now())
         await primary.powerChanged(-200, False, datetime.now())
 
-        normal_mocks["power_charge"].assert_awaited_once_with(-200, ANY)
-        normal_mocks["power_charge_primary_aware"].assert_not_awaited()
-        primary_mocks["power_charge_primary_aware"].assert_awaited_once_with(-200, ANY)
-        primary_mocks["power_charge"].assert_not_awaited()
+        normal_intent = self._routing_intent(normal_mocks)
+        primary_intent = self._routing_intent(primary_mocks)
+        assert normal_intent.input_budget == -200  # noqa: PLR2004
+        assert not normal_intent.selected_primary_input
+        assert primary_intent.input_budget == -200  # noqa: PLR2004
+        assert primary_intent.selected_primary_input
 
     @pytest.mark.parametrize(
-        ("manual_power", "normal_method", "primary_method", "expected"),
+        ("manual_power", "route_input", "expected"),
         [
-            pytest.param(200, "power_discharge", "power_discharge_primary_aware", 200, id="discharge"),
-            pytest.param(-200, "power_charge", "power_charge_primary_aware", -200, id="charge"),
+            pytest.param(200, False, 200, id="output"),
+            pytest.param(-200, True, -200, id="input"),
         ],
     )
-    async def test_manual_uses_primary_aware_path_only_with_primary(
-        self, hass, manual_power, normal_method, primary_method, expected
-    ):
+    async def test_manual_uses_primary_aware_path_only_with_primary(self, hass, manual_power, route_input, expected):
         normal, normal_mocks = self._manager_with_dispatch_mocks(
             hass, operation=ManagerMode.MANUAL, manual_power=manual_power
         )
@@ -285,40 +303,49 @@ class TestPrimaryAwareModeFolding:
         await normal.powerChanged(0, False, datetime.now())
         await primary.powerChanged(0, False, datetime.now())
 
-        normal_mocks[normal_method].assert_awaited_once()
-        normal_args = normal_mocks[normal_method].await_args
-        assert normal_args is not None
-        assert normal_args.args[0] == expected
-        normal_mocks[primary_method].assert_not_awaited()
-        primary_mocks[primary_method].assert_awaited_once()
-        primary_args = primary_mocks[primary_method].await_args
-        assert primary_args is not None
-        assert primary_args.args[0] == expected
-        primary_mocks[normal_method].assert_not_awaited()
+        normal_intent = self._routing_intent(normal_mocks)
+        primary_intent = self._routing_intent(primary_mocks)
+        assert normal_intent.route_input is route_input
+        assert primary_intent.route_input is route_input
+        assert (normal_intent.input_budget if route_input else normal_intent.home_output_budget) == expected
+        assert (primary_intent.input_budget if route_input else primary_intent.home_output_budget) == expected
+        assert not normal_intent.selected_primary_input
+        assert not normal_intent.selected_primary_home_output
+        assert primary_intent.selected_primary_input
+        assert primary_intent.selected_primary_home_output
 
     async def test_store_solar_uses_strict_primary_charge_path_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
 
         await manager.powerChanged(-200, False, datetime.now())
 
-        mocks["power_charge_primary_aware"].assert_awaited_once_with(-200, ANY, strict_output_stop=True)
-        mocks["power_charge"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.route_input
+        assert intent.selected_primary_input
+        assert intent.strict_home_output_stop
 
     async def test_store_solar_uses_strict_normal_charge_path_without_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR)
 
         await manager.powerChanged(-200, False, datetime.now())
 
-        mocks["power_charge"].assert_awaited_once_with(-200, ANY, strict_output_stop=True)
-        mocks["power_charge_primary_aware"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.route_input
+        assert not intent.selected_primary_input
+        assert intent.strict_home_output_stop
 
     async def test_store_solar_clamps_positive_output_to_zero_with_primary(self, hass):
         manager, mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.STORE_SOLAR, primary=True)
 
         await manager.powerChanged(200, False, datetime.now())
 
-        mocks["power_discharge"].assert_awaited_once_with(0)
-        mocks["power_discharge_primary_aware"].assert_not_awaited()
+        intent = self._routing_intent(mocks)
+        assert intent.home_output_budget == 0
+        assert not intent.route_input
+        assert not intent.selected_primary_home_output
+        assert intent.strict_home_output_stop
 
 
 class TestStoreSolarRouting:
@@ -596,12 +623,13 @@ class TestSmartMatchingPrimaryAware:
             devices=(device,),
             operation=ManagerMode.MATCHING,
             charge_time=datetime.min,
-            discharge_devices=(device,),
         )
         device.byPass.update_value(1)
+        device.homeOutput.update_value(100)
+        device.power_get = AsyncMock(return_value=True)
         device.power_discharge = AsyncMock(return_value=0)
 
-        await manager.power_charge(-100, datetime.now())
+        await manager.powerChanged(-200, False, datetime.now())
 
         device.power_discharge.assert_not_awaited()
 
@@ -2256,13 +2284,13 @@ class TestSmartMatchingPrimaryAware:
         )
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
-        manager.power_discharge_primary_aware = AsyncMock()
-        manager.power_charge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(0, False, datetime.now())
 
-        manager.power_discharge_primary_aware.assert_awaited_once_with(200)
-        manager.power_charge_primary_aware.assert_not_awaited()
+        intent = _manager_routing_intent(manager)
+        assert intent.home_output_budget == 200  # noqa: PLR2004
+        assert not intent.route_input
 
     async def test_active_asymmetric_solar_follow_on_zero_p1_cycle_does_not_zero_both_and_start_charging(self, hass):
         primary = make_device(
@@ -2352,13 +2380,13 @@ class TestSmartMatchingPrimaryAware:
         )
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
-        manager.power_discharge_primary_aware = AsyncMock()
-        manager.power_charge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(0, False, datetime.now())
 
-        manager.power_discharge_primary_aware.assert_awaited_once_with(250)
-        manager.power_charge_primary_aware.assert_not_awaited()
+        intent = _manager_routing_intent(manager)
+        assert intent.home_output_budget == 250  # noqa: PLR2004
+        assert not intent.route_input
 
     async def test_primary_only_follow_on_false_negative_p1_cycle_stays_on_discharge_path(self, hass):
         primary = make_device(
@@ -2398,13 +2426,13 @@ class TestSmartMatchingPrimaryAware:
         )
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
-        manager.power_discharge_primary_aware = AsyncMock()
-        manager.power_charge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(-250, False, datetime.now())
 
-        manager.power_discharge_primary_aware.assert_awaited_once_with(250)
-        manager.power_charge_primary_aware.assert_not_awaited()
+        intent = _manager_routing_intent(manager)
+        assert intent.home_output_budget == 250  # noqa: PLR2004
+        assert not intent.route_input
 
     async def test_primary_only_follow_on_false_negative_p1_cycle_enters_charge_only_after_debounce_window(self, hass):
         start = datetime.now()
@@ -2445,8 +2473,7 @@ class TestSmartMatchingPrimaryAware:
         )
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
-        manager.power_discharge_primary_aware = AsyncMock()
-        manager.power_charge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(-250, False, start)
 
@@ -2488,9 +2515,11 @@ class TestSmartMatchingPrimaryAware:
 
         await manager.powerChanged(-250, False, start + timedelta(seconds=SmartMode.TIMEZERO))
 
-        assert manager.power_discharge_primary_aware.await_args_list == [call(250), call(250)]
-        assert manager.power_charge_primary_aware.await_args_list == [
-            call(-500, start + timedelta(seconds=SmartMode.TIMEZERO))
+        intents = [await_args.args[0] for await_args in manager._execute_power_routing.await_args_list]
+        assert [(intent.route_input, intent.home_output_budget, intent.input_budget) for intent in intents] == [
+            (False, 250, 0),
+            (False, 250, 0),
+            (True, 0, -500),
         ]
 
     async def test_two_system_follow_on_cycle_keeps_primary_solar_serving_home_when_primary_alone_covers_demand(
@@ -3454,14 +3483,14 @@ class TestSmartMatchingPrimaryAware:
             primary_device_id=device.deviceId,
         )
         device.power_get = AsyncMock(return_value=True)
-        manager.power_discharge_primary_aware = AsyncMock()
-        manager.power_charge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(100, False, datetime.now())
 
         assert device.state is DeviceState.SOCFULL
-        assert manager.power_discharge_primary_aware.await_args == call(0)
-        manager.power_charge_primary_aware.assert_not_awaited()
+        intent = _manager_routing_intent(manager)
+        assert intent.home_output_budget == 0
+        assert not intent.route_input
 
     async def test_positive_p1_uses_secondary_pv_then_full_primary_bypass_remainder(self, hass):
         """A full bypassing primary should keep its PV floor while covering demand after secondary PV."""
@@ -3563,13 +3592,13 @@ class TestSmartMatchingPrimaryAware:
         )
         full_device.power_get = AsyncMock(return_value=True)
         charging_device.power_get = AsyncMock(return_value=True)
-        manager.power_discharge_primary_aware = AsyncMock()
-        manager.power_charge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(20, False, datetime.now())
 
-        manager.power_charge_primary_aware.assert_awaited_once_with(-260, ANY)
-        manager.power_discharge_primary_aware.assert_not_awaited()
+        intent = _manager_routing_intent(manager)
+        assert intent.input_budget == -260  # noqa: PLR2004
+        assert intent.route_input
 
     async def test_charges_only_the_true_surplus_after_home_pass_through(self, hass):
         """Charging should use only the leftover surplus after current solar has already been passed through to the home."""
@@ -5916,13 +5945,13 @@ class TestSmartMatchingPrimaryAware:
         )
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
-        manager.power_charge_primary_aware = AsyncMock()
-        manager.power_discharge_primary_aware = AsyncMock()
+        manager._execute_power_routing = AsyncMock()
 
         await manager.powerChanged(120, False, datetime.now())
 
-        manager.power_charge_primary_aware.assert_awaited_once_with(-170, ANY)
-        manager.power_discharge_primary_aware.assert_not_awaited()
+        intent = _manager_routing_intent(manager)
+        assert intent.input_budget == -170  # noqa: PLR2004
+        assert intent.route_input
 
     async def test_reduces_primary_charge_before_secondary_when_positive_p1_appears_during_charge_lag(self, hass):
         """Positive demand should be satisfied by reducing primary charge first while leaving the secondary's remaining PV local."""

@@ -107,6 +107,24 @@ class _RoutingPolicy:
     zero_uses_charge_path: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _RoutingIntent:
+    """
+    Per-cycle input and home-output intent after mode clamps are applied.
+
+    Input is device charging. Home output is power commanded to the house and
+    may be PV-only or battery-backed depending on the output clamp.
+    """
+
+    input_budget: int
+    home_output_budget: int
+    route_input: bool
+    produced_only_output: bool
+    strict_home_output_stop: bool
+    selected_primary_input: bool
+    selected_primary_home_output: bool
+
+
 DEFAULT_ROUTING_POLICY = _RoutingPolicy(
     charge_allowed=False,
     output_clamp=_OutputClamp.NONE,
@@ -242,14 +260,6 @@ class _LocalChargeSummary:
     active_non_primary_empty_chargeable: int
     non_primary_local_chargeable_surplus: int
     selected_primary_local_surplus: int
-
-
-@dataclass(frozen=True, slots=True)
-class _SetpointShapeResult:
-    """Primary-aware setpoint after PV-floor and debounce policy is applied."""
-
-    setpoint: int
-    discharge_candidate_setpoint: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,7 +1216,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         local_charge: _LocalChargeSummary,
         *,
         pv_charge_first_mode: bool,
-    ) -> _SetpointShapeResult:
+    ) -> int:
         """Apply PV-floor, local-charge, and debounce policy before dispatching."""
         selected_primary = routing.selected_primary
         matching_primary_aware = routing.primary_aware and self.operation == ManagerMode.MATCHING
@@ -1317,10 +1327,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         else:
             self.charge_debounce_since = None
 
-        return _SetpointShapeResult(
-            setpoint=setpoint,
-            discharge_candidate_setpoint=discharge_candidate_setpoint,
-        )
+        return setpoint
 
     @staticmethod
     def _allocate_capped_targets(
@@ -1391,22 +1398,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             min(device.electricLevel.asInt if device.state != DeviceState.SOCFULL else 100 for device in devices),
         )
 
-    async def _power_discharge_primary_aware(self, device: ZendureDevice, power: int) -> int:
-        """Use explicit bypass for eligible devices when a primary-aware path requests zero output."""
-        if power == 0 and getattr(device, "byPass", None) is not None and device.byPass.is_on:
+    async def _command_home_output(self, device: ZendureDevice, power: int, *, allow_bypass_zero: bool = False) -> int:
+        """Command home output, optionally using bypass as the zero-output command."""
+        if power == 0 and allow_bypass_zero and getattr(device, "byPass", None) is not None and device.byPass.is_on:
             return 0
-        if power == 0 and device.can_bypass:
+        if power == 0 and allow_bypass_zero and device.can_bypass:
             return await device.power_bypass()
         return await device.power_discharge(power)
 
-    async def _stop_discharge_output_for_charge(self, device: ZendureDevice, *, allow_bypass: bool) -> None:
-        """Stop home output before charging, optionally using bypass as the zero-output command."""
+    async def _stop_home_output_for_input(self, device: ZendureDevice, *, allow_bypass_zero: bool) -> None:
+        """Stop home output before input, optionally using bypass as the zero-output command."""
         # pwr_offgrid devices may otherwise import from grid when stopped exactly at zero.
         if device.pwr_offgrid == 0:
-            if allow_bypass:
-                await self._power_discharge_primary_aware(device, 0)
-            else:
-                await device.power_discharge(0)
+            await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
         else:
             await device.power_discharge(-10)
 
@@ -1427,45 +1431,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             case _:
                 return 0, False
 
-    async def _charge_for_routing_policy(
-        self,
-        setpoint: int,
-        time: datetime,
-        policy: _RoutingPolicy,
-        *,
-        selected_primary_routing: bool,
-    ) -> None:
-        """Run the charge executor selected by the routing policy."""
-        if selected_primary_routing and policy.selected_primary_charge:
-            if policy.strict_output_stop:
-                await self.power_charge_primary_aware(setpoint, time, strict_output_stop=True)
-            else:
-                await self.power_charge_primary_aware(setpoint, time)
-        elif policy.strict_output_stop:
-            await self.power_charge(setpoint, time, strict_output_stop=True)
-        else:
-            await self.power_charge(setpoint, time)
-
-    async def _discharge_for_routing_policy(
-        self,
-        setpoint: int,
-        policy: _RoutingPolicy,
-        *,
-        selected_primary_routing: bool,
-        produced_only: bool,
-    ) -> None:
-        """Run the output executor selected by the routing policy."""
-        if selected_primary_routing and policy.selected_primary_output:
-            if produced_only:
-                await self.power_discharge_primary_aware(setpoint, produced_only=True)
-            else:
-                await self.power_discharge_primary_aware(setpoint)
-        elif produced_only:
-            await self.power_discharge(setpoint, produced_only=True)
-        else:
-            await self.power_discharge(setpoint)
-
-    async def _execute_routing_policy(
+    def _routing_intent(
         self,
         requested_setpoint: int,
         setpoint: int,
@@ -1473,33 +1439,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         selected_primary_routing: bool,
         produced_only: bool,
-        time: datetime,
-    ) -> None:
-        """Execute the mode-independent charge/output pipeline."""
-        if self.operation == ManagerMode.OFF:
-            self.operationstate.update_value(ManagerState.OFF.value)
-            return
-
-        if setpoint < 0:
-            await self._charge_for_routing_policy(
-                setpoint, time, policy, selected_primary_routing=selected_primary_routing
-            )
-        elif setpoint > 0:
-            await self._discharge_for_routing_policy(
-                setpoint,
-                policy,
-                selected_primary_routing=selected_primary_routing,
-                produced_only=produced_only,
-            )
-        elif policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed:
-            await self._charge_for_routing_policy(0, time, policy, selected_primary_routing=selected_primary_routing)
-        else:
-            await self._discharge_for_routing_policy(
-                0,
-                policy,
-                selected_primary_routing=selected_primary_routing,
-                produced_only=False,
-            )
+    ) -> _RoutingIntent:
+        """Build the per-cycle routing intent consumed by the unified executor."""
+        route_input = setpoint < 0 or (
+            setpoint == 0 and policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed
+        )
+        return _RoutingIntent(
+            input_budget=setpoint if route_input else 0,
+            home_output_budget=max(0, setpoint),
+            route_input=route_input,
+            produced_only_output=produced_only,
+            strict_home_output_stop=policy.strict_output_stop,
+            selected_primary_input=selected_primary_routing and policy.selected_primary_charge,
+            selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
+        )
 
     def _allocate_produced_floor(
         self,
@@ -1613,7 +1566,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         for d in idle_devices:
             if self._available_discharge_power(d, primary_aware=primary_aware) > 0:
                 if primary_aware:
-                    await self._power_discharge_primary_aware(d, SmartMode.POWER_START)
+                    await self._command_home_output(d, SmartMode.POWER_START, allow_bypass_zero=True)
                 else:
                     await d.power_discharge(SmartMode.POWER_START)
                 if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
@@ -1831,7 +1784,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             pv_charge_first_mode=pv_charge_first_mode,
             include_charge_first_home=True,
         )
-        shaped_setpoint = self._shape_primary_aware_setpoint(
+        setpoint = self._shape_primary_aware_setpoint(
             p1,
             setpoint,
             time,
@@ -1840,33 +1793,71 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             local_charge,
             pv_charge_first_mode=pv_charge_first_mode,
         )
-        setpoint = shaped_setpoint.setpoint
         if self.operation == ManagerMode.MANUAL:
             setpoint = int(self.manualpower.asNumber)
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
-
-        # Update power distribution.
-        _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
-        await self._execute_routing_policy(
+        intent = self._routing_intent(
             requested_setpoint,
             setpoint,
             policy,
             selected_primary_routing=selected_primary_routing,
             produced_only=produced_only,
-            time=time,
         )
 
-    async def power_charge(self, setpoint: int, time: datetime, *, strict_output_stop: bool = False) -> None:
-        """Charge devices."""
-        _LOGGER.info("Charge => setpoint %sW", setpoint)
+        # Update power distribution.
+        _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
+        await self._execute_power_routing(intent, time, routing)
+
+    async def _execute_power_routing(
+        self,
+        intent: _RoutingIntent,
+        time: datetime,
+        routing: _PowerRoutingSnapshot,
+    ) -> None:
+        """Execute one cycle's input and home-output intent."""
+        if self.operation == ManagerMode.OFF:
+            self.operationstate.update_value(ManagerState.OFF.value)
+            return
+
+        if intent.route_input:
+            if intent.selected_primary_input:
+                await self._apply_primary_input(
+                    intent.input_budget,
+                    time,
+                    routing,
+                    strict_output_stop=intent.strict_home_output_stop,
+                )
+            else:
+                await self._apply_standard_input(
+                    intent.input_budget,
+                    time,
+                    strict_output_stop=intent.strict_home_output_stop,
+                )
+            return
+
+        if intent.selected_primary_home_output:
+            await self._apply_primary_home_output(
+                intent.home_output_budget,
+                routing,
+                produced_only=intent.produced_only_output,
+            )
+        else:
+            await self._apply_standard_home_output(
+                intent.home_output_budget,
+                produced_only=intent.produced_only_output,
+            )
+
+    async def _apply_standard_input(self, setpoint: int, time: datetime, *, strict_output_stop: bool = False) -> None:
+        """Apply a non-primary device-input budget."""
+        _LOGGER.info("Input => setpoint %sW", setpoint)
 
         # stop discharging devices
         for d in self.discharge:
             # avoid stopping bypassing devices
             if not strict_output_stop and d.byPass.is_on:
                 continue
-            await self._stop_discharge_output_for_charge(d, allow_bypass=False)
+            await self._stop_home_output_for_input(d, allow_bypass_zero=False)
 
         # prevent hysteria
         setpoint = self._apply_charge_holdoff(setpoint, time, allow_charge=False)
@@ -1921,18 +1912,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     break
             self.pwr_low: int = 0
 
-    async def power_charge_primary_aware(
-        self, setpoint: int, time: datetime, *, strict_output_stop: bool = False
+    async def _apply_primary_input(
+        self,
+        setpoint: int,
+        time: datetime,
+        routing: _PowerRoutingSnapshot,
+        *,
+        strict_output_stop: bool = False,
     ) -> None:
-        """Charge devices using the selected primary first."""
-        _LOGGER.info("Charge (primary-aware) => setpoint %sW", setpoint)
+        """Apply a device-input budget using the selected primary first."""
+        _LOGGER.info("Input (primary-aware) => setpoint %sW", setpoint)
 
-        selected_primary = self.resolve_primary_device()
-        routing = self._power_routing_snapshot(
-            selected_primary,
-            primary_aware=True,
-            pv_charge_first=self._selected_primary_pv_charge_first_enabled(),
-        )
+        selected_primary = routing.selected_primary
         active_discharge_targets = routing.active_produced_targets(self.discharge)
         if strict_output_stop:
             active_discharge_targets = dict.fromkeys(self.discharge, 0)
@@ -2099,7 +2090,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 continue
             if not strict_output_stop and active_discharge_targets.get(d, 0) > 0:
                 continue
-            await self._stop_discharge_output_for_charge(d, allow_bypass=not strict_output_stop)
+            await self._stop_home_output_for_input(d, allow_bypass_zero=not strict_output_stop)
 
         if move_primary_charge_to_secondary and primary is not None:
             await primary.power_charge(0)
@@ -2112,7 +2103,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and active_discharge_targets.get(primary, 0) > 0
                 and not positive_demand_charge_lag
             ):
-                await self._power_discharge_primary_aware(primary, active_discharge_targets[primary])
+                await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
         elif positive_demand_charge_lag and primary is not None and primary in self.charge:
             await primary.power_charge(0)
         elif (
@@ -2121,7 +2112,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and active_discharge_targets.get(selected_primary, 0) > 0
             and not positive_demand_charge_lag
         ):
-            await self._power_discharge_primary_aware(selected_primary, active_discharge_targets[selected_primary])
+            await self._command_home_output(
+                selected_primary,
+                active_discharge_targets[selected_primary],
+                allow_bypass_zero=True,
+            )
 
         _idle_lvlmax, idle_lvlmin = self._idle_levels(idle_devices)
         charge_limit, charge_optimal, charge_weight = self._charge_metrics(charge_devices)
@@ -2166,14 +2161,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if target != 0:
                 await d.power_charge(target)
             elif not strict_output_stop and active_discharge_targets.get(d, 0) > 0:
-                await self._power_discharge_primary_aware(d, active_discharge_targets[d])
+                await self._command_home_output(d, active_discharge_targets[d], allow_bypass_zero=True)
 
         if not strict_output_stop:
             for d, target in active_discharge_targets.items():
                 if d is selected_primary or d in active_secondary_charge_devices:
                     continue
                 if target > 0:
-                    await self._power_discharge_primary_aware(d, target)
+                    await self._command_home_output(d, target, allow_bypass_zero=True)
 
         # start idle device if needed
         if dev_start < 0 and idle_devices:
@@ -2193,9 +2188,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     break
             self.pwr_low: int = 0
 
-    async def power_discharge(self, setpoint: int, *, produced_only: bool = False) -> None:
-        """Discharge devices."""
-        _LOGGER.info("Discharge => setpoint %sW", setpoint)
+    async def _apply_standard_home_output(self, setpoint: int, *, produced_only: bool = False) -> None:
+        """Apply a non-primary home-output budget."""
+        _LOGGER.info("Home output => setpoint %sW", setpoint)
 
         # reset hysteria time
         if self.charge_time != datetime.max:
@@ -2231,9 +2226,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         await self._start_idle_discharge_devices(idle_devices, dev_start)
 
-    async def power_discharge_primary_aware(self, setpoint: int, *, produced_only: bool = False) -> None:
-        """Discharge devices using the selected primary first."""
-        _LOGGER.info("Discharge (primary-aware) => setpoint %sW", setpoint)
+    async def _apply_primary_home_output(
+        self, setpoint: int, routing: _PowerRoutingSnapshot, *, produced_only: bool = False
+    ) -> None:
+        """Apply a home-output budget using the selected primary first."""
+        _LOGGER.info("Home output (primary-aware) => setpoint %sW", setpoint)
         requested_setpoint = setpoint
 
         # reset hysteria time
@@ -2241,12 +2238,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.charge_time = datetime.max
             self.pwr_low = 0
 
-        selected_primary = self.resolve_primary_device()
-        routing = self._power_routing_snapshot(
-            selected_primary,
-            primary_aware=True,
-            pv_charge_first=self._selected_primary_pv_charge_first_enabled(),
-        )
+        selected_primary = routing.selected_primary
         charge_produced_devices = [
             device for device in self.charge if device.is_discharge_blocked() and routing.produced_limit(device) > 0
         ]
@@ -2258,7 +2250,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # SF 2400 may show more gridInputPower than offGridPower and will be
             # recognized as charging, so set power to 10 instead of 0
             if max(0, d.pwr_offgrid) == 0:
-                await self._power_discharge_primary_aware(d, 0)
+                await self._command_home_output(d, 0, allow_bypass_zero=True)
             else:
                 await d.power_discharge(10)
 
@@ -2288,7 +2280,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 selected_primary.name,
                 selected_primary.discharge_floor_soc(),
             )
-            await self._power_discharge_primary_aware(selected_primary, 0)
+            await self._command_home_output(selected_primary, 0, allow_bypass_zero=True)
 
         primary = (
             selected_primary
@@ -2382,10 +2374,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
 
         if primary is not None and primary_target > 0:
-            await self._power_discharge_primary_aware(primary, primary_target)
+            await self._command_home_output(primary, primary_target, allow_bypass_zero=True)
 
         for d in command_devices:
-            await self._power_discharge_primary_aware(d, targets[d])
+            await self._command_home_output(d, targets[d], allow_bypass_zero=True)
 
         if produced_only:
             return
