@@ -16,6 +16,7 @@ from custom_components.zendure_ha.sensor import ZendureSensor
 from .common import make_device
 
 TARGET_SOC_AFTER_UPDATE = 90
+MIN_SOC_AFTER_UPDATE = 8
 
 
 def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
@@ -416,6 +417,20 @@ def test_soc_set_update_refreshes_effective_soc_limit_state(hass):
     assert device.socSet.asNumber == TARGET_SOC_AFTER_UPDATE
     assert device.state is DeviceState.INACTIVE
     assert device.socLimit.asInt == 0
+
+
+async def test_min_soc_update_refreshes_effective_soc_limit_state(hass):
+    """Changing minimum SoC should immediately refresh the effective SoC Limit sensor."""
+    device = make_device(hass, level=8, min_soc=5, reserve=10, soc_set=80)
+
+    assert device.state is DeviceState.SOCRESERVE
+    assert device.socLimit.asInt == SocLimitState.RESERVE
+
+    await device.minSoc.async_set_native_value(MIN_SOC_AFTER_UPDATE)
+
+    assert device.minSoc.asNumber == MIN_SOC_AFTER_UPDATE
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
 
 
 @pytest.mark.parametrize(

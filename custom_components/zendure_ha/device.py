@@ -184,7 +184,9 @@ class ZendureDevice(EntityDevice):
         self.chargeMaxLimit = ZendureNumber(
             self, "chargeMaxLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER
         )
-        self.minSoc = ZendureNumber(self, "minSoc", self.entityWrite, None, "%", "soc", 100, 5, NumberMode.SLIDER, 10)
+        self.minSoc = ZendureNumber(
+            self, "minSoc", self._write_min_soc, None, "%", "soc", 100, 5, NumberMode.SLIDER, 10
+        )
         self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 100, 70, NumberMode.SLIDER, 10)
         self.socReserve = ZendureRestoreNumber(
             self, "socReserve", self.refresh_recovery_state, None, "%", "soc", 100, 5, NumberMode.SLIDER, True
@@ -563,6 +565,12 @@ class ZendureDevice(EntityDevice):
 
         soc = self.available_discharge_baseline_soc(_entity, _value)
         return 0 if level <= soc else min(999, self.kWh * 10 / power * (level - soc))
+
+    async def _write_min_soc(self, entity: EntityZendure, value: Any) -> None:
+        """Write minimum SoC and refresh state derived from the discharge floor."""
+        await self.entityWrite(entity, value)
+        entity.update_value(value)
+        self.refresh_recovery_state()
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:
         if entity.translation_key is None:
