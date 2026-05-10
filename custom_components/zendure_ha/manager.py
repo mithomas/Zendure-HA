@@ -993,7 +993,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         try:
             self._reset_power_distribution_state()
-            await self.powerChanged(p1, False, datetime.now())
+            await self._route_power_change(p1, False, datetime.now())
         finally:
             self._restore_p1_update_timing()
 
@@ -1703,18 +1703,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             stddev = SmartMode.P1_STDDEV_FACTOR * max(
                 SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
             )
-            if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
+            if is_fast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
                 self.p1_history.clear()
         else:
-            isFast = False
+            is_fast = False
         self.p1_history.append(p1)
 
         # check minimal time between updates
-        if isFast or fast_charge_lag_correction or spike_confirmed or time > self.zero_next:
+        if is_fast or fast_charge_lag_correction or spike_confirmed or time > self.zero_next:
             try:
                 # prevent updates during power distribution changes
                 self._reset_power_distribution_state()
-                await self.powerChanged(p1, isFast or fast_charge_lag_correction or spike_confirmed, time)
+                await self._route_power_change(p1, is_fast or fast_charge_lag_correction or spike_confirmed, time)
             except Exception as err:
                 _LOGGER.error(err)
                 _LOGGER.error(traceback.format_exc())
@@ -1724,7 +1724,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     self.p1_charge_lag_last_update = time
                 self._restore_p1_update_timing(time)
 
-    async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
+    async def _route_power_change(self, p1: int, is_fast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
         setpoint = p1
         power = 0
@@ -1806,7 +1806,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
 
         # Update power distribution.
-        _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
+        _LOGGER.info("P1 ======> p1:%s is_fast:%s, setpoint:%sW stored:%sW", p1, is_fast, setpoint, self.produced)
         await self._execute_power_routing(intent, time, routing)
 
     async def _execute_power_routing(
