@@ -1904,49 +1904,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.idle,
             promote_idle_devices=setpoint < -SmartMode.POWER_START and not self.charge,
         )
-        _idle_lvlmax, idle_lvlmin = self._idle_levels(idle_devices)
-        charge_limit, charge_optimal, charge_weight = self._charge_metrics(charge_devices)
-
-        # distribute charging devices
-        dev_start = min(0, setpoint - charge_optimal * 2) if setpoint < -SmartMode.POWER_START else 0
-        limit = charge_limit
-        setpoint = max(limit, setpoint)
-        for i, d in enumerate(sorted(charge_devices, key=lambda d: d.electricLevel.asInt, reverse=True)):
-            pwr = (
-                int(setpoint * (d.pwr_max * (100 - d.electricLevel.asInt)) / charge_weight) if charge_weight != 0 else 0
-            )
-            charge_weight -= d.pwr_max * (100 - d.electricLevel.asInt)
-
-            # adjust the limit, make sure we have 'enough' power to charge
-            limit -= d.pwr_max
-            pwr = max(pwr, setpoint, d.pwr_max)
-            if limit > setpoint - pwr:
-                pwr = max(setpoint - limit, setpoint, d.pwr_max)
-
-            # make sure we have devices in optimal working range
-            if len(charge_devices) > 1 and i == 0:
-                self.pwr_low = 0 if (delta := d.charge_start * 1.5 - pwr) >= 0 else self.pwr_low + int(-delta)
-                pwr = 0 if self.pwr_low < d.charge_optimal else pwr
-
-            setpoint -= await d.power_charge(pwr)
-            dev_start += -1 if pwr != 0 and d.electricLevel.asInt > idle_lvlmin + 3 else 0
-
-        # start idle device if needed
-        if dev_start < 0 and idle_devices:
-            idle_devices.sort(key=lambda d: d.electricLevel.asInt, reverse=False)
-            for d in idle_devices:
-                # offGrid device need to be started with at least their offgrid power,
-                # otherwise they will not be recognized as charging
-                # but should not be started with more than pwr_offgrid if they are full
-                # if a offGrid device need to be started, the output power is set to 0
-                # and it take all offGrid power from grid
-                start_pwr = SmartMode.POWER_START
-                await d.power_charge(
-                    -start_pwr - max(0, d.pwr_offgrid) if d.state != DeviceState.SOCFULL else -max(0, d.pwr_offgrid)
-                )
-                if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
-                    break
-            self.pwr_low: int = 0
+        dev_start = await self._apply_weighted_charge_allocation(setpoint, charge_devices, idle_devices)
+        await self._start_idle_charge_devices(idle_devices, dev_start)
 
     async def _apply_primary_input(
         self,
@@ -2160,38 +2119,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 allow_bypass_zero=True,
             )
 
-        _idle_lvlmax, idle_lvlmin = self._idle_levels(idle_devices)
-        charge_limit, charge_optimal, charge_weight = self._charge_metrics(charge_devices)
-
-        # distribute charging devices
-        dev_start = min(0, setpoint - charge_optimal * 2) if setpoint < -SmartMode.POWER_START else 0
-        limit = charge_limit
-        setpoint = max(limit, setpoint)
-        for i, d in enumerate(sorted(charge_devices, key=lambda d: d.electricLevel.asInt, reverse=True)):
-            pwr = (
-                int(setpoint * (d.pwr_max * (100 - d.electricLevel.asInt)) / charge_weight) if charge_weight != 0 else 0
-            )
-            charge_weight -= d.pwr_max * (100 - d.electricLevel.asInt)
-
-            # adjust the limit, make sure we have 'enough' power to charge
-            limit -= d.pwr_max
-            pwr = max(pwr, setpoint, d.pwr_max)
-            if limit > setpoint - pwr:
-                pwr = max(setpoint - limit, setpoint, d.pwr_max)
-
-            # make sure we have devices in optimal working range
-            if len(charge_devices) > 1 and i == 0:
-                self.pwr_low = 0 if (delta := d.charge_start * 1.5 - pwr) >= 0 else self.pwr_low + int(-delta)
-                pwr = 0 if self.pwr_low < d.charge_optimal else pwr
-
-            target = charge_targets.get(d, 0) + pwr
-            if move_primary_charge_to_secondary and d not in pure_secondary_charge_devices:
-                target = charge_targets.get(d, 0)
-                pwr = 0
-            setpoint -= pwr
-            dev_start += -1 if pwr != 0 and d.electricLevel.asInt > idle_lvlmin + 3 else 0
-            if target != 0:
-                await d.power_charge(target)
+        dev_start = await self._apply_weighted_charge_allocation(
+            setpoint,
+            charge_devices,
+            idle_devices,
+            charge_targets=charge_targets,
+            fallback_devices=set(pure_secondary_charge_devices) if move_primary_charge_to_secondary else None,
+            command_zero_targets=False,
+            subtract_actual_charge=False,
+        )
 
         for d in idle_secondary_surplus_devices:
             target = charge_targets.get(d, 0)
@@ -2212,23 +2148,73 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 if target > 0:
                     await self._command_home_output(d, target, allow_bypass_zero=True)
 
-        # start idle device if needed
-        if dev_start < 0 and idle_devices:
-            idle_devices.sort(key=lambda d: d.electricLevel.asInt, reverse=False)
-            for d in idle_devices:
-                # offGrid device need to be started with at least their offgrid power,
-                # otherwise they will not be recognized as charging
-                # but should not be started with more than pwr_offgrid if they are full
-                # if a offGrid device need to be started, the output power is set to 0
-                # and it take all offGrid power from grid
-                await d.power_charge(
-                    -SmartMode.POWER_START - max(0, d.pwr_offgrid)
-                    if d.state != DeviceState.SOCFULL
-                    else -max(0, d.pwr_offgrid)
-                )
-                if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
-                    break
-            self.pwr_low: int = 0
+        await self._start_idle_charge_devices(idle_devices, dev_start)
+
+    async def _apply_weighted_charge_allocation(
+        self,
+        setpoint: int,
+        charge_devices: list[ZendureDevice],
+        idle_devices: list[ZendureDevice],
+        *,
+        charge_targets: dict[ZendureDevice, int] | None = None,
+        fallback_devices: set[ZendureDevice] | None = None,
+        command_zero_targets: bool = True,
+        subtract_actual_charge: bool = True,
+    ) -> int:
+        """Apply the fallback weighted charge allocation and return the idle-start budget."""
+        _idle_lvlmax, idle_lvlmin = self._idle_levels(idle_devices)
+        charge_limit, charge_optimal, charge_weight = self._charge_metrics(charge_devices)
+
+        dev_start = min(0, setpoint - charge_optimal * 2) if setpoint < -SmartMode.POWER_START else 0
+        limit = charge_limit
+        setpoint = max(limit, setpoint)
+        for i, d in enumerate(sorted(charge_devices, key=lambda d: d.electricLevel.asInt, reverse=True)):
+            pwr = (
+                int(setpoint * (d.pwr_max * (100 - d.electricLevel.asInt)) / charge_weight) if charge_weight != 0 else 0
+            )
+            charge_weight -= d.pwr_max * (100 - d.electricLevel.asInt)
+
+            limit -= d.pwr_max
+            pwr = max(pwr, setpoint, d.pwr_max)
+            if limit > setpoint - pwr:
+                pwr = max(setpoint - limit, setpoint, d.pwr_max)
+
+            if len(charge_devices) > 1 and i == 0:
+                self.pwr_low = 0 if (delta := d.charge_start * 1.5 - pwr) >= 0 else self.pwr_low + int(-delta)
+                pwr = 0 if self.pwr_low < d.charge_optimal else pwr
+
+            target = charge_targets.get(d, 0) if charge_targets is not None else 0
+            if fallback_devices is None or d in fallback_devices:
+                target += pwr
+            else:
+                pwr = 0
+
+            if subtract_actual_charge:
+                setpoint -= await d.power_charge(target)
+            else:
+                setpoint -= pwr
+                if command_zero_targets or target != 0:
+                    await d.power_charge(target)
+            dev_start += -1 if pwr != 0 and d.electricLevel.asInt > idle_lvlmin + 3 else 0
+
+        return dev_start
+
+    async def _start_idle_charge_devices(self, idle_devices: list[ZendureDevice], dev_start: int) -> None:
+        """Start idle devices when fallback charge allocation still needs capacity."""
+        if dev_start >= 0 or not idle_devices:
+            return
+
+        idle_devices.sort(key=lambda d: d.electricLevel.asInt, reverse=False)
+        for d in idle_devices:
+            # Off-grid devices need at least off-grid power to be recognized as charging.
+            await d.power_charge(
+                -SmartMode.POWER_START - max(0, d.pwr_offgrid)
+                if d.state != DeviceState.SOCFULL
+                else -max(0, d.pwr_offgrid)
+            )
+            if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
+                break
+        self.pwr_low: int = 0
 
     async def _apply_standard_home_output(self, setpoint: int, *, produced_only: bool = False) -> None:
         """
@@ -2240,19 +2226,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """
         _LOGGER.info("Home output => setpoint %sW", setpoint)
 
-        # reset hysteria time
-        if self.charge_time != datetime.max:
-            self.charge_time = datetime.max
-            self.pwr_low = 0
-
-        # stop charging devices
-        for d in self.charge:
-            # SF 2400 may show more gridInputPower than offGridPower and will be
-            # recognized as charging, so set power to 10 instead of 0
-            if max(0, d.pwr_offgrid) == 0:
-                await d.power_discharge(0)
-            else:
-                await d.power_discharge(10)
+        self._reset_home_output_charge_state()
+        await self._stop_charging_for_home_output()
 
         discharge_devices = self._collect_discharge_candidates(self.discharge, self.idle)
         idle_devices = [device for device in self.idle if device not in discharge_devices]
@@ -2266,8 +2241,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             0 if produced_only else self._add_battery_remainder(targets, setpoint, discharge_devices, idle_lvlmax)
         )
 
-        for d in discharge_devices:
-            await d.power_discharge(targets[d])
+        await self._command_home_output_targets(discharge_devices, targets)
 
         if produced_only:
             return
@@ -2287,26 +2261,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Home output (primary-aware) => setpoint %sW", setpoint)
         requested_setpoint = setpoint
 
-        # reset hysteria time
-        if self.charge_time != datetime.max:
-            self.charge_time = datetime.max
-            self.pwr_low = 0
+        self._reset_home_output_charge_state()
 
         selected_primary = routing.selected_primary
         charge_produced_devices = [
             device for device in self.charge if device.is_discharge_blocked() and routing.produced_limit(device) > 0
         ]
-
-        # stop charging devices
-        for d in self.charge:
-            if d in charge_produced_devices:
-                continue
-            # SF 2400 may show more gridInputPower than offGridPower and will be
-            # recognized as charging, so set power to 10 instead of 0
-            if max(0, d.pwr_offgrid) == 0:
-                await self._command_home_output(d, 0, allow_bypass_zero=True)
-            else:
-                await d.power_discharge(10)
+        await self._stop_charging_for_home_output(
+            skip_devices=set(charge_produced_devices),
+            allow_bypass_zero=True,
+        )
 
         primary_produced_cap = routing.produced_limit(selected_primary) if selected_primary is not None else 0
         primary_bypass_floor = 0
@@ -2430,10 +2394,44 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if primary is not None and primary_target > 0:
             await self._command_home_output(primary, primary_target, allow_bypass_zero=True)
 
-        for d in command_devices:
-            await self._command_home_output(d, targets[d], allow_bypass_zero=True)
+        await self._command_home_output_targets(command_devices, targets, allow_bypass_zero=True)
 
         if produced_only:
             return
 
         await self._start_idle_discharge_devices(idle_battery_devices, dev_start, primary_aware=True)
+
+    def _reset_home_output_charge_state(self) -> None:
+        """Reset charge hysteresis state before switching to home output."""
+        if self.charge_time != datetime.max:
+            self.charge_time = datetime.max
+            self.pwr_low = 0
+
+    async def _stop_charging_for_home_output(
+        self,
+        *,
+        skip_devices: set[ZendureDevice] | None = None,
+        allow_bypass_zero: bool = False,
+    ) -> None:
+        """Stop active charging devices before assigning home output."""
+        skip_devices = set() if skip_devices is None else skip_devices
+        for device in self.charge:
+            if device in skip_devices:
+                continue
+            # SF 2400 may show more gridInputPower than offGridPower and will be
+            # recognized as charging, so set power to 10 instead of 0.
+            if max(0, device.pwr_offgrid) == 0:
+                await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
+            else:
+                await device.power_discharge(10)
+
+    async def _command_home_output_targets(
+        self,
+        devices: list[ZendureDevice],
+        targets: dict[ZendureDevice, int],
+        *,
+        allow_bypass_zero: bool = False,
+    ) -> None:
+        """Command home output targets for the provided devices."""
+        for device in devices:
+            await self._command_home_output(device, targets[device], allow_bypass_zero=allow_bypass_zero)
