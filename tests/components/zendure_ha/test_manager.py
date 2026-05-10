@@ -6617,9 +6617,9 @@ class TestP1SpikeFilter:
     ) -> None:
         manager.p1_history.clear()
         manager.p1_history.extend([0, 0])
-        manager.p1_spike_filter.update_value(1)
-        manager.p1_spike_filter_threshold.update_value(threshold)
-        manager.p1_spike_filter_duration.update_value(duration)
+        manager.spike_filter.update_value(1)
+        manager.spike_filter_threshold.update_value(threshold)
+        manager.spike_filter_duration.update_value(duration)
 
     async def test_suppresses_upward_spike_before_duration(self, hass):
         manager = make_manager(hass)
@@ -6632,12 +6632,15 @@ class TestP1SpikeFilter:
         assert list(manager.p1_history) == [0, 0]
         assert manager.p1_spike_candidate is not None
 
-    async def test_processes_sustained_spike_after_duration(self, hass):
+    async def test_fast_change_routes_sustained_spike_after_duration(self, hass):
         manager = make_manager(hass)
         self._enable_spike_filter(manager)
+        manager.zero_fast = datetime.min
+        manager.zero_next = datetime.now() + timedelta(seconds=SmartMode.TIMEZERO)
         _mock_prepared_power_routing(manager)
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+        assert list(manager.p1_history) == [0, 0]
         candidate = manager.p1_spike_candidate
         assert candidate is not None
         manager.p1_spike_candidate = type(candidate)(
@@ -6652,6 +6655,7 @@ class TestP1SpikeFilter:
         assert await_args is not None
         assert await_args.args[0] == self.SPIKE_POWER
         assert manager.p1_spike_candidate is None
+        assert list(manager.p1_history) == [self.SPIKE_POWER]
 
     async def test_drops_spike_candidate_when_reading_returns_before_duration(self, hass):
         manager = make_manager(hass)
@@ -6681,9 +6685,9 @@ class TestP1SpikeFilter:
         manager = make_manager(hass)
         manager.p1_history.clear()
         manager.p1_history.extend([0, 0])
-        manager.p1_spike_filter.update_value(0)
-        manager.p1_spike_filter_threshold.update_value(self.DEFAULT_THRESHOLD)
-        manager.p1_spike_filter_duration.update_value(self.DEFAULT_DURATION)
+        manager.spike_filter.update_value(0)
+        manager.spike_filter_threshold.update_value(self.DEFAULT_THRESHOLD)
+        manager.spike_filter_duration.update_value(self.DEFAULT_DURATION)
         _mock_prepared_power_routing(manager)
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
@@ -6698,9 +6702,9 @@ class TestP1SpikeFilter:
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
         assert manager.p1_spike_candidate is not None
 
-        await manager.p1_spike_filter.async_turn_off()
+        await manager.spike_filter.async_turn_off()
 
-        assert manager.p1_spike_filter.is_on is False
+        assert manager.spike_filter.is_on is False
         assert manager.p1_spike_candidate is None
 
 

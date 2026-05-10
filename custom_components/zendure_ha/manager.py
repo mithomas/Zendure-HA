@@ -616,17 +616,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
         self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
 
-    def _update_p1_spike_filter(self, entity: ZendureSwitch, value: int) -> None:
-        """Update the automation-controlled P1 spike filter switch."""
+    def _update_spike_filter(self, entity: ZendureSwitch, value: int) -> None:
+        """Update the automation-controlled spike filter switch."""
         entity.update_value(value)
         self.p1_spike_candidate = None
 
-    def _p1_spike_filter_settings(self) -> tuple[bool, int, timedelta]:
+    def _spike_filter_settings(self) -> tuple[bool, int, timedelta]:
         """Return whether spike filtering is active, plus its threshold and duration."""
-        spike_filter = getattr(self, "p1_spike_filter", None)
+        spike_filter = getattr(self, "spike_filter", None)
         enabled = bool(getattr(spike_filter, "is_on", False))
-        threshold = int(getattr(getattr(self, "p1_spike_filter_threshold", None), "asNumber", 0))
-        duration_seconds = float(getattr(getattr(self, "p1_spike_filter_duration", None), "asNumber", 0))
+        threshold = int(getattr(getattr(self, "spike_filter_threshold", None), "asNumber", 0))
+        duration_seconds = float(getattr(getattr(self, "spike_filter_duration", None), "asNumber", 0))
         duration = timedelta(seconds=max(0.0, duration_seconds))
         return enabled and threshold > 0 and duration > timedelta(0), threshold, duration
 
@@ -636,7 +636,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _is_p1_spike_increase(self, p1: int, time: datetime) -> bool:
         """Return whether a short upward P1 increase should still be suppressed as a spike."""
-        enabled, threshold, duration = self._p1_spike_filter_settings()
+        enabled, threshold, duration = self._spike_filter_settings()
         if not enabled:
             self.p1_spike_candidate = None
             return False
@@ -653,6 +653,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         duration,
                     )
                     return True
+                self.p1_spike_candidate = None
+                _LOGGER.debug(
+                    "P1 spike released after duration: p1=%sW baseline=%sW threshold=%sW duration=%s",
+                    p1,
+                    candidate.baseline,
+                    threshold,
+                    duration,
+                )
                 return False
 
             _LOGGER.debug(
@@ -677,32 +685,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return True
 
         return False
-
-    def _is_p1_permanent_increase(self, p1: int, time: datetime) -> bool:
-        """Return whether a pending upward P1 increase persisted past the spike duration."""
-        enabled, threshold, duration = self._p1_spike_filter_settings()
-        if not enabled:
-            self.p1_spike_candidate = None
-            return False
-        if self.p1_spike_candidate is None:
-            return False
-
-        candidate = self.p1_spike_candidate
-        if p1 - candidate.baseline < threshold:
-            self.p1_spike_candidate = None
-            return False
-        if time - candidate.started < duration:
-            return False
-
-        self.p1_spike_candidate = None
-        _LOGGER.debug(
-            "P1 spike confirmed after duration: p1=%sW baseline=%sW threshold=%sW duration=%s",
-            p1,
-            candidate.baseline,
-            threshold,
-            duration,
-        )
-        return True
 
     def _should_fast_track_charge_lag_p1(self, p1: int, time: datetime) -> bool:
         """Return whether P1 should bypass the normal debounce for charge-lag correction."""
@@ -777,10 +759,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             NumberMode.BOX,
             True,
         )
-        self.p1_spike_filter = ZendureSwitch(self, "p1_spike_filter", self._update_p1_spike_filter, value=False)
-        self.p1_spike_filter_threshold = ZendureRestoreNumber(
+        self.spike_filter = ZendureSwitch(self, "spike_filter", self._update_spike_filter, value=False)
+        self.spike_filter_threshold = ZendureRestoreNumber(
             self,
-            "p1_spike_filter_threshold",
+            "spike_filter_threshold",
             None,
             None,
             "W",
@@ -791,9 +773,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             True,
             initial_value=800,
         )
-        self.p1_spike_filter_duration = ZendureRestoreNumber(
+        self.spike_filter_duration = ZendureRestoreNumber(
             self,
-            "p1_spike_filter_duration",
+            "spike_filter_duration",
             None,
             None,
             "s",
@@ -1476,11 +1458,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if self._is_p1_spike_increase(p1, time):
                 return False
 
-            permanent_increase = self._is_p1_permanent_increase(p1, time)
             charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
 
             # Check for fast delay
-            if time < self.zero_fast and not charge_lag_fast and not permanent_increase:
+            if time < self.zero_fast and not charge_lag_fast:
                 _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
                 self._record_p1_history(p1)
                 return False
@@ -1488,7 +1469,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             fast_change = self._is_fast_p1_change(p1)
             self._record_p1_history(p1, reset=fast_change)
             # Check minimal time between updates aka debounce.
-            should_route = fast_change or charge_lag_fast or permanent_increase or time > self.zero_next
+            should_route = fast_change or charge_lag_fast or time > self.zero_next
 
         if not should_route:
             return False

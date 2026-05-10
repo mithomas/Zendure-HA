@@ -99,11 +99,11 @@
       "discharge_recovery_margin": {
         "name": "Marge de reprise de decharge"
       },
-      "p1_spike_filter_threshold": {
-        "name": "Seuil du filtre de pics P1"
+      "spike_filter_threshold": {
+        "name": "Seuil du filtre de pics"
       },
-      "p1_spike_filter_duration": {
-        "name": "Duree du filtre de pics P1"
+      "spike_filter_duration": {
+        "name": "Duree du filtre de pics"
       },
       "min_soc": {
         "name": "SOC minimum"
@@ -508,8 +508,8 @@
       "auto_recover": {
         "name": "Reset mode dérivation ( bypass )"
       },
-      "p1_spike_filter": {
-        "name": "Filtre de pics P1"
+      "spike_filter": {
+        "name": "Filtre de pics"
       },
       "fanmode": {
         "name": "Ventilateur intelligent"

@@ -98,11 +98,11 @@
       "discharge_recovery_margin": {
         "name": "Entlade-Wiedereinschaltschwelle"
       },
-      "p1_spike_filter_threshold": {
-        "name": "P1-Spitzenfilter-Schwelle"
+      "spike_filter_threshold": {
+        "name": "Spitzenfilter-Schwelle"
       },
-      "p1_spike_filter_duration": {
-        "name": "P1-Spitzenfilter-Dauer"
+      "spike_filter_duration": {
+        "name": "Spitzenfilter-Dauer"
       },
       "min_soc": {
         "name": "SoC-Minimum"
@@ -536,8 +536,8 @@
       "auto_recover": {
         "name": "Bypass-Modus zurücksetzen"
       },
-      "p1_spike_filter": {
-        "name": "P1-Spitzenfilter"
+      "spike_filter": {
+        "name": "Spitzenfilter"
       },
       "fan_switch": {
         "name": "Lüfter"

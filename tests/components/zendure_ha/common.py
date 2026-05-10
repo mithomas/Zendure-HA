@@ -185,10 +185,10 @@ def make_manager(
         NumberMode.BOX,
         True,
     )
-    manager.p1_spike_filter = ZendureSwitch(manager, "p1_spike_filter", manager._update_p1_spike_filter, value=False)
-    manager.p1_spike_filter_threshold = ZendureRestoreNumber(
+    manager.spike_filter = ZendureSwitch(manager, "spike_filter", manager._update_spike_filter, value=False)
+    manager.spike_filter_threshold = ZendureRestoreNumber(
         manager,
-        "p1_spike_filter_threshold",
+        "spike_filter_threshold",
         None,
         None,
         "W",
@@ -199,9 +199,9 @@ def make_manager(
         True,
         initial_value=800,
     )
-    manager.p1_spike_filter_duration = ZendureRestoreNumber(
+    manager.spike_filter_duration = ZendureRestoreNumber(
         manager,
-        "p1_spike_filter_duration",
+        "spike_filter_duration",
         None,
         None,
         "s",
