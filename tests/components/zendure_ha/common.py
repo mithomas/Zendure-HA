@@ -27,6 +27,7 @@ from custom_components.zendure_ha.manager import ZendureManager
 from custom_components.zendure_ha.number import ZendureRestoreNumber
 from custom_components.zendure_ha.select import ZendureRestoreSelect
 from custom_components.zendure_ha.sensor import ZendureSensor
+from custom_components.zendure_ha.switch import ZendureSwitch
 
 PRIMARY_DEVICE_DISABLED = getattr(manager_module, "PRIMARY_DEVICE_DISABLED", "__disabled__")
 
@@ -183,6 +184,33 @@ def make_manager(
         0,
         NumberMode.BOX,
         True,
+    )
+    manager.p1_spike_filter = ZendureSwitch(manager, "p1_spike_filter", manager._update_p1_spike_filter, value=False)
+    manager.p1_spike_filter_threshold = ZendureRestoreNumber(
+        manager,
+        "p1_spike_filter_threshold",
+        None,
+        None,
+        "W",
+        "power",
+        3000,
+        0,
+        NumberMode.BOX,
+        True,
+        initial_value=800,
+    )
+    manager.p1_spike_filter_duration = ZendureRestoreNumber(
+        manager,
+        "p1_spike_filter_duration",
+        None,
+        None,
+        "s",
+        "duration",
+        60,
+        0,
+        NumberMode.BOX,
+        True,
+        initial_value=3,
     )
     manager.availableKwh = ZendureSensor(manager, "available_kwh", None, "kWh", "energy", None, 1)
     manager.totalAvailableKwh = ZendureSensor(manager, "total_available_kwh", None, "kWh", "energy", None, 1)

@@ -109,6 +109,12 @@
       "discharge_recovery_margin": {
         "name": "Discharge Recovery Margin"
       },
+      "p1_spike_filter_threshold": {
+        "name": "P1 Spike Filter Threshold"
+      },
+      "p1_spike_filter_duration": {
+        "name": "P1 Spike Filter Duration"
+      },
       "min_soc": {
         "name": "SoC Minimum"
       },
@@ -544,6 +550,9 @@
       },
       "auto_recover": {
         "name": "Bypass-Mode Reset"
+      },
+      "p1_spike_filter": {
+        "name": "P1 Spike Filter"
       },
       "fan_switch": {
         "name": "Fan"

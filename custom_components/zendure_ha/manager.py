@@ -33,6 +33,7 @@ from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
+from .switch import ZendureSwitch
 
 SCAN_INTERVAL = timedelta(seconds=60)
 PRIMARY_DEVICE_DISABLED = "__disabled__"
@@ -66,6 +67,14 @@ LOW_SOC_STATES = {
 }
 
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
+
+
+@dataclass(frozen=True, slots=True)
+class _P1SpikeCandidate:
+    """Pending upward P1 jump that must persist before routing reacts."""
+
+    baseline: int
+    started: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +293,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_factor = 1
         self.p1_last_update = datetime.min
         self.p1_charge_lag_last_update = datetime.min
+        self.p1_spike_candidate: _P1SpikeCandidate | None = None
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -332,6 +342,76 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_last_update = time
         self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
         self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+
+    def _update_p1_spike_filter(self, entity: ZendureSwitch, value: int) -> None:
+        """Update the automation-controlled P1 spike filter switch."""
+        entity.update_value(value)
+        self.p1_spike_candidate = None
+
+    def _p1_spike_filter_settings(self) -> tuple[bool, int, timedelta]:
+        """Return whether spike filtering is active, plus its threshold and duration."""
+        spike_filter = getattr(self, "p1_spike_filter", None)
+        enabled = bool(getattr(spike_filter, "is_on", False))
+        threshold = int(getattr(getattr(self, "p1_spike_filter_threshold", None), "asNumber", 0))
+        duration_seconds = float(getattr(getattr(self, "p1_spike_filter_duration", None), "asNumber", 0))
+        duration = timedelta(seconds=max(0.0, duration_seconds))
+        return enabled and threshold > 0 and duration > timedelta(0), threshold, duration
+
+    def _p1_history_average(self) -> int:
+        """Return the current recent P1 baseline."""
+        return int(sum(self.p1_history) / len(self.p1_history)) if self.p1_history else 0
+
+    def _evaluate_p1_spike_filter(self, p1: int, time: datetime) -> tuple[bool, bool]:
+        """Return whether the P1 event should be suppressed, and whether a spike was confirmed."""
+        enabled, threshold, duration = self._p1_spike_filter_settings()
+        if not enabled:
+            self.p1_spike_candidate = None
+            return False, False
+
+        if self.p1_spike_candidate is not None:
+            candidate = self.p1_spike_candidate
+            if p1 - candidate.baseline >= threshold:
+                if time - candidate.started < duration:
+                    _LOGGER.debug(
+                        "P1 spike suppressed: p1=%sW baseline=%sW threshold=%sW duration=%s",
+                        p1,
+                        candidate.baseline,
+                        threshold,
+                        duration,
+                    )
+                    return True, False
+
+                self.p1_spike_candidate = None
+                _LOGGER.debug(
+                    "P1 spike confirmed after duration: p1=%sW baseline=%sW threshold=%sW duration=%s",
+                    p1,
+                    candidate.baseline,
+                    threshold,
+                    duration,
+                )
+                return False, True
+
+            _LOGGER.debug(
+                "P1 spike ended before duration: p1=%sW baseline=%sW threshold=%sW",
+                p1,
+                candidate.baseline,
+                threshold,
+            )
+            self.p1_spike_candidate = None
+
+        baseline = self._p1_history_average()
+        if p1 - baseline >= threshold:
+            self.p1_spike_candidate = _P1SpikeCandidate(baseline=baseline, started=time)
+            _LOGGER.debug(
+                "P1 spike candidate started: p1=%sW baseline=%sW threshold=%sW duration=%s",
+                p1,
+                baseline,
+                threshold,
+                duration,
+            )
+            return True, False
+
+        return False, False
 
     def _has_charge_lag_fast_path_state(self) -> bool:
         """Return whether recent routing state can benefit from faster charge correction."""
@@ -448,6 +528,33 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             0,
             NumberMode.BOX,
             True,
+        )
+        self.p1_spike_filter = ZendureSwitch(self, "p1_spike_filter", self._update_p1_spike_filter, value=False)
+        self.p1_spike_filter_threshold = ZendureRestoreNumber(
+            self,
+            "p1_spike_filter_threshold",
+            None,
+            None,
+            "W",
+            "power",
+            3000,
+            0,
+            NumberMode.BOX,
+            True,
+            initial_value=800,
+        )
+        self.p1_spike_filter_duration = ZendureRestoreNumber(
+            self,
+            "p1_spike_filter_duration",
+            None,
+            None,
+            "s",
+            "duration",
+            60,
+            0,
+            NumberMode.BOX,
+            True,
+            initial_value=3,
         )
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalAvailableKwh = ZendureSensor(self, "total_available_kwh", None, "kWh", "energy_storage", None, 1)
@@ -1150,17 +1257,21 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if ZendureManager.simulation:
             self.writeSimulation(time, p1)
 
+        spike_suppressed, spike_confirmed = self._evaluate_p1_spike_filter(p1, time)
+        if spike_suppressed:
+            return
+
         fast_charge_lag_correction = self._should_fast_track_charge_lag_p1(p1, time)
 
         # Check for fast delay
-        if time < self.zero_fast and not fast_charge_lag_correction:
+        if time < self.zero_fast and not fast_charge_lag_correction and not spike_confirmed:
             _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
             self.p1_history.append(p1)
             return
 
         # calculate the standard deviation
         if len(self.p1_history) > 1:
-            avg = int(sum(self.p1_history) / len(self.p1_history))
+            avg = self._p1_history_average()
             stddev = SmartMode.P1_STDDEV_FACTOR * max(
                 SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
             )
@@ -1171,11 +1282,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_history.append(p1)
 
         # check minimal time between updates
-        if isFast or fast_charge_lag_correction or time > self.zero_next:
+        if isFast or fast_charge_lag_correction or spike_confirmed or time > self.zero_next:
             try:
                 # prevent updates during power distribution changes
                 self._reset_power_distribution_state()
-                await self.powerChanged(p1, isFast or fast_charge_lag_correction, time)
+                await self.powerChanged(p1, isFast or fast_charge_lag_correction or spike_confirmed, time)
             except Exception as err:
                 _LOGGER.error(err)
                 _LOGGER.error(traceback.format_exc())

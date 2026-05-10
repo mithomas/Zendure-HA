@@ -95,6 +95,12 @@
       "discharge_recovery_margin": {
         "name": "Ontlaadherstelmarge"
       },
+      "p1_spike_filter_threshold": {
+        "name": "P1-piekfilterdrempel"
+      },
+      "p1_spike_filter_duration": {
+        "name": "P1-piekfilterduur"
+      },
       "min_soc": {
         "name": "SOC Minimaal"
       },
@@ -444,6 +450,9 @@
     },
     "smart_mode": {
       "name": "Slimme modus"
+    },
+    "p1_spike_filter": {
+      "name": "P1-piekfilter"
     },
     "fanmode": {
       "name": "Slimme Koelventilator"

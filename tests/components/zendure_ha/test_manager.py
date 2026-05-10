@@ -6177,6 +6177,108 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_awaited_once_with(-300)
 
 
+class TestP1SpikeFilter:
+    """Verify optional short upward P1 spike suppression."""
+
+    SPIKE_POWER = 1000
+    DEFAULT_THRESHOLD = 800
+    HIGH_THRESHOLD = 1200
+    DEFAULT_DURATION = 3
+
+    @staticmethod
+    def _enable_spike_filter(
+        manager, *, threshold: int = DEFAULT_THRESHOLD, duration: float = DEFAULT_DURATION
+    ) -> None:
+        manager.p1_history.clear()
+        manager.p1_history.extend([0, 0])
+        manager.p1_spike_filter.update_value(1)
+        manager.p1_spike_filter_threshold.update_value(threshold)
+        manager.p1_spike_filter_duration.update_value(duration)
+
+    async def test_suppresses_upward_spike_before_duration(self, hass):
+        manager = make_manager(hass)
+        self._enable_spike_filter(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+
+        manager.powerChanged.assert_not_awaited()
+        assert list(manager.p1_history) == [0, 0]
+        assert manager.p1_spike_candidate is not None
+
+    async def test_processes_sustained_spike_after_duration(self, hass):
+        manager = make_manager(hass)
+        self._enable_spike_filter(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+        candidate = manager.p1_spike_candidate
+        assert candidate is not None
+        manager.p1_spike_candidate = type(candidate)(
+            baseline=candidate.baseline,
+            started=datetime.now() - timedelta(seconds=4),
+        )
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+
+        manager.powerChanged.assert_awaited_once()
+        await_args = manager.powerChanged.await_args
+        assert await_args is not None
+        assert await_args.args[0] == self.SPIKE_POWER
+        assert await_args.args[1] is True
+        assert manager.p1_spike_candidate is None
+
+    async def test_drops_spike_candidate_when_reading_returns_before_duration(self, hass):
+        manager = make_manager(hass)
+        self._enable_spike_filter(manager)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+        await manager._p1_changed(make_p1_event(0))
+
+        manager.powerChanged.assert_awaited_once()
+        await_args = manager.powerChanged.await_args
+        assert await_args is not None
+        assert await_args.args[0] == 0
+        assert manager.p1_spike_candidate is None
+
+    async def test_uses_configured_threshold(self, hass):
+        manager = make_manager(hass)
+        self._enable_spike_filter(manager, threshold=self.HIGH_THRESHOLD)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+
+        manager.powerChanged.assert_awaited_once()
+        assert manager.p1_spike_candidate is None
+
+    async def test_filter_switch_off_preserves_existing_p1_handling(self, hass):
+        manager = make_manager(hass)
+        manager.p1_history.clear()
+        manager.p1_history.extend([0, 0])
+        manager.p1_spike_filter.update_value(0)
+        manager.p1_spike_filter_threshold.update_value(self.DEFAULT_THRESHOLD)
+        manager.p1_spike_filter_duration.update_value(self.DEFAULT_DURATION)
+        manager.powerChanged = AsyncMock()
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+
+        manager.powerChanged.assert_awaited_once()
+        assert manager.p1_spike_candidate is None
+
+    async def test_turning_filter_off_clears_pending_candidate(self, hass):
+        manager = make_manager(hass)
+        self._enable_spike_filter(manager)
+
+        await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
+        assert manager.p1_spike_candidate is not None
+
+        await manager.p1_spike_filter.async_turn_off()
+
+        assert manager.p1_spike_filter.is_on is False
+        assert manager.p1_spike_candidate is None
+
+
 class TestP1ChargeLagFastPath:
     """Verify active charge correction can bypass normal P1 debounce."""
 
