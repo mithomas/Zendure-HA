@@ -497,7 +497,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.discharge_bypass = 0
         self.idle: list[ZendureDevice] = []
         self.produced = 0
-        self.pwr_low = 0
 
     def _reset_power_distribution_state(self) -> None:
         """Reset per-cycle distribution state before computing a new routing pass."""
@@ -983,7 +982,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         if self.charge_time == datetime.max:
             self.charge_time = time + timedelta(seconds=CHARGE_HOLDOFF_SECONDS)
-            self.pwr_low = 0
 
         return setpoint if allow_charge else 0
 
@@ -1026,22 +1024,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             optimal += device.charge_optimal
             weight += device.pwr_max * (100 - device.electricLevel.asInt)
         return limit, optimal, weight
-
-    def _apply_first_device_hysteresis(self, pwr: int, device: ZendureDevice, *, discharging: bool) -> int:
-        """Apply first-device startup smoothing hysteresis and return the (possibly zeroed) power."""
-        if discharging:
-            delta = device.discharge_start * 1.5 - pwr
-            if delta <= 0:
-                self.pwr_low = 0
-            else:
-                self.pwr_low += int(delta)
-            return 0 if self.pwr_low > device.discharge_optimal else pwr
-        delta = device.charge_start * 1.5 - pwr
-        if delta >= 0:
-            self.pwr_low = 0
-        else:
-            self.pwr_low += int(-delta)
-        return 0 if self.pwr_low < device.charge_optimal else pwr
 
     @staticmethod
     def _collect_charge_candidates(
@@ -1161,9 +1143,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 pwr = max(setpoint - limit, 0)
             pwr = min(pwr, setpoint, cap)
 
-            if len(devices) > 1 and i == 0 and d.state != DeviceState.SOCFULL:
-                pwr = self._apply_first_device_hysteresis(pwr, d, discharging=True)
-
             targets[d] += pwr
             setpoint -= pwr
             dev_start += 1 if pwr != 0 and d.electricLevel.asInt + 3 < idle_lvlmax else 0
@@ -1186,7 +1165,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     await d.power_discharge(SmartMode.POWER_START)
                 if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                     break
-        self.pwr_low = 0
 
     async def _async_update_data(self) -> None:
 
@@ -2023,9 +2001,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if limit > setpoint - pwr:
                 pwr = max(setpoint - limit, setpoint, d.pwr_max)
 
-            if len(charge_devices) > 1 and i == 0:
-                pwr = self._apply_first_device_hysteresis(pwr, d, discharging=False)
-
             target = charge_targets.get(d, 0) if charge_targets is not None else 0
             if fallback_devices is None or d in fallback_devices:
                 target += pwr
@@ -2057,7 +2032,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
             if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                 break
-        self.pwr_low: int = 0
 
     async def _apply_standard_home_output(
         self, setpoint: int, routing: _PowerRoutingSnapshot, *, produced_only: bool = False
@@ -2250,7 +2224,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Reset charge hysteresis state before switching to home output."""
         if self.charge_time != datetime.max:
             self.charge_time = datetime.max
-            self.pwr_low = 0
 
     async def _stop_charging_for_home_output(
         self,

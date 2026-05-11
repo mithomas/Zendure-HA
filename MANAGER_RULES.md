@@ -91,7 +91,6 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 | Charge holdoff | 2 s | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
 | Charge debounce | 4 s | Delays charge mode when it would zero active PV floor | PV floor may drop briefly before recovery; visible power dips |
 | Spike filter threshold | 800 W | Ignores sudden P1 spikes from appliance inrush | False positives cause overcorrection to transient loads |
-| First-device hysteresis | ±10 W | Prevents the first device in allocation order from hunting | Faster hunting on marginal loads; may cause flicker in graphs |
 
 ### Adjustment guidance
 
@@ -101,7 +100,6 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 
 **Higher risk:**
 - Lowering spike filter threshold below typical appliance inrush (kettles, AC compressors).
-- Removing first-device hysteresis entirely.
 
 **No effect:**
 - Faster P1 polling — commands are already sent immediately once the setpoint is computed. Delays are intentional, not latency.
