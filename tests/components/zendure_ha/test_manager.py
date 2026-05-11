@@ -2504,41 +2504,11 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, -250, start)
 
-        manager.charge.clear()
-        manager.charge_limit = 0
-        manager.charge_optimal = 0
-        manager.charge_weight = 0
-        manager.discharge.clear()
-        manager.discharge_bypass = 0
-        manager.discharge_limit = 0
-        manager.discharge_optimal = 0
-        manager.discharge_produced = 0
-        manager.discharge_weight = 0
-        manager.idle.clear()
-        manager.idle_lvlmax = 0
-        manager.idle_lvlmin = 100
-        manager.produced = 0
-        for fg in manager.fuseGroups:
-            fg.initPower = True
+        manager._reset_power_distribution_state()
 
         await _run_prepared_power_routing(manager, -250, start + timedelta(seconds=SmartMode.TIMEZERO - 1))
 
-        manager.charge.clear()
-        manager.charge_limit = 0
-        manager.charge_optimal = 0
-        manager.charge_weight = 0
-        manager.discharge.clear()
-        manager.discharge_bypass = 0
-        manager.discharge_limit = 0
-        manager.discharge_optimal = 0
-        manager.discharge_produced = 0
-        manager.discharge_weight = 0
-        manager.idle.clear()
-        manager.idle_lvlmax = 0
-        manager.idle_lvlmin = 100
-        manager.produced = 0
-        for fg in manager.fuseGroups:
-            fg.initPower = True
+        manager._reset_power_distribution_state()
 
         await _run_prepared_power_routing(manager, -250, start + timedelta(seconds=SmartMode.TIMEZERO))
 
@@ -6630,7 +6600,7 @@ class TestP1SpikeFilter:
 
         _prepare_mock(manager).assert_not_called()
         assert list(manager.p1_history) == [0, 0]
-        assert manager.p1_spike_candidate is not None
+        assert manager.p1_spike_started is not None
 
     async def test_fast_change_routes_sustained_spike_after_duration(self, hass):
         manager = make_manager(hass)
@@ -6641,12 +6611,8 @@ class TestP1SpikeFilter:
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
         assert list(manager.p1_history) == [0, 0]
-        candidate = manager.p1_spike_candidate
-        assert candidate is not None
-        manager.p1_spike_candidate = type(candidate)(
-            baseline=candidate.baseline,
-            started=datetime.now() - timedelta(seconds=4),
-        )
+        assert manager.p1_spike_started is not None
+        manager.p1_spike_started = datetime.now() - timedelta(seconds=4)
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
@@ -6654,7 +6620,7 @@ class TestP1SpikeFilter:
         await_args = _prepare_mock(manager).call_args
         assert await_args is not None
         assert await_args.args[0] == self.SPIKE_POWER
-        assert manager.p1_spike_candidate is None
+        assert manager.p1_spike_started is None
         assert list(manager.p1_history) == [self.SPIKE_POWER]
 
     async def test_drops_spike_candidate_when_reading_returns_before_duration(self, hass):
@@ -6669,7 +6635,7 @@ class TestP1SpikeFilter:
         await_args = _prepare_mock(manager).call_args
         assert await_args is not None
         assert await_args.args[0] == 0
-        assert manager.p1_spike_candidate is None
+        assert manager.p1_spike_started is None
 
     async def test_uses_configured_threshold(self, hass):
         manager = make_manager(hass)
@@ -6679,7 +6645,7 @@ class TestP1SpikeFilter:
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
         _prepare_mock(manager).assert_called_once()
-        assert manager.p1_spike_candidate is None
+        assert manager.p1_spike_started is None
 
     async def test_filter_switch_off_preserves_existing_p1_handling(self, hass):
         manager = make_manager(hass)
@@ -6693,19 +6659,19 @@ class TestP1SpikeFilter:
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
 
         _prepare_mock(manager).assert_called_once()
-        assert manager.p1_spike_candidate is None
+        assert manager.p1_spike_started is None
 
     async def test_turning_filter_off_clears_pending_candidate(self, hass):
         manager = make_manager(hass)
         self._enable_spike_filter(manager)
 
         await manager._p1_changed(make_p1_event(self.SPIKE_POWER))
-        assert manager.p1_spike_candidate is not None
+        assert manager.p1_spike_started is not None
 
         await manager.spike_filter.async_turn_off()
 
         assert manager.spike_filter.is_on is False
-        assert manager.p1_spike_candidate is None
+        assert manager.p1_spike_started is None
 
 
 class TestP1ChargeLagFastPath:
@@ -6716,7 +6682,6 @@ class TestP1ChargeLagFastPath:
         now = datetime.now()
         manager.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
         manager.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
-        manager.p1_last_update = now - SmartMode.P1_MIN_UPDATE
         manager.p1_charge_lag_last_update = now - SmartMode.P1_MIN_UPDATE
 
     @pytest.mark.parametrize("p1_value", [pytest.param(150, id="import"), pytest.param(-100, id="export")])
@@ -6852,7 +6817,6 @@ class TestP1ChargeLagFastPath:
             primary_device_id=device.deviceId,
         )
         self._block_normal_p1_debounce(manager)
-        manager.p1_last_update = datetime.now()
         _mock_prepared_power_routing(manager)
 
         await manager._p1_changed(make_p1_event(150))
@@ -7218,3 +7182,151 @@ class TestNearFullChargeTaper:
         device.power_discharge.assert_awaited_once()
         called_power = device.power_discharge.call_args[0][0]
         assert called_power > 0
+
+
+class TestChargeHoldoffTimers:
+    """Verify the anti-oscillation charge holdoff uses the correct timer values."""
+
+    @pytest.mark.parametrize(
+        "charge_last_age_seconds, expected_holdoff_seconds",
+        [
+            pytest.param(400, 2, id="idle_2s_when_last_charge_was_long_ago"),
+            pytest.param(60, 60, id="recent_60s_when_last_charge_was_within_5_minutes"),
+        ],
+    )
+    def test_holdoff_duration_matches_recency(
+        self, hass, charge_last_age_seconds: int, expected_holdoff_seconds: int
+    ) -> None:
+        """Holdoff is 2 s after a long idle, 60 s after a recent charge session."""
+        from custom_components.zendure_ha.manager import CHARGE_HOLDOFF_IDLE_SECONDS, CHARGE_HOLDOFF_RECENT_SECONDS, CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS
+
+        assert CHARGE_HOLDOFF_IDLE_SECONDS == 2
+        assert CHARGE_HOLDOFF_RECENT_SECONDS == 60
+        assert CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS == 300
+
+        device = make_device(hass, device_id="holdoff-timer-device", device_name="holdoff timer device", level=50)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING)
+
+        now = datetime.now()
+        manager.charge_last = now - timedelta(seconds=charge_last_age_seconds)
+
+        # Trigger the holdoff by requesting charge while charge_time==datetime.max
+        manager._apply_charge_holdoff(-200, now, allow_charge=True)
+
+        elapsed = (manager.charge_time - now).total_seconds()
+        assert abs(elapsed - expected_holdoff_seconds) < 1
+
+
+class TestLowSocImmediatePromotion:
+    """Idle devices in low-SoC states are promoted to charging without waiting for a surplus threshold."""
+
+    @pytest.mark.parametrize("level, state", LOW_SOC_DEVICE_CASES)
+    async def test_idle_low_soc_device_is_promoted_to_charging_immediately(self, hass, level, state):
+        """An idle empty or at-reserve device should receive a charge command even if the surplus is small."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="low-soc-primary",
+            device_name="low soc primary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=15,
+            soc_set=100,
+            home_output=100,
+            battery_input=100,
+        )
+        idle_low = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="low-soc-idle-secondary",
+            device_name="low soc idle secondary",
+            product_model="SolarFlow 800 Pro",
+            level=level,
+            min_soc=5,
+            reserve=15,
+            soc_set=100,
+            battery_input=800,
+        )
+        assert idle_low.state is state
+
+        manager = make_manager(
+            hass,
+            devices=(primary, idle_low),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        idle_low.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        idle_low.power_charge = AsyncMock(side_effect=lambda power: power)
+        idle_low.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        # Small surplus — well below the startup threshold for a normal idle device.
+        await _run_prepared_power_routing(manager, -50, datetime.now())
+
+        idle_low.power_charge.assert_awaited_once()
+        charged = idle_low.power_charge.call_args[0][0]
+        assert charged < 0
+
+
+class TestPrimaryNoLocalSolarDefers:
+    """Primary that has no local solar defers charge allocation to a secondary with surplus."""
+
+    async def test_primary_without_local_solar_defers_charge_to_secondary_with_surplus(self, hass):
+        """
+        When the primary is charging but has no local solar of its own and a secondary
+        has its own PV surplus, the charge allocation shifts to the secondary.
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="no-solar-primary",
+            device_name="no solar primary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_input=300,  # currently charging from grid — no local solar
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="local-solar-secondary",
+            device_name="local solar secondary",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            battery_input=300,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.now() + timedelta(seconds=30),  # holdoff active
+            charge_devices=(primary,),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -300, datetime.now())
+
+        # Primary should be zeroed; secondary absorbs the local surplus.
+        primary.power_charge.assert_awaited_once_with(0)
+        secondary.power_charge.assert_awaited_once()
+        secondary_target = secondary.power_charge.call_args[0][0]
+        assert secondary_target < 0

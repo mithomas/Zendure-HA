@@ -49,7 +49,7 @@ Primary-aware modes follow the same rules but prefer the selected primary device
 | `MATCHING`           | Discharge                                  | Charge                             |
 | `MATCHING_DISCHARGE` | Discharge                                  | No action                          |
 | `MATCHING_CHARGE`    | PV pass-through only; no battery discharge | Charge                             |
-| `STORE_SOLAR`        | PV pass-through only; no battery discharge | Charge                             |
+| `STORE_SOLAR`        | All home output stopped; no pass-through   | Charge                             |
 | `MANUAL`             | Use configured manual power target         | Use configured manual power target |
 
 ## Discharge Routing (Grid Demand)
@@ -66,7 +66,9 @@ Apply sources in priority order, stopping when demand is covered:
 
 **Primary unavailability:** if the primary is offline, empty, at reserve, recovering, or at its discharge limit, remaining demand falls through to secondary devices.
 
-> **Edge case — SF800 Pro at zero:** an SF800 Pro with a full battery receives a bypass command instead of a zero-watt discharge command when no output is needed from it.
+> **Note:** recovering devices are excluded from the produced-floor allocation in discharge routing to prevent them from holding a floor they might not sustain.
+
+> **Edge case — bypass at zero:** a device that supports bypass and has a full battery receives a bypass command instead of a zero-watt discharge command when no output is needed from it.
 
 ## Charge Routing (Grid Surplus)
 
@@ -78,28 +80,47 @@ Apply sources in priority order, stopping when demand is covered:
 6. **Primary with no local solar defers to secondaries:** if the primary is charging but has no solar of its own to contribute (it would draw from the grid to charge), and a secondary has its own solar available, the charge allocation shifts to that secondary instead.
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
 
-> **Anti-oscillation:** entering charge mode sets a hold timer that suppresses any immediate flip back to discharge. The timer is 2 s if the previous charge session ended more than 5 minutes ago, or 60 s otherwise. In primary-aware mode an additional short delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home.
+> **Anti-oscillation:** entering charge mode sets a hold timer that suppresses any immediate flip back to discharge. The timer is 2 s if the previous charge session ended more than 5 minutes ago, or 60 s otherwise. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home.
 
 ## Near-full Charge Taper
 
-To prevent hardware-level PV curtailment near the configured target, the SF800 Pro applies a software charge cap once SoC enters the taper range below `socSet`. The cap reduces the charge rate in steps as SoC rises:
+To prevent hardware-level PV curtailment near the configured target SoC, devices with charge taper support apply a software charge cap once SoC enters the taper range. The cap reduces the charge rate in steps as SoC rises:
 
-| SoC band relative to `socSet` | Example at `socSet = 80 %` | Max charge rate  |
-|--------------------------------|----------------------------|------------------|
-| `socSet - 6` through `socSet - 5` | 74 – 75 %                  | 200 W            |
-| `socSet - 4` through `socSet - 3` | 76 – 77 %                  | 150 W            |
-| `socSet - 2` through `socSet - 1` | 78 – 79 %                  | 100 W            |
-| At or above `socSet`             | 80 % or above              | Bypass (SOCFULL) |
+| SoC band relative to target | Example at target = 80 % | Max charge rate |
+|-----------------------------|--------------------------|------------------|
+| target − 6 through target − 5 | 74 – 75 %                | 200 W            |
+| target − 4 through target − 3 | 76 – 77 %                | 150 W            |
+| target − 2 through target − 1 | 78 – 79 %                | 100 W            |
+| At or above target            | 80 % or above            | Bypass (full)    |
 
-The taper uses the `SOCNEARLYFULL` device state (rather than `ACTIVE`/`INACTIVE`), but is otherwise treated as a normal chargeable state:
+The taper uses the near-full device state, but is otherwise treated as a normal chargeable state:
 
-- **Charge is allowed** but capped at the taper rate via `effective_charge_limit`.
-- **Bypass is not triggered.** Bypass (pass-through via `power_bypass`) is reserved for `SOCFULL`. A near-full device receives normal charge commands, not a bypass command.
-- **Sensors expose near-full distinctly.** The device state sensor reports `SOCNEARLYFULL`, and the SoC Limit sensor reports `Nearly full` rather than `Full`.
+- **Charge is allowed** but capped at the taper rate via the effective charge limit.
+- **Bypass is not triggered.** Bypass is reserved for the full state. A near-full device receives normal charge commands, not a bypass command.
 - **Discharge is unrestricted.** The taper does not block battery discharge.
 - **Overflow is routed normally.** Capping charge at the taper rate reduces the surplus that the device will absorb. The remaining surplus is distributed to other sinks (home load → other batteries → grid export) through the normal routing logic — no special overflow handling is needed.
 - **"Keep local PV local" is suspended.** When a device is near-full, its charge cap may prevent it from absorbing all its own PV. Excess PV is routed outward rather than being withheld.
-- **Drop-back.** If SoC falls more than 6 percentage points below `socSet` (e.g. during active discharge), `taper_charge_limit` returns `None`, the state returns to `INACTIVE` or `ACTIVE`, and the full charge rate is restored automatically.
+- **Drop-back.** If SoC falls more than 6 percentage points below the target (e.g. during active discharge), the taper is removed, the state returns to normal, and the full charge rate is restored automatically.
+
+## Mode Mechanics
+
+### Zero-setpoint charge path
+
+When P1 is exactly zero the grid is balanced and there is neither demand nor surplus. `MATCHING` treats this as a discharge situation and dispatches to the home-output executor, which leaves any active charging untouched.
+
+`STORE_SOLAR`, `MATCHING_CHARGE`, and `MANUAL` instead dispatch to the charge executor with a budget of zero. The charge executor explicitly commands every device to stop charging (`power_charge(0)`). This ensures that a device which was actively charging from a previous cycle receives a stop command rather than silently continuing until the next non-zero P1 reading arrives.
+
+### Strict output stop
+
+`STORE_SOLAR` uses strict output stop. In strict mode the manager stops all home output — including devices that are actively bypassing — before issuing any charge commands in the same cycle. In non-strict modes, devices already serving home output are only stopped when they need to change direction.
+
+### MANUAL mode is primary-aware
+
+`MANUAL` mode follows the same primary-aware executor ordering as `MATCHING`. When a primary device is selected, charge and home-output commands prefer the primary before falling through to secondaries.
+
+### Off-grid output at zero
+
+When a device with active off-grid production is stopped (commanded to zero home output), it receives a small negative command rather than zero to prevent off-grid production from being drawn from the grid. This is transparent to the routing rules above.
 
 ## Grid Demand During Charge Lag
 
@@ -118,7 +139,7 @@ The taper uses the `SOCNEARLYFULL` device state (rather than `ACTIVE`/`INACTIVE`
 ## Startup and Stability
 
 - Idle devices are started only when the remaining target exceeds the startup power threshold. Exception: empty, at-reserve, and recovering devices are promoted to charging immediately, without waiting for the surplus to reach the threshold.
-- Fast grid-meter changes are debounced through normal timing windows, except that primary-device changes trigger immediate routing recomputation. A reading is considered fast (and triggers immediate routing) when it deviates from the recent average by more than 3.5× the standard deviation of recent readings, with a minimum threshold of 15 W. For example, if recent readings average 100 W with a standard deviation of 10 W, the threshold is 35 W — a new reading of 140 W triggers immediately, a reading of 130 W does not. If readings are very stable (stddev below 15 W), the 15 W minimum applies, giving a fixed threshold of 52 W.
+- Fast grid-meter changes are debounced through normal timing windows, except that primary-device changes trigger immediate routing recomputation. A reading is considered fast (and triggers immediate routing) when it deviates from the recent average or from the most recent reading by more than 3.5× the standard deviation of recent readings, with a minimum threshold of 15 W. For example, if recent readings average 100 W with a standard deviation of 10 W, the threshold is 35 W — a new reading of 140 W triggers immediately, a reading of 130 W does not. If readings are very stable (stddev below 15 W), the 15 W minimum applies, giving a fixed threshold of 52 W.
 - The optional P1 spike filter can be enabled through the manager switch. While enabled, upward P1 jumps above the configured threshold are held for the configured duration; if the jump falls back before the duration expires, it is ignored and not added to the recent P1 history.
 - Active charge-lag corrections that bypass normal timing still respect the minimum grid-meter update interval.
 - Around zero grid flow, prefer a small export or missed charge opportunity over switching a home-serving primary into charge mode and causing grid import.
