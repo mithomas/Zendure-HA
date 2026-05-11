@@ -56,9 +56,7 @@ PV_CHARGE_FIRST_OPERATIONS = {
 }
 
 P1_CHARGE_LAG_FAST_DEVIATION = 20
-CHARGE_HOLDOFF_IDLE_SECONDS = 2
-CHARGE_HOLDOFF_RECENT_SECONDS = 60
-CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS = 300
+CHARGE_HOLDOFF_SECONDS = 2
 
 P1_CHARGE_LAG_FAST_OPERATIONS = {
     ManagerMode.MATCHING,
@@ -493,7 +491,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.charge: list[ZendureDevice] = []
         self.charge_time = datetime.max
-        self.charge_last = datetime.min
         self.charge_debounce_since: datetime | None = None
 
         self.discharge: list[ZendureDevice] = []
@@ -985,10 +982,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return setpoint
 
         if self.charge_time == datetime.max:
-            recent_charge = (time - self.charge_last).total_seconds() <= CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS
-            delay = CHARGE_HOLDOFF_RECENT_SECONDS if recent_charge else CHARGE_HOLDOFF_IDLE_SECONDS
-            self.charge_time = time + timedelta(seconds=delay)
-            self.charge_last = self.charge_time
+            self.charge_time = time + timedelta(seconds=CHARGE_HOLDOFF_SECONDS)
             self.pwr_low = 0
 
         return setpoint if allow_charge else 0

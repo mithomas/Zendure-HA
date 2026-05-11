@@ -7267,34 +7267,22 @@ class TestNearFullChargeTaper:
 class TestChargeHoldoffTimers:
     """Verify the anti-oscillation charge holdoff uses the correct timer values."""
 
-    @pytest.mark.parametrize(
-        "charge_last_age_seconds, expected_holdoff_seconds",
-        [
-            pytest.param(400, 2, id="idle_2s_when_last_charge_was_long_ago"),
-            pytest.param(60, 60, id="recent_60s_when_last_charge_was_within_5_minutes"),
-        ],
-    )
-    def test_holdoff_duration_matches_recency(
-        self, hass, charge_last_age_seconds: int, expected_holdoff_seconds: int
-    ) -> None:
-        """Holdoff is 2 s after a long idle, 60 s after a recent charge session."""
-        from custom_components.zendure_ha.manager import CHARGE_HOLDOFF_IDLE_SECONDS, CHARGE_HOLDOFF_RECENT_SECONDS, CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS
+    def test_holdoff_duration_is_two_seconds(self, hass) -> None:
+        """Holdoff is always 2 s."""
+        from custom_components.zendure_ha.manager import CHARGE_HOLDOFF_SECONDS
 
-        assert CHARGE_HOLDOFF_IDLE_SECONDS == 2
-        assert CHARGE_HOLDOFF_RECENT_SECONDS == 60
-        assert CHARGE_HOLDOFF_RECENT_WINDOW_SECONDS == 300
+        assert CHARGE_HOLDOFF_SECONDS == 2
 
         device = make_device(hass, device_id="holdoff-timer-device", device_name="holdoff timer device", level=50)
         manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING)
 
         now = datetime.now()
-        manager.charge_last = now - timedelta(seconds=charge_last_age_seconds)
 
         # Trigger the holdoff by requesting charge while charge_time==datetime.max
         manager._apply_charge_holdoff(-200, now, allow_charge=True)
 
         elapsed = (manager.charge_time - now).total_seconds()
-        assert abs(elapsed - expected_holdoff_seconds) < 1
+        assert abs(elapsed - 2) < 1
 
 
 class TestLowSocImmediatePromotion:

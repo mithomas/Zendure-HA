@@ -80,7 +80,31 @@ Apply sources in priority order, stopping when demand is covered:
 6. **Primary with no local solar defers to secondaries:** if the primary is charging but has no solar of its own to contribute (it would draw from the grid to charge), and a secondary has its own solar available, the charge allocation shifts to that secondary instead.
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
 
-> **Anti-oscillation:** entering charge mode sets a hold timer that suppresses any immediate flip back to discharge. The timer is 2 s if the previous charge session ended more than 5 minutes ago, or 60 s otherwise. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home.
+> **Anti-oscillation:** entering charge mode sets a 2 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home.
+
+## Anti-oscillation Controls
+
+The manager deliberately slows P1 convergence to prevent hunting. Each control protects against a specific failure mode at the cost of slower response.
+
+| Control | Default | Purpose | Trade-off of Reducing |
+|---------|---------|---------|----------------------|
+| Charge holdoff | 2 s | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
+| Charge debounce | 4 s | Delays charge mode when it would zero active PV floor | PV floor may drop briefly before recovery; visible power dips |
+| Spike filter threshold | 800 W | Ignores sudden P1 spikes from appliance inrush | False positives cause overcorrection to transient loads |
+| First-device hysteresis | ±10 W | Prevents the first device in allocation order from hunting | Faster hunting on marginal loads; may cause flicker in graphs |
+
+### Adjustment guidance
+
+**Lower risk:**
+- Reducing charge holdoff from 2 s to 1 s — safe if load transients are infrequent.
+- Reducing charge debounce from 4 s to 2 s — minor risk of PV floor zeroing.
+
+**Higher risk:**
+- Lowering spike filter threshold below typical appliance inrush (kettles, AC compressors).
+- Removing first-device hysteresis entirely.
+
+**No effect:**
+- Faster P1 polling — commands are already sent immediately once the setpoint is computed. Delays are intentional, not latency.
 
 ## Near-full Charge Taper
 
