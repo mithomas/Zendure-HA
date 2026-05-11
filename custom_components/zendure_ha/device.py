@@ -415,7 +415,7 @@ class ZendureDevice(EntityDevice):
         """Return current locally produced surplus that can stay on this device for charging."""
         if not self.online or self.effective_charge_limit >= 0:
             return 0
-        if self.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}:
+        if self.state in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}:
             return 0
         return min(-self.effective_charge_limit, max(0, -self.pwr_produced - max(0, self.homeOutput.asInt)))
 

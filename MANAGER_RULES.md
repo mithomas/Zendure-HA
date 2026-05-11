@@ -49,7 +49,7 @@ Primary-aware modes follow the same rules but prefer the selected primary device
 | `MATCHING`           | Discharge                                  | Charge                             |
 | `MATCHING_DISCHARGE` | Discharge                                  | No action                          |
 | `MATCHING_CHARGE`    | PV pass-through only; no battery discharge | Charge                             |
-| `STORE_SOLAR`        | All home output stopped; no pass-through   | Charge                             |
+| `STORE_SOLAR`        | Home output stopped for non-full devices; full devices pass through | Charge                             |
 | `MANUAL`             | Use configured manual power target         | Use configured manual power target |
 
 ## Discharge Routing (Grid Demand)
@@ -112,7 +112,7 @@ When P1 is exactly zero the grid is balanced and there is neither demand nor sur
 
 ### Strict output stop
 
-`STORE_SOLAR` uses strict output stop. In strict mode the manager stops all home output — including devices that are actively bypassing — before issuing any charge commands in the same cycle. In non-strict modes, devices already serving home output are only stopped when they need to change direction.
+`STORE_SOLAR` uses strict output stop. In strict mode the manager stops home output for all non-full devices — including devices that are actively bypassing — before issuing any charge commands in the same cycle. Devices in the full state are exempt: their battery cannot accept more charge, so their current PV pass-through is preserved rather than stopped. In non-strict modes, devices already serving home output are only stopped when they need to change direction.
 
 ### MANUAL mode is primary-aware
 

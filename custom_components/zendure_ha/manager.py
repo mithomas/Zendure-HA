@@ -1756,6 +1756,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # stop discharging devices
         for d in self.discharge:
+            # full devices have nowhere to store PV; keep their pass-through running
+            if strict_output_stop and d.state == DeviceState.SOCFULL:
+                continue
             # avoid stopping bypassing devices
             if not strict_output_stop and d.byPass.is_on:
                 continue
@@ -1934,6 +1937,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if charge_targets.get(d, 0) != 0:
                 continue
             if not strict_output_stop and active_discharge_targets.get(d, 0) > 0:
+                continue
+            # full devices have nowhere to store PV; keep their pass-through running
+            if strict_output_stop and d.state == DeviceState.SOCFULL:
                 continue
             await self._stop_home_output_for_input(d, allow_bypass_zero=not strict_output_stop)
 
