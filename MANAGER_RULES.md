@@ -82,7 +82,7 @@ Apply sources in priority order, stopping when demand is covered:
 6. **Primary with no local solar defers to secondaries:** if the primary is charging but has no solar of its own to contribute (it would draw from the grid to charge), and a secondary has its own solar available, the charge allocation shifts to that secondary instead.
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
 
-> **Anti-oscillation:** entering charge mode sets a 2 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home.
+> **Anti-oscillation:** entering charge mode sets a 2 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home. At zero/export in `MATCHING`, a charging selected primary may preserve its current output and replace measured non-primary PV floors, but must not grow output simply because more local PV is available; that surplus remains available for charging.
 
 ## Anti-oscillation Controls
 
@@ -91,7 +91,8 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 | Control | Default | Purpose | Trade-off of Reducing |
 |---------|---------|---------|----------------------|
 | Charge holdoff | 2 s | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
-| Charge debounce | 4 s | Delays charge mode when it would zero active PV floor | PV floor may drop briefly before recovery; visible power dips |
+| Charge debounce | 4 s | Delays charge mode when it would zero active PV floor, without growing charging selected-primary output during export | PV floor may drop briefly before recovery; visible power dips |
+| Selected-primary export cap | P1 ≤ 0 in `MATCHING` | Preserves current primary output and measured non-primary PV floors while stopping PV-only output growth into grid export | Primary PV may cover import only after a positive P1 reading |
 | Battery-export trim threshold | 100 W export | Lets battery-backed export trim home output without waiting for normal debounce | More zero-flow noise can trigger output trims; stale telemetry can over-trim near zero |
 | Spike filter threshold | 800 W | Ignores sudden P1 spikes from appliance inrush | False positives cause overcorrection to transient loads |
 

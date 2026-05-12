@@ -126,6 +126,8 @@ class _PowerRoutingIntent:
     selected_primary_input: bool
     # True when home output should use the selected-primary executor ordering.
     selected_primary_home_output: bool
+    # True when selected-primary output may increase above its current reported output.
+    selected_primary_output_growth_allowed: bool
     # True when a strong-export cycle may only trim output, never start input.
     trim_home_output_only: bool
 
@@ -1428,12 +1430,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
+        selected_primary_output_growth_allowed = not (
+            selected_primary_routing and self.operation == ManagerMode.MATCHING and p1 <= 0
+        )
         intent = self._power_routing_intent(
             requested_setpoint,
             setpoint,
             policy,
             selected_primary_routing=selected_primary_routing,
             produced_only=produced_only,
+            selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             trim_home_output_only=trim_home_output_only,
         )
 
@@ -1696,6 +1702,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         selected_primary_routing: bool,
         produced_only: bool,
+        selected_primary_output_growth_allowed: bool = True,
         trim_home_output_only: bool = False,
     ) -> _PowerRoutingIntent:
         """Build the compact input-or-home-output decision consumed by the executor."""
@@ -1711,6 +1718,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             strict_home_output_stop=policy.strict_output_stop,
             selected_primary_input=selected_primary_routing and policy.selected_primary_charge,
             selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
+            selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             trim_home_output_only=trim_home_output_only,
         )
 
@@ -1746,6 +1754,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 intent.home_output_budget,
                 routing,
                 produced_only=intent.produced_only_output,
+                selected_primary_output_growth_allowed=intent.selected_primary_output_growth_allowed,
                 trim_home_output_only=intent.trim_home_output_only,
             )
         else:
@@ -2115,6 +2124,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         routing: _PowerRoutingSnapshot,
         *,
         produced_only: bool = False,
+        selected_primary_output_growth_allowed: bool = True,
         trim_home_output_only: bool = False,
     ) -> None:
         """
@@ -2139,6 +2149,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
 
         primary_produced_cap = routing.produced_limit(selected_primary) if selected_primary is not None else 0
+        primary_output_cap = None
+        if (
+            selected_primary is not None
+            and not selected_primary_output_growth_allowed
+            and routing.charge_surplus(selected_primary) > 0
+        ):
+            replaceable_non_primary_floor = sum(
+                routing.route(device).active_produced_home
+                for device in routing.discharge_devices
+                if device is not selected_primary
+            )
+            primary_output_cap = max(0, selected_primary.homeOutput.asInt) + replaceable_non_primary_floor
         primary_bypass_floor = 0
         if (
             selected_primary is not None
@@ -2207,6 +2229,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         primary_target = 0
         if primary is not None and primary_produced_cap > 0 and setpoint > 0:
             primary_target = min(setpoint, primary_produced_cap)
+            if primary_output_cap is not None:
+                primary_target = min(primary_target, primary_output_cap)
             setpoint -= primary_target
 
         produced_targets, setpoint = self._allocate_capped_targets(
@@ -2222,6 +2246,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         if primary is not None and not produced_only and setpoint > 0:
             primary_cap = routing.route(primary).available_discharge_with_produced
+            if primary_output_cap is not None:
+                primary_cap = min(primary_cap, primary_output_cap)
             primary_floor = primary_bypass_floor if primary_target == 0 else primary_target
             primary_battery_cap = max(0, primary_cap - primary_floor)
             additional_primary = min(setpoint, primary_battery_cap)
