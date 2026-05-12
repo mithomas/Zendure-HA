@@ -56,11 +56,17 @@ PV_CHARGE_FIRST_OPERATIONS = {
 }
 
 P1_CHARGE_LAG_FAST_DEVIATION = 20
+P1_EXPORT_TRIM_FAST_DEVIATION = 100
 CHARGE_HOLDOFF_SECONDS = 2
 
 P1_CHARGE_LAG_FAST_OPERATIONS = {
     ManagerMode.MATCHING,
     ManagerMode.MATCHING_CHARGE,
+}
+
+P1_EXPORT_TRIM_FAST_OPERATIONS = {
+    ManagerMode.MATCHING,
+    ManagerMode.MATCHING_DISCHARGE,
 }
 
 LOW_SOC_STATES = {
@@ -120,6 +126,8 @@ class _PowerRoutingIntent:
     selected_primary_input: bool
     # True when home output should use the selected-primary executor ordering.
     selected_primary_home_output: bool
+    # True when a strong-export cycle may only trim output, never start input.
+    trim_home_output_only: bool
 
 
 DEFAULT_ROUTING_POLICY = _RoutingPolicy(
@@ -330,11 +338,7 @@ class _PowerRoutingSnapshot:
         )
         active_serving = active_primary + active_non_primary
         primary_charge_replacement = 0
-        if (
-            self.primary_aware
-            and self.selected_primary is not None
-            and self.selected_primary in self.charge_devices
-        ):
+        if self.primary_aware and self.selected_primary is not None and self.selected_primary in self.charge_devices:
             route = self.route(self.selected_primary)
             device = route.device
             if (
@@ -485,6 +489,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
         self.p1_factor = 1
         self.p1_charge_lag_last_update = datetime.min
+        self.p1_export_trim_last_update = datetime.min
         self.p1_spike_baseline = 0
         self.p1_spike_started: datetime | None = None
         self.update_count = 0
@@ -603,6 +608,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             device.online and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL} and device.charge_limit < 0
             for device in self.devices
         )
+
+    def _should_fast_track_export_trim_p1(self, p1: int, time: datetime) -> bool:
+        """Return whether strong export should bypass debounce to trim battery output."""
+        if (
+            p1 >= -P1_EXPORT_TRIM_FAST_DEVIATION
+            or time - self.p1_export_trim_last_update < SmartMode.P1_MIN_UPDATE
+            or self.operation not in P1_EXPORT_TRIM_FAST_OPERATIONS
+            or not self._selected_primary_routing_enabled()
+        ):
+            return False
+
+        return any(device.reports_battery_backed_home_output() for device in self.devices)
 
     async def loadDevices(self) -> None:
         if (
@@ -1317,15 +1334,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         should_route = force
         charge_lag_fast = False
+        export_trim_fast = False
 
         if not force:
             if self._is_p1_spike_increase(p1, time):
                 return False
 
             charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
+            export_trim_fast = self._should_fast_track_export_trim_p1(p1, time)
 
             # Check for fast delay
-            if time < self.zero_fast and not charge_lag_fast:
+            if time < self.zero_fast and not charge_lag_fast and not export_trim_fast:
                 _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
                 self._record_p1_history(p1)
                 return False
@@ -1333,7 +1352,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             fast_change = self._is_fast_p1_change(p1)
             self._record_p1_history(p1, reset=fast_change)
             # Check minimal time between updates aka debounce.
-            should_route = fast_change or charge_lag_fast or time > self.zero_next
+            should_route = fast_change or charge_lag_fast or export_trim_fast or time > self.zero_next
 
         if not should_route:
             return False
@@ -1341,7 +1360,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         try:
             self._reset_power_distribution_state()
             setpoint = await self._poll_devices_and_prepare_routing_state(p1)
-            intent, routing, setpoint = self._prepare_power_routing(p1, time, setpoint)
+            if export_trim_fast:
+                intent, routing, setpoint = self._prepare_power_routing(
+                    p1,
+                    time,
+                    setpoint,
+                    trim_home_output_only=True,
+                )
+            else:
+                intent, routing, setpoint = self._prepare_power_routing(p1, time, setpoint)
             _LOGGER.info("P1 ======> p1:%s, setpoint:%sW stored:%sW", p1, setpoint, self.produced)
             await self._execute_power_routing(intent, time, routing)
         except Exception as err:
@@ -1354,6 +1381,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             time = datetime.now()
             if charge_lag_fast:
                 self.p1_charge_lag_last_update = time
+            if export_trim_fast:
+                self.p1_export_trim_last_update = time
             self._restore_p1_update_timing(time)
         return True
 
@@ -1362,6 +1391,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         p1: int,
         time: datetime,
         setpoint: int,
+        *,
+        trim_home_output_only: bool = False,
     ) -> tuple[_PowerRoutingIntent, _PowerRoutingSnapshot, int]:
         """Prepare one routing cycle from a polled P1 routing setpoint."""
         policy = self._routing_policy()
@@ -1392,6 +1423,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if self.operation == ManagerMode.MANUAL:
             setpoint = int(self.manualpower.asNumber)
 
+        if trim_home_output_only:
+            setpoint = max(0, setpoint)
+
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
         intent = self._power_routing_intent(
@@ -1400,6 +1434,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             policy,
             selected_primary_routing=selected_primary_routing,
             produced_only=produced_only,
+            trim_home_output_only=trim_home_output_only,
         )
 
         return intent, routing, setpoint
@@ -1661,10 +1696,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         selected_primary_routing: bool,
         produced_only: bool,
+        trim_home_output_only: bool = False,
     ) -> _PowerRoutingIntent:
         """Build the compact input-or-home-output decision consumed by the executor."""
-        route_input = setpoint < 0 or (
-            setpoint == 0 and policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed
+        route_input = not trim_home_output_only and (
+            setpoint < 0
+            or (setpoint == 0 and policy.zero_uses_charge_path and requested_setpoint <= 0 and policy.charge_allowed)
         )
         return _PowerRoutingIntent(
             input_budget=setpoint if route_input else 0,
@@ -1674,6 +1711,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             strict_home_output_stop=policy.strict_output_stop,
             selected_primary_input=selected_primary_routing and policy.selected_primary_charge,
             selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
+            trim_home_output_only=trim_home_output_only,
         )
 
     async def _execute_power_routing(
@@ -1708,6 +1746,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 intent.home_output_budget,
                 routing,
                 produced_only=intent.produced_only_output,
+                trim_home_output_only=intent.trim_home_output_only,
             )
         else:
             await self._apply_standard_home_output(
@@ -1779,7 +1818,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         pv_floors = routing.pv_floor_summary()
         local_charge = routing.local_charge_summary(
             primary,
-            pv_charge_first_mode=self._selected_primary_routing_enabled() and self.operation in PV_CHARGE_FIRST_OPERATIONS,
+            pv_charge_first_mode=self._selected_primary_routing_enabled()
+            and self.operation in PV_CHARGE_FIRST_OPERATIONS,
             include_charge_first_home=allow_home_pv_charge,
         )
         keeps_non_primary_local_charge = (
@@ -2048,7 +2088,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self._reset_home_output_charge_state()
         await self._stop_charging_for_home_output()
 
-        discharge_devices = routing.discharge_candidates(list(self.discharge), list(self.idle), promote_idle_devices=False)
+        discharge_devices = routing.discharge_candidates(
+            list(self.discharge), list(self.idle), promote_idle_devices=False
+        )
         idle_devices = [device for device in self.idle if device not in discharge_devices]
         idle_lvlmax, _idle_lvlmin = self._idle_levels(idle_devices)
         self.operationstate.update_value(
@@ -2068,7 +2110,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         await self._start_idle_discharge_devices(idle_devices, dev_start)
 
     async def _apply_primary_home_output(
-        self, setpoint: int, routing: _PowerRoutingSnapshot, *, produced_only: bool = False
+        self,
+        setpoint: int,
+        routing: _PowerRoutingSnapshot,
+        *,
+        produced_only: bool = False,
+        trim_home_output_only: bool = False,
     ) -> None:
         """
         Apply a home-output budget with selected-primary ordering.
@@ -2212,6 +2259,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         if primary is not None and primary_target > 0:
             await self._command_home_output(primary, primary_target, allow_bypass_zero=True)
+        elif (
+            trim_home_output_only
+            and selected_primary is not None
+            and selected_primary in self.discharge
+            and requested_setpoint == 0
+        ):
+            await self._command_home_output(selected_primary, 0, allow_bypass_zero=True)
 
         await self._command_home_output_targets(command_devices, targets, allow_bypass_zero=True)
 

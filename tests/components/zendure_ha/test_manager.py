@@ -7063,6 +7063,205 @@ class TestP1ChargeLagFastPath:
         _prepare_mock(manager).assert_not_called()
 
 
+class TestP1ExportTrimFastPath:
+    """Verify strong export can trim active battery output without starting charge."""
+
+    @staticmethod
+    def _block_normal_p1_debounce(manager, p1_value: int) -> None:
+        now = datetime.now()
+        manager.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
+        manager.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
+        manager.p1_export_trim_last_update = now - SmartMode.P1_MIN_UPDATE
+        manager.p1_history.clear()
+        manager.p1_history.extend([p1_value, p1_value])
+
+    @pytest.mark.parametrize("operation", [ManagerMode.MATCHING, ManagerMode.MATCHING_DISCHARGE])
+    async def test_strong_export_bypasses_p1_debounce_and_trims_output_without_charging(self, hass, operation):
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-export-trim-primary-{operation.name.lower()}",
+            device_name=f"sf800 pro export trim primary {operation.name.lower()}",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=800,
+            battery_output=700,
+        )
+        primary.solarInput.update_value(100)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-export-trim-recovering-secondary-{operation.name.lower()}",
+            device_name=f"sf800 pro export trim recovering secondary {operation.name.lower()}",
+            product_model="SolarFlow 800 Pro",
+            level=13,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=80,
+        )
+        secondary.solarInput.update_value(90)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=operation,
+            discharge_recovery_margin=5,
+            primary_device_id=primary.deviceId,
+        )
+        self._block_normal_p1_debounce(manager, -650)
+        last_export_trim_update = manager.p1_export_trim_last_update
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        routed = await manager._p1_changed(make_p1_event(-650))
+
+        assert routed is True
+        assert manager.p1_export_trim_last_update > last_export_trim_update
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(150)
+        secondary.power_discharge.assert_awaited_once_with(80)
+
+    async def test_strong_export_trim_to_zero_stays_on_output_path(self, hass):
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-export-trim-zero-primary",
+            device_name="sf800 pro export trim zero primary",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=300,
+            battery_output=300,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        self._block_normal_p1_debounce(manager, -500)
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        routed = await manager._p1_changed(make_p1_event(-500))
+
+        assert routed is True
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(0)
+
+    async def test_small_export_keeps_existing_p1_debounce(self, hass):
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-export-trim-small-export",
+            device_name="sf800 pro export trim small export",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            home_output=800,
+            battery_output=700,
+        )
+        primary.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        self._block_normal_p1_debounce(manager, -100)
+        _mock_prepared_power_routing(manager)
+
+        await manager._p1_changed(make_p1_event(-100))
+
+        _prepare_mock(manager).assert_not_called()
+
+    async def test_pv_only_export_keeps_existing_p1_debounce(self, hass):
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-export-trim-pv-only",
+            device_name="sf800 pro export trim pv only",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            home_output=100,
+            battery_output=0,
+        )
+        primary.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        self._block_normal_p1_debounce(manager, -650)
+        _mock_prepared_power_routing(manager)
+
+        await manager._p1_changed(make_p1_event(-650))
+
+        _prepare_mock(manager).assert_not_called()
+
+    async def test_unsupported_mode_keeps_existing_p1_debounce(self, hass):
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-export-trim-unsupported-mode",
+            device_name="sf800 pro export trim unsupported mode",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            home_output=800,
+            battery_output=700,
+        )
+        primary.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING_CHARGE,
+            primary_device_id=primary.deviceId,
+        )
+        self._block_normal_p1_debounce(manager, -650)
+        _mock_prepared_power_routing(manager)
+
+        await manager._p1_changed(make_p1_event(-650))
+
+        _prepare_mock(manager).assert_not_called()
+
+    async def test_export_trim_fast_path_respects_minimum_p1_interval(self, hass):
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-export-trim-min-interval",
+            device_name="sf800 pro export trim min interval",
+            product_model="SolarFlow 800 Pro",
+            level=80,
+            home_output=800,
+            battery_output=700,
+        )
+        primary.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        self._block_normal_p1_debounce(manager, -650)
+        manager.p1_export_trim_last_update = datetime.now()
+        _mock_prepared_power_routing(manager)
+
+        await manager._p1_changed(make_p1_event(-650))
+
+        _prepare_mock(manager).assert_not_called()
+
+
 class TestZeroFastRecovery:
     """Verify that zero_fast is always restored after power distribution calls."""
 

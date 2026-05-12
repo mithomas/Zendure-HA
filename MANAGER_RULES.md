@@ -28,6 +28,8 @@ Device reserve and recovery state is owned by the device; the manager consumes i
 
 > **Note:** Blocking battery discharge does not block current PV or off-grid output. Devices in any blocked state can still pass whatever power they are currently producing to the home.
 
+> **Note:** Evidence that current home output is battery-backed is owned by the device. The manager may ask a device whether its reported home output appears to include battery power, but must not duplicate that inference from raw telemetry.
+
 ## Routing Pools
 
 Each cycle the manager assigns every online device to exactly one pool. This is separate from device state — state constrains what a device *can* do; the pool reflects what the manager has *assigned* it this cycle.
@@ -46,8 +48,8 @@ Primary-aware modes follow the same rules but prefer the selected primary device
 
 | Mode                 | Positive reading (demand)                  | Negative reading (surplus)         |
 |----------------------|--------------------------------------------|------------------------------------|
-| `MATCHING`           | Discharge                                  | Charge                             |
-| `MATCHING_DISCHARGE` | Discharge                                  | No action                          |
+| `MATCHING`           | Discharge                                  | Charge; strong battery-backed export may trim home output only |
+| `MATCHING_DISCHARGE` | Discharge                                  | No action; strong battery-backed export may trim home output only |
 | `MATCHING_CHARGE`    | PV pass-through only; no battery discharge | Charge                             |
 | `STORE_SOLAR`        | Home output stopped for non-full devices; full devices pass through | Charge                             |
 | `MANUAL`             | Use configured manual power target         | Use configured manual power target |
@@ -90,6 +92,7 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 |---------|---------|---------|----------------------|
 | Charge holdoff | 2 s | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
 | Charge debounce | 4 s | Delays charge mode when it would zero active PV floor | PV floor may drop briefly before recovery; visible power dips |
+| Battery-export trim threshold | 100 W export | Lets battery-backed export trim home output without waiting for normal debounce | More zero-flow noise can trigger output trims; stale telemetry can over-trim near zero |
 | Spike filter threshold | 800 W | Ignores sudden P1 spikes from appliance inrush | False positives cause overcorrection to transient loads |
 
 ### Adjustment guidance
@@ -103,6 +106,20 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 
 **No effect:**
 - Faster P1 polling — commands are already sent immediately once the setpoint is computed. Delays are intentional, not latency.
+
+### Strong Export From Battery Output
+
+*Battery-backed export* is the situation where the grid meter shows a large export while at least one device reports home output that appears to include battery power. This is distinct from PV-only export: PV-only export should not bypass the normal grid-meter debounce because trimming it can create grid import or drop useful self-consumption.
+
+In selected-primary `MATCHING` and `MATCHING_DISCHARGE`, battery-backed export stronger than 100 W may skip the normal fast-delay and debounce so the manager can trim output promptly. This fast path:
+
+1. Uses device-owned battery-backed-output evidence.
+2. Still respects the minimum grid-meter update interval.
+3. Never starts or continues the charge/input path for the fast-track cycle.
+4. Clamps the cycle to a non-negative home-output target.
+5. Sends output-side zero commands when the trim target reaches zero, so an actively discharging device stays in discharge/home-output handling until the next normal calculation.
+
+The fast path is not active in `MATCHING_CHARGE`, `STORE_SOLAR`, `MANUAL`, or `OFF`, and it is not triggered by PV-only home output.
 
 ## Near-full Charge Taper
 

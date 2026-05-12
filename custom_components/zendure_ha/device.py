@@ -411,6 +411,18 @@ class ZendureDevice(EntityDevice):
             and self.homeOutput.asInt > 0
         )
 
+    def reports_battery_backed_home_output(self) -> bool:
+        """Return whether current home output appears to include battery power."""
+        home_output = max(0, self.homeOutput.asInt)
+        if not self.online or home_output <= SmartMode.POWER_TOLERANCE:
+            return False
+
+        if self.batteryOutput.asInt - self.batteryInput.asInt > SmartMode.POWER_TOLERANCE:
+            return True
+
+        produced_evidence = max(0, -self.pwr_produced, self.solarInput.asInt)
+        return home_output - produced_evidence > SmartMode.POWER_TOLERANCE
+
     def current_charge_surplus_limit(self) -> int:
         """Return current locally produced surplus that can stay on this device for charging."""
         if not self.online or self.effective_charge_limit >= 0:
