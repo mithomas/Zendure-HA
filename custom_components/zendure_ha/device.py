@@ -333,6 +333,8 @@ class ZendureDevice(EntityDevice):
                     case "electricLevel" | "minSoc" | "socLimit" | "socReserve" | "socSet":
                         if changed and self.electricLevel.asInt == FULL_SOC_PERCENT:
                             self.nextCalibration.update_value(dt_util.now() + timedelta(days=30))
+                        if key == "minSoc":
+                            self._clear_stale_soc_limit_override_after_min_soc_update()
                         self.refresh_recovery_state()
         except Exception as e:
             _LOGGER.error("EntityUpdate error %s %s %s!", self.name, key, e)
@@ -483,6 +485,17 @@ class ZendureDevice(EntityDevice):
             return None
         return SOC_LIMIT_BY_DEVICE_STATE.get(self.state, SocLimitState.NORMAL)
 
+    def _clear_stale_soc_limit_override_after_min_soc_update(self) -> None:
+        """Drop stale raw empty override so normal min/reserve calculation can run."""
+        if (
+            self._raw_soc_limit == SocLimitState.EMPTY
+            and self.online
+            and self.socSet.asNumber > 0
+            and self.kWh > 0
+            and self.electricLevel.asNumber > self.minSoc.asNumber
+        ):
+            self._raw_soc_limit = SocLimitState.NORMAL  # Clear stale override; state is recalculated next.
+
     def refresh_discharge_state(self, _entity: EntityZendure | None = None, _value: Any = None) -> None:
         """Refresh all device-local state derived from the current discharge baseline."""
         previous_actual_kwh = self.actualKwh
@@ -582,6 +595,7 @@ class ZendureDevice(EntityDevice):
         """Write minimum SoC and refresh state derived from the discharge floor."""
         await self.entityWrite(entity, value)
         entity.update_value(value)
+        self._clear_stale_soc_limit_override_after_min_soc_update()
         self.refresh_recovery_state()
 
     async def entityWrite(self, entity: EntityZendure, value: Any) -> None:

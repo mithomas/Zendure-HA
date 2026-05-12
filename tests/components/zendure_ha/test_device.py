@@ -17,6 +17,13 @@ from .common import make_device
 
 TARGET_SOC_AFTER_UPDATE = 90
 MIN_SOC_AFTER_UPDATE = 8
+STALE_EMPTY_LEVEL = 50
+STALE_EMPTY_RESERVE_LEVEL = 8
+STALE_EMPTY_RESERVE_SOC = 10
+LOWERED_MIN_SOC = 5
+LOWERED_MIN_SOC_RAW = LOWERED_MIN_SOC * 10
+RAISED_MIN_SOC = 50
+RAISED_MIN_SOC_RAW = RAISED_MIN_SOC * 10
 
 
 def test_bypass_entity_is_restored_as_a_binary_sensor(hass):
@@ -431,6 +438,128 @@ async def test_min_soc_update_refreshes_effective_soc_limit_state(hass):
     assert device.minSoc.asNumber == MIN_SOC_AFTER_UPDATE
     assert device.state is DeviceState.SOCEMPTY
     assert device.socLimit.asInt == SocLimitState.EMPTY
+
+
+async def test_min_soc_write_clears_stale_empty_soc_limit_when_level_is_above_new_floor(hass):
+    """Lowering minimum SoC should clear a cached empty limit when the current SoC is valid again."""
+    device = make_device(hass, level=STALE_EMPTY_LEVEL, min_soc=RAISED_MIN_SOC, reserve=LOWERED_MIN_SOC, soc_set=80)
+    device.entityUpdate("socLimit", SocLimitState.EMPTY)
+
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
+    assert device.availableKwh.asNumber == 0
+
+    await device.minSoc.async_set_native_value(LOWERED_MIN_SOC)
+
+    assert device.minSoc.asNumber == LOWERED_MIN_SOC
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == SocLimitState.NORMAL
+    assert device.availableKwh.asNumber > 0
+
+    device.refresh_discharge_state()
+
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == SocLimitState.NORMAL
+
+
+def test_min_soc_report_clears_stale_empty_soc_limit_when_level_is_above_new_floor(hass):
+    """A reported minimum SoC change should clear stale empty state using the same rule."""
+    device = make_device(hass, level=STALE_EMPTY_LEVEL, min_soc=RAISED_MIN_SOC, reserve=LOWERED_MIN_SOC, soc_set=80)
+    device.entityUpdate("socLimit", SocLimitState.EMPTY)
+
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
+    assert device.availableKwh.asNumber == 0
+
+    device.entityUpdate("minSoc", LOWERED_MIN_SOC_RAW)
+
+    assert device.minSoc.asNumber == LOWERED_MIN_SOC
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == SocLimitState.NORMAL
+    assert device.availableKwh.asNumber > 0
+
+    device.refresh_discharge_state()
+
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == SocLimitState.NORMAL
+
+
+async def test_min_soc_write_recalculates_reserve_after_clearing_stale_empty_soc_limit(hass):
+    """Clearing stale empty should still let the normal reserve calculation win."""
+    device = make_device(
+        hass,
+        level=STALE_EMPTY_RESERVE_LEVEL,
+        min_soc=STALE_EMPTY_RESERVE_SOC,
+        reserve=STALE_EMPTY_RESERVE_SOC,
+        soc_set=80,
+    )
+    device.entityUpdate("socLimit", SocLimitState.EMPTY)
+
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
+    assert device.available_kwh_contribution() == 0
+
+    await device.minSoc.async_set_native_value(LOWERED_MIN_SOC)
+
+    assert device.minSoc.asNumber == LOWERED_MIN_SOC
+    assert device.state is DeviceState.SOCRESERVE
+    assert device.socLimit.asInt == SocLimitState.RESERVE
+    assert device.available_kwh_contribution() == 0
+
+
+def test_min_soc_report_recalculates_reserve_after_clearing_stale_empty_soc_limit(hass):
+    """Reported min SoC changes should also let normal reserve calculation win."""
+    device = make_device(
+        hass,
+        level=STALE_EMPTY_RESERVE_LEVEL,
+        min_soc=STALE_EMPTY_RESERVE_SOC,
+        reserve=STALE_EMPTY_RESERVE_SOC,
+        soc_set=80,
+    )
+    device.entityUpdate("socLimit", SocLimitState.EMPTY)
+
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
+    assert device.available_kwh_contribution() == 0
+
+    device.entityUpdate("minSoc", LOWERED_MIN_SOC_RAW)
+
+    assert device.minSoc.asNumber == LOWERED_MIN_SOC
+    assert device.state is DeviceState.SOCRESERVE
+    assert device.socLimit.asInt == SocLimitState.RESERVE
+    assert device.available_kwh_contribution() == 0
+
+
+async def test_min_soc_write_marks_empty_when_level_reaches_new_floor(hass):
+    """Raising minimum SoC to the current level should immediately mark the device empty."""
+    device = make_device(hass, level=STALE_EMPTY_LEVEL, min_soc=LOWERED_MIN_SOC, reserve=LOWERED_MIN_SOC, soc_set=80)
+
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == SocLimitState.NORMAL
+    assert device.availableKwh.asNumber > 0
+
+    await device.minSoc.async_set_native_value(RAISED_MIN_SOC)
+
+    assert device.minSoc.asNumber == RAISED_MIN_SOC
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
+    assert device.availableKwh.asNumber == 0
+
+
+def test_min_soc_report_marks_empty_when_level_reaches_new_floor(hass):
+    """A reported minimum SoC increase should refresh the effective empty state."""
+    device = make_device(hass, level=STALE_EMPTY_LEVEL, min_soc=LOWERED_MIN_SOC, reserve=LOWERED_MIN_SOC, soc_set=80)
+
+    assert device.state is DeviceState.INACTIVE
+    assert device.socLimit.asInt == SocLimitState.NORMAL
+    assert device.availableKwh.asNumber > 0
+
+    device.entityUpdate("minSoc", RAISED_MIN_SOC_RAW)
+
+    assert device.minSoc.asNumber == RAISED_MIN_SOC
+    assert device.state is DeviceState.SOCEMPTY
+    assert device.socLimit.asInt == SocLimitState.EMPTY
+    assert device.availableKwh.asNumber == 0
 
 
 @pytest.mark.parametrize(
