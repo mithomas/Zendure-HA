@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from aiohttp import ClientTimeout, ServerDisconnectedError
+from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, ServerDisconnectedError, TCPConnector
 from bleak import BleakClient
 from bleak.exc import BleakError
 
@@ -1179,6 +1179,7 @@ class ZendureZenSdk(ZendureDevice):
 
     async def httpGet(self, url: str, key: str | None = None) -> dict[str, Any]:
         if datetime.now() < self._http_block_until:
+            _LOGGER.debug("httpGet blocked for %s until %s", self.name, self._http_block_until)
             return {}
         try:
             url = f"http://{self.ipAddress}/{url}"
@@ -1192,13 +1193,19 @@ class ZendureZenSdk(ZendureDevice):
             return payload if key is None else payload.get(key, {})
         except Exception as e:
             self._http_failures += 1
-            if self._http_failures >= 3:
+            if isinstance(e, ServerDisconnectedError):
+                _LOGGER.warning(
+                    "ServerDisconnectedError for %s during httpGet — possible stale connection pool entry [failures=%s]",
+                    self.name,
+                    self._http_failures,
+                )
+            if self._http_failures >= 3 and self._http_block_until <= datetime.now():
                 delay = min(80, 5 * (2 ** min(4, self._http_failures - 3)))
                 self._http_block_until = datetime.now() + timedelta(seconds=delay)
                 self.lastseen = datetime.min
             log = (
                 _LOGGER.info
-                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError))
+                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError, ClientConnectorError))
                 else _LOGGER.error
             )
             log(
@@ -1213,6 +1220,7 @@ class ZendureZenSdk(ZendureDevice):
 
     async def httpPost(self, url: str, command: Any) -> bool:
         if datetime.now() < self._http_block_until:
+            _LOGGER.debug("httpPost blocked for %s until %s", self.name, self._http_block_until)
             return False
         try:
             self.httpid += 1
@@ -1226,13 +1234,19 @@ class ZendureZenSdk(ZendureDevice):
             self._http_block_until = datetime.min
         except Exception as e:
             self._http_failures += 1
-            if self._http_failures >= 3:
+            if isinstance(e, ServerDisconnectedError):
+                _LOGGER.warning(
+                    "ServerDisconnectedError for %s during httpPost — possible stale connection pool entry [failures=%s]",
+                    self.name,
+                    self._http_failures,
+                )
+            if self._http_failures >= 3 and self._http_block_until <= datetime.now():
                 delay = min(80, 5 * (2 ** min(4, self._http_failures - 3)))
                 self._http_block_until = datetime.now() + timedelta(seconds=delay)
                 self.lastseen = datetime.min
             log = (
                 _LOGGER.info
-                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError))
+                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError, ClientConnectorError))
                 else _LOGGER.error
             )
             log(
