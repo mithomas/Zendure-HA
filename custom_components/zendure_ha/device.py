@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
-from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, ServerDisconnectedError, TCPConnector
+from aiohttp import ClientConnectorError, ClientTimeout, ServerDisconnectedError
 from bleak import BleakClient
 from bleak.exc import BleakError
 
@@ -1074,6 +1074,10 @@ class ZendureZenSdk(ZendureDevice):
         )
         self.httpid = 0
 
+    def _calculate_backoff_delay(self) -> int:
+        """Calculate linear backoff delay after 3 failures in seconds with 10s max."""
+        return max(10, self._http_failures - 3 if self._http_failures >= 3 else 0)
+
     async def mqttSelect(self, select: Any, _value: Any) -> None:
         from .api import Api
 
@@ -1200,7 +1204,7 @@ class ZendureZenSdk(ZendureDevice):
                     self._http_failures,
                 )
             if self._http_failures >= 3 and self._http_block_until <= datetime.now():
-                delay = min(80, 5 * (2 ** min(4, self._http_failures - 3)))
+                delay = self._calculate_backoff_delay()
                 self._http_block_until = datetime.now() + timedelta(seconds=delay)
                 self.lastseen = datetime.min
             log = (
@@ -1241,7 +1245,7 @@ class ZendureZenSdk(ZendureDevice):
                     self._http_failures,
                 )
             if self._http_failures >= 3 and self._http_block_until <= datetime.now():
-                delay = min(80, 5 * (2 ** min(4, self._http_failures - 3)))
+                delay = self._calculate_backoff_delay()
                 self._http_block_until = datetime.now() + timedelta(seconds=delay)
                 self.lastseen = datetime.min
             log = (
