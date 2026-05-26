@@ -875,7 +875,14 @@ class TestZenSdkDataRefresh:
 
 
 class TestHttpConnectionClose:
-    """Verify HTTP retries use Connection: close to prevent stale pooled sockets."""
+    """Verify HTTP requests use Connection: close to prevent stale pooled sockets."""
+
+    @staticmethod
+    def _request_context(response: MagicMock) -> MagicMock:
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=None)
+        return context
 
     def test_const_header_no_connection_close(self):
         """CONST_HEADER must not contain Connection: close (keep-alive by default)."""
@@ -885,42 +892,48 @@ class TestHttpConnectionClose:
         """CONST_HEADER_CLOSE must contain Connection: close."""
         assert CONST_HEADER_CLOSE["Connection"] == "close"
 
-    async def test_http_get_uses_keepalive_when_healthy(self, hass):
-        """httpGet must use normal headers when there are no prior failures."""
-        device = make_device(
-            hass,
-            device_cls=SolarFlow800Pro,
-            device_id="sf800-hdr",
-            product_model="SolarFlow 800 Pro",
+    async def test_http_get_sends_connection_close_when_healthy(self, hass):
+        """httpGet must pass Connection: close even when there are no prior failures."""
+        device = cast(
+            "SolarFlow800Pro",
+            make_device(
+                hass,
+                device_cls=SolarFlow800Pro,
+                device_id="sf800-hdr",
+                product_model="SolarFlow 800 Pro",
+            ),
         )
         device.ipAddress = "192.168.1.99"
 
         mock_response = MagicMock()
         mock_response.raise_for_status = Mock()
-        mock_response.text = AsyncMock(return_value='{"properties": {"solarInputPower": 100}}')
-        device.session.get = AsyncMock(return_value=mock_response)
+        mock_response.json = AsyncMock(return_value={"properties": {"solarInputPower": 100}})
+        device.session.get = Mock(return_value=self._request_context(mock_response))
 
         await device.httpGet("properties/report")
 
         call_kwargs = device.session.get.call_args
         headers = call_kwargs.kwargs.get("headers") or call_kwargs[1].get("headers")
-        assert "Connection" not in headers
+        assert headers["Connection"] == "close"
 
     async def test_http_get_sends_connection_close_after_failure(self, hass):
         """httpGet must pass Connection: close after a prior failure."""
-        device = make_device(
-            hass,
-            device_cls=SolarFlow800Pro,
-            device_id="sf800-hdr2",
-            product_model="SolarFlow 800 Pro",
+        device = cast(
+            "SolarFlow800Pro",
+            make_device(
+                hass,
+                device_cls=SolarFlow800Pro,
+                device_id="sf800-hdr2",
+                product_model="SolarFlow 800 Pro",
+            ),
         )
         device.ipAddress = "192.168.1.99"
         device._http_failures = 1
 
         mock_response = MagicMock()
         mock_response.raise_for_status = Mock()
-        mock_response.text = AsyncMock(return_value='{"properties": {"solarInputPower": 100}}')
-        device.session.get = AsyncMock(return_value=mock_response)
+        mock_response.json = AsyncMock(return_value={"properties": {"solarInputPower": 100}})
+        device.session.get = Mock(return_value=self._request_context(mock_response))
 
         await device.httpGet("properties/report")
 
@@ -930,18 +943,21 @@ class TestHttpConnectionClose:
 
     async def test_http_post_sends_connection_close_after_failure(self, hass):
         """httpPost must pass Connection: close after a prior failure."""
-        device = make_device(
-            hass,
-            device_cls=SolarFlow800Pro,
-            device_id="sf800-hdr3",
-            product_model="SolarFlow 800 Pro",
+        device = cast(
+            "SolarFlow800Pro",
+            make_device(
+                hass,
+                device_cls=SolarFlow800Pro,
+                device_id="sf800-hdr3",
+                product_model="SolarFlow 800 Pro",
+            ),
         )
         device.ipAddress = "192.168.1.99"
         device._http_failures = 2
 
         mock_response = MagicMock()
         mock_response.raise_for_status = Mock()
-        device.session.post = AsyncMock(return_value=mock_response)
+        device.session.post = Mock(return_value=self._request_context(mock_response))
 
         await device.httpPost("properties/write", {"properties": {"outputLimit": 100}})
 

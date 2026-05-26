@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
 CONST_HEADER_CLOSE = {**CONST_HEADER, "Connection": "close"}
-CONST_TIMEOUT = ClientTimeout(total=4)
+CONST_TIMEOUT = ClientTimeout(total=5, connect=2, sock_connect=2, sock_read=3)
 FULL_SOC_PERCENT = 100
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 SOC_LIMIT_BY_DEVICE_STATE = {
@@ -51,6 +51,14 @@ SOC_LIMIT_BY_DEVICE_STATE = {
     DeviceState.RESERVE_RECOVERY: SocLimitState.RESERVE_RECOVERY,
     DeviceState.SOCRESERVE: SocLimitState.RESERVE,
 }
+_HTTP_RETRYABLE_ERRORS = (
+    TimeoutError,
+    asyncio.TimeoutError,
+    ServerDisconnectedError,
+    ClientConnectorError,
+)
+HTTP_BACKOFF_FAILURE_THRESHOLD = 2
+HTTP_RETRY_ATTEMPTS = 2
 
 
 class ZendureBattery(EntityDevice):
@@ -1075,8 +1083,13 @@ class ZendureZenSdk(ZendureDevice):
         self.httpid = 0
 
     def _calculate_backoff_delay(self) -> int:
-        """Calculate linear backoff delay after 3 failures in seconds with 10s max."""
-        return max(10, self._http_failures - 3 if self._http_failures >= 3 else 0)
+        """Calculate linear backoff delay after 2 failures in seconds with 10s max."""
+        return min(
+            10,
+            self._http_failures - HTTP_BACKOFF_FAILURE_THRESHOLD
+            if self._http_failures >= HTTP_BACKOFF_FAILURE_THRESHOLD
+            else 0,
+        )
 
     async def mqttSelect(self, select: Any, _value: Any) -> None:
         from .api import Api
@@ -1185,84 +1198,99 @@ class ZendureZenSdk(ZendureDevice):
         if datetime.now() < self._http_block_until:
             _LOGGER.debug("httpGet blocked for %s until %s", self.name, self._http_block_until)
             return {}
-        try:
-            url = f"http://{self.ipAddress}/{url}"
-            headers = CONST_HEADER_CLOSE if self._http_failures > 0 else CONST_HEADER
-            response = await self.session.get(url, headers=headers, timeout=CONST_TIMEOUT)
-            response.raise_for_status()
-            payload = json.loads(await response.text())
-            self.lastseen = datetime.now()
-            self._http_failures = 0
-            self._http_block_until = datetime.min
-            return payload if key is None else payload.get(key, {})
-        except Exception as e:
-            self._http_failures += 1
-            if isinstance(e, ServerDisconnectedError):
-                _LOGGER.warning(
-                    "ServerDisconnectedError for %s during httpGet — possible stale connection pool entry [failures=%s]",
-                    self.name,
-                    self._http_failures,
-                )
-            if self._http_failures >= 3 and self._http_block_until <= datetime.now():
-                delay = self._calculate_backoff_delay()
-                self._http_block_until = datetime.now() + timedelta(seconds=delay)
-                self.lastseen = datetime.min
-            log = (
-                _LOGGER.info
-                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError, ClientConnectorError))
-                else _LOGGER.error
-            )
-            log(
-                "%s for %s during httpGet%s [failures=%s, retry_after=%s]",
-                type(e).__name__,
-                self.name,
-                f": {e}" if str(e) else "!",
-                self._http_failures,
-                self._http_block_until if self._http_block_until != datetime.min else "immediate",
-            )
+
+        url = f"http://{self.ipAddress}/{url}"
+
+        for attempt in range(HTTP_RETRY_ATTEMPTS):
+            try:
+                async with self.session.get(
+                    url,
+                    headers=CONST_HEADER_CLOSE,
+                    timeout=CONST_TIMEOUT,
+                ) as response:
+                    response.raise_for_status()
+                    payload = await response.json(content_type=None)
+
+                self.lastseen = datetime.now()
+                self._http_failures = 0
+                self._http_block_until = datetime.min
+                return payload if key is None else payload.get(key, {})
+
+            except _HTTP_RETRYABLE_ERRORS as e:
+                if attempt <= HTTP_RETRY_ATTEMPTS:
+                    await asyncio.sleep(0)
+                    continue
+                self._handle_http_error(e, "httpGet")
+                return {}
+
+            except Exception as e:
+                self._handle_http_error(e, "httpGet")
+                return {}
         return {}
 
     async def httpPost(self, url: str, command: Any) -> bool:
         if datetime.now() < self._http_block_until:
             _LOGGER.debug("httpPost blocked for %s until %s", self.name, self._http_block_until)
             return False
-        try:
-            self.httpid += 1
-            command["id"] = self.httpid
-            command["sn"] = self.snNumber
-            url = f"http://{self.ipAddress}/{url}"
-            headers = CONST_HEADER_CLOSE if self._http_failures > 0 else CONST_HEADER
-            response = await self.session.post(url, json=command, headers=headers, timeout=CONST_TIMEOUT)
-            response.raise_for_status()
-            self._http_failures = 0
-            self._http_block_until = datetime.min
-        except Exception as e:
-            self._http_failures += 1
-            if isinstance(e, ServerDisconnectedError):
-                _LOGGER.warning(
-                    "ServerDisconnectedError for %s during httpPost — possible stale connection pool entry [failures=%s]",
-                    self.name,
-                    self._http_failures,
-                )
-            if self._http_failures >= 3 and self._http_block_until <= datetime.now():
-                delay = self._calculate_backoff_delay()
-                self._http_block_until = datetime.now() + timedelta(seconds=delay)
-                self.lastseen = datetime.min
-            log = (
-                _LOGGER.info
-                if isinstance(e, (TimeoutError, asyncio.TimeoutError, ServerDisconnectedError, ClientConnectorError))
-                else _LOGGER.error
-            )
-            log(
-                "%s for %s during httpPost%s [failures=%s, retry_after=%s]",
-                type(e).__name__,
+
+        request_url = f"http://{self.ipAddress}/{url}"
+
+        for attempt in range(HTTP_RETRY_ATTEMPTS):
+            try:
+                self.httpid += 1
+                command["id"] = self.httpid
+                command["sn"] = self.snNumber
+
+                async with self.session.post(
+                    request_url,
+                    json=command,
+                    headers=CONST_HEADER_CLOSE,
+                    timeout=CONST_TIMEOUT,
+                ) as response:
+                    response.raise_for_status()
+            except _HTTP_RETRYABLE_ERRORS as e:
+                if attempt <= HTTP_RETRY_ATTEMPTS:
+                    await asyncio.sleep(0)
+                    continue
+                self._handle_http_error(e, "httpPost")
+                return False
+
+            except Exception as e:
+                self._handle_http_error(e, "httpPost")
+                return False
+            else:
+                self._http_failures = 0
+                self._http_block_until = datetime.min
+
+                return True
+        return False
+
+    def _handle_http_error(self, e: Exception, operation: str) -> None:
+        self._http_failures += 1
+
+        if isinstance(e, ServerDisconnectedError):
+            _LOGGER.warning(
+                "ServerDisconnectedError for %s during %s; stale connection likely [failures=%s]",
                 self.name,
-                f": {e}" if str(e) else "!",
+                operation,
                 self._http_failures,
-                self._http_block_until if self._http_block_until != datetime.min else "immediate",
             )
-            return False
-        return True
+
+        if self._http_failures >= HTTP_BACKOFF_FAILURE_THRESHOLD and self._http_block_until <= datetime.now():
+            delay = self._calculate_backoff_delay()
+            self._http_block_until = datetime.now() + timedelta(seconds=delay)
+            self.lastseen = datetime.min
+
+        log = _LOGGER.info if isinstance(e, _HTTP_RETRYABLE_ERRORS) else _LOGGER.error
+        log(
+            "%s for %s during %s%s [failures=%s, retry_after=%s]",
+            type(e).__name__,
+            self.name,
+            operation,
+            f": {e}" if str(e) else "!",
+            self._http_failures,
+            self._http_block_until if self._http_block_until != datetime.min else "immediate",
+        )
 
 
 class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
