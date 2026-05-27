@@ -1411,6 +1411,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         selected_charge_primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
+        selected_primary_input_allowed_for_shaping = (
+            self._selected_primary_input_allowed(p1, routing, pv_floors) if p1 <= 0 else True
+        )
         local_charge = routing.local_charge_summary(
             selected_charge_primary,
             pv_charge_first_mode=pv_charge_first_mode,
@@ -1424,6 +1427,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             pv_floors,
             local_charge,
             pv_charge_first_mode=pv_charge_first_mode,
+            selected_primary_input_allowed=selected_primary_input_allowed_for_shaping,
         )
         if self.operation == ManagerMode.MANUAL:
             setpoint = int(self.manualpower.asNumber)
@@ -1579,6 +1583,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         local_charge: _LocalChargeSummary,
         *,
         pv_charge_first_mode: bool,
+        selected_primary_input_allowed: bool,
     ) -> int:
         """
         Shape the signed setpoint before manager-mode clamps are applied.
@@ -1638,8 +1643,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 or (p1 < 0 and local_charge.active_non_primary_empty_chargeable > 0)
                 or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
             ):
+                selected_primary_local_surplus = (
+                    local_charge.selected_primary_local_surplus if selected_primary_input_allowed else 0
+                )
                 local_chargeable_surplus = (
-                    local_charge.non_primary_local_chargeable_surplus + local_charge.selected_primary_local_surplus
+                    local_charge.non_primary_local_chargeable_surplus + selected_primary_local_surplus
                 )
                 if protects_selected_primary_floor:
                     requested_charge = max(0, -surplus_setpoint)
@@ -1647,9 +1655,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         0,
                         pv_floors.active_primary_produced_floor - max(0, discharge_candidate_setpoint),
                     )
+                    blocked_primary_local_surplus = (
+                        0 if selected_primary_input_allowed else local_charge.selected_primary_local_surplus
+                    )
                     charge_without_primary_floor = max(
                         local_chargeable_surplus,
-                        requested_charge - uncovered_primary_floor,
+                        requested_charge - uncovered_primary_floor - blocked_primary_local_surplus,
                     )
                     setpoint = (
                         -charge_without_primary_floor
@@ -2172,7 +2183,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self._reset_home_output_charge_state()
 
         selected_primary = routing.selected_primary
-        charge_produced_devices = [device for device in self.charge if routing.produced_limit(device) > 0]
+        pv_floors = routing.pv_floor_summary()
+        charge_produced_devices = [
+            device
+            for device in self.charge
+            if (device is not selected_primary or pv_floors.active_non_primary_produced_floor == 0)
+            and routing.produced_limit(device) > 0
+        ]
         await self._stop_charging_for_home_output(
             skip_devices=set(charge_produced_devices),
             allow_bypass_zero=True,

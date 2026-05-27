@@ -7969,3 +7969,63 @@ class TestPrimaryNoLocalSolarDefers:
         secondary.power_charge.assert_awaited_once()
         secondary_target = secondary.power_charge.call_args[0][0]
         assert secondary_target < 0
+
+    async def test_blocked_primary_surplus_does_not_overcharge_secondary(self, hass):
+        """
+        Primary-local PV must not be transferred to secondary charging.
+
+        The primary is already serving output and cannot switch to input.
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="output-primary-local-surplus",
+            device_name="output primary local surplus",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=250,
+            battery_input=322,
+            input_limit=0,
+            output_limit=250,
+        )
+        primary.solarInput.update_value(572)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-own-small-surplus",
+            device_name="secondary own small surplus",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            battery_input=72,
+            input_limit=0,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(72)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.now() + timedelta(seconds=30),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -8, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(250)
+        secondary.power_charge.assert_awaited_once_with(-72)
+        secondary.power_discharge.assert_not_awaited()
