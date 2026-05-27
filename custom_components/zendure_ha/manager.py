@@ -2025,7 +2025,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 replaced_non_primary_home_pv,
             )
             active_discharge_targets[selected_primary] += selected_primary_output_replacement_target
-        if move_primary_charge_to_secondary and not pure_secondary_charge_devices:
+        primary_input_blocked = blocked_primary_input is not None
+        if (move_primary_charge_to_secondary and not pure_secondary_charge_devices) or primary_input_blocked:
             setpoint = 0
 
         for d in self.discharge:

@@ -7986,10 +7986,7 @@ class TestPrimaryNoLocalSolarDefers:
     """Primary that has no local solar defers charge allocation to a secondary with surplus."""
 
     async def test_primary_without_local_solar_defers_charge_to_secondary_with_surplus(self, hass):
-        """
-        When the primary is charging but has no local solar of its own and a secondary
-        has its own PV surplus, the charge allocation shifts to the secondary.
-        """
+        """Primary with no local solar defers charge allocation to secondary local surplus."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -8095,6 +8092,67 @@ class TestPrimaryNoLocalSolarDefers:
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
         await _run_prepared_power_routing(manager, -8, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(250)
+        secondary.power_charge.assert_awaited_once_with(-72)
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_blocked_primary_input_does_not_fall_back_to_weighted_secondary_charge(self, hass):
+        """Gated selected-primary input must not fall back to weighted secondary charge."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="blocked-primary-input-output",
+            device_name="blocked primary input output",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=250,
+            battery_input=322,
+            input_limit=0,
+            output_limit=250,
+        )
+        primary.solarInput.update_value(572)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="active-secondary-local-charge-only",
+            device_name="active secondary local charge only",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            home_input=72,
+            battery_input=144,
+            input_limit=72,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(72)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        manager._reset_power_distribution_state()
+        await manager._poll_devices_and_prepare_routing_state(-60)
+        routing = manager._power_routing_snapshot(primary, primary_aware=True)
+
+        await manager._apply_primary_input(-400, datetime.now(), routing, allow_selected_primary_input=False)
 
         primary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_awaited_once_with(250)

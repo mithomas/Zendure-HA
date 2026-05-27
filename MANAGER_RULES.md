@@ -163,10 +163,10 @@ In `MATCHING`, an output-mode selected primary should remain in output mode arou
 
 The selected primary may be switched into input mode only when either condition is true:
 
-- the raw P1 meter is exporting at least 50 W (`p1 <= -50 W`), or
+- the P1 meter is exporting at least 50 W that cannot be explained by manager-controlled selected-primary output or trimmable battery-backed output, or
 - non-primary devices are already contributing more PV-backed home output than the measured household demand for the cycle.
 
-The 50 W gate uses the raw P1 reading, not the corrected routing setpoint. Household demand for the secondary-cover exception is calculated from raw P1 plus the active PV-backed home-output floor. The corrected setpoint still decides the charge budget after the primary is allowed to use the input path. Devices that are already reporting input mode may still receive charge and charge-lag corrections because no input/output mode switch is needed.
+The 50 W gate uses export remaining after controlled output is accounted for, not the corrected routing setpoint. Household demand for the secondary-cover exception is calculated from raw P1 plus the active PV-backed home-output floor. The corrected setpoint still decides the charge budget after the primary is allowed to use the input path. If the selected-primary input path is gated off, primary-local surplus must not fall through to weighted secondary charging; secondaries may only keep charge backed by their own local PV or active charge evidence. Devices that are already reporting input mode may still receive charge and charge-lag corrections because no input/output mode switch is needed.
 
 ### Off-grid output at zero
 
