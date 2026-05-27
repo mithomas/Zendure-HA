@@ -22,6 +22,7 @@ Use the local venv when present:
 
 ## Test Expectations
 Do not weaken, remove, or substantially rewrite existing tests without prior confirmation.
+For bug fixes, add or adjust a focused regression first and run it to confirm it fails before implementing the fix.
 
 Prefer:
 - parametrized tests for threshold and state-table logic
@@ -33,6 +34,7 @@ Prefer:
 - Prefer direct manager and device tests for algorithmic behavior.
 - Keep manifest runtime requirements and `requirements.txt` aligned.
 - Keep developer tooling in `requirements_dev.txt` and test-only dependencies in `requirements_test.txt`.
+- Run tests through `scripts/test`; do not call `pytest` directly.
 
 Run at least:
 - `scripts/check`

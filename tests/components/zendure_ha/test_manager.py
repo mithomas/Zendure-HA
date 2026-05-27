@@ -8038,9 +8038,9 @@ class TestPrimaryNoLocalSolarDefers:
         secondary_target = secondary.power_charge.call_args[0][0]
         assert secondary_target < 0
 
-    async def test_blocked_primary_surplus_does_not_overcharge_secondary(self, hass):
+    async def test_blocked_primary_surplus_does_not_restart_secondary_ac_charge(self, hass):
         """
-        Primary-local PV must not be transferred to secondary charging.
+        Primary-local PV must not be transferred to secondary charging, and secondary-local PV stays local.
 
         The primary is already serving output and cannot switch to input.
         """
@@ -8095,7 +8095,7 @@ class TestPrimaryNoLocalSolarDefers:
 
         primary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_awaited_once_with(250)
-        secondary.power_charge.assert_awaited_once_with(-72)
+        secondary.power_charge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
     async def test_blocked_primary_input_does_not_fall_back_to_weighted_secondary_charge(self, hass):
@@ -8214,4 +8214,64 @@ class TestPrimaryNoLocalSolarDefers:
         primary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_awaited_once_with(383)
         secondary.power_charge.assert_awaited_once_with(0)
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_idle_secondary_pv_input_is_not_restarted_as_ac_charge(self, hass):
+        """A PV-only secondary should not be restarted as AC input after being zeroed."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="export-shaped-idle-primary",
+            device_name="export shaped idle primary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=462,
+            battery_input=126,
+            input_limit=0,
+            output_limit=463,
+        )
+        primary.solarInput.update_value(588)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="export-shaped-idle-secondary",
+            device_name="export shaped idle secondary",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            battery_input=79,
+            input_limit=0,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(79)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+            discharge_devices=(primary,),
+            idle_devices=(secondary,),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.pwr_produced = -588
+        secondary.pwr_produced = -79
+        routing = manager._power_routing_snapshot(primary, primary_aware=True)
+
+        await manager._apply_primary_input(-400, datetime.now(), routing, allow_selected_primary_input=False)
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()

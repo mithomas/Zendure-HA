@@ -2016,6 +2016,32 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and not positive_demand_charge_lag
             )
         ]
+        idle_secondary_local_pv_only_devices = [
+            device
+            for device in idle_secondary_surplus_devices
+            if (
+                primary_input_blocked
+                and device.homeOutput.asInt == 0
+                and routing.charge_surplus(device) > 0
+                and not positive_demand_charge_lag
+            )
+        ]
+        promoted_secondary_local_pv_only_devices = [
+            device
+            for device in charge_devices
+            if (
+                primary_input_blocked
+                and device in self.idle
+                and device.homeOutput.asInt == 0
+                and routing.charge_surplus(device) > 0
+                and not positive_demand_charge_lag
+            )
+        ]
+        secondary_local_pv_only_devices = [
+            *active_secondary_local_pv_only_devices,
+            *idle_secondary_local_pv_only_devices,
+            *promoted_secondary_local_pv_only_devices,
+        ]
         secondary_ac_input_to_stop = sum(
             routing.route(device).charge_floor for device in active_secondary_local_pv_only_devices
         )
@@ -2028,13 +2054,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 0,
                 active_discharge_targets[selected_primary] - secondary_ac_input_to_stop,
             )
-        charge_surplus_devices = [
-            device for device in charge_devices if device not in active_secondary_local_pv_only_devices
+        charge_surplus_devices = [device for device in charge_devices if device not in secondary_local_pv_only_devices]
+        idle_secondary_charge_devices = [
+            device for device in idle_secondary_surplus_devices if device not in secondary_local_pv_only_devices
         ]
         surplus_floor_devices = [
             *active_secondary_charge_devices,
             *charge_surplus_devices,
-            *idle_secondary_surplus_devices,
+            *idle_secondary_charge_devices,
         ]
         charge_targets, setpoint = self._allocate_capped_targets(
             setpoint,
@@ -2108,7 +2135,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             subtract_actual_charge=False,
         )
 
-        for d in idle_secondary_surplus_devices:
+        for d in idle_secondary_charge_devices:
             target = charge_targets.get(d, 0)
             if target != 0:
                 await d.power_charge(target)
