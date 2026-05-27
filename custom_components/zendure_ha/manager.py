@@ -1465,10 +1465,41 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return True
         if routing.selected_primary.acMode.value == AcMode.INPUT:
             return True
-        if p1 <= -PRIMARY_INPUT_EXPORT_THRESHOLD:
-            return True
         household_demand = max(0, p1 + pv_floors.active_serving_pv_floor)
-        return pv_floors.active_non_primary_produced_floor > household_demand
+        if pv_floors.active_non_primary_produced_floor > household_demand:
+            return True
+        return self._unexplained_export_for_primary_input(p1, routing, pv_floors) >= PRIMARY_INPUT_EXPORT_THRESHOLD
+
+    def _unexplained_export_for_primary_input(
+        self,
+        p1: int,
+        routing: _PowerRoutingSnapshot,
+        pv_floors: _PvFloorSummary,
+    ) -> int:
+        """Return meter export that cannot be explained by manager-controlled output."""
+        meter_export = max(0, -p1)
+        if meter_export == 0:
+            return 0
+
+        household_demand = max(0, p1 + pv_floors.active_serving_pv_floor)
+        primary_needed_for_load = max(0, household_demand - pv_floors.active_non_primary_produced_floor)
+        primary_produced_floor = pv_floors.active_primary_produced_floor
+        if routing.selected_primary is not None:
+            primary_produced_floor = min(
+                primary_produced_floor, _pv_evidence_for_output_replacement(routing.selected_primary)
+            )
+        primary_produced_excess = max(0, primary_produced_floor - primary_needed_for_load)
+        controlled_export = min(meter_export, primary_produced_excess)
+
+        remaining_export = max(0, meter_export - controlled_export)
+        battery_trim_capacity = sum(
+            max(0, device.homeOutput.asInt - routing.route(device).produced_home)
+            for device in routing.discharge_devices
+            if device.reports_battery_backed_home_output()
+        )
+        controlled_export += min(remaining_export, battery_trim_capacity)
+
+        return max(0, meter_export - controlled_export)
 
     async def _poll_devices_and_prepare_routing_state(self, p1: int) -> int:
         """Poll devices, classify active flows, and return the adjusted setpoint."""

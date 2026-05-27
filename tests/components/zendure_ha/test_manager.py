@@ -6257,12 +6257,12 @@ class TestSmartMatchingPrimaryAware:
     @pytest.mark.parametrize(
         ("p1", "primary_charge_allowed"),
         [
-            pytest.param(-49, False, id="below-export-threshold"),
-            pytest.param(-50, True, id="at-export-threshold"),
+            pytest.param(-69, False, id="below-unexplained-export-threshold"),
+            pytest.param(-70, True, id="at-unexplained-export-threshold"),
         ],
     )
-    async def test_primary_input_switch_requires_raw_export_threshold(self, hass, p1, primary_charge_allowed):
-        """Small corrected surplus must not switch a home-serving selected primary into input mode."""
+    async def test_primary_input_switch_requires_unexplained_export_threshold(self, hass, p1, primary_charge_allowed):
+        """Controlled selected-primary output should not count toward the export threshold."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -6299,6 +6299,77 @@ class TestSmartMatchingPrimaryAware:
         else:
             primary.power_charge.assert_not_awaited()
             primary.power_discharge.assert_awaited_once_with(20)
+
+    async def test_primary_output_explains_meter_export_without_input_switch(self, hass):
+        """Selected-primary PV-backed output should block an AC-input switch when it explains the export."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-output-explains-export",
+            device_name="sf800 pro primary output explains export",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=80,
+            battery_input=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=80,
+        )
+        primary.solarInput.update_value(180)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        manager._execute_power_routing = AsyncMock()
+
+        await _run_prepared_power_routing(manager, -60, datetime.now())
+
+        intent = _manager_power_routing_intent(manager)
+        assert not intent.route_input
+        assert intent.home_output_budget == 80  # noqa: PLR2004
+        assert not intent.selected_primary_input_allowed
+
+    async def test_battery_backed_output_explains_meter_export_without_input_switch(self, hass):
+        """Manager-trimmable battery-backed output should block a selected-primary AC-input switch."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-battery-output-explains-export",
+            device_name="sf800 pro primary battery output explains export",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=100,
+            battery_output=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        manager._execute_power_routing = AsyncMock()
+
+        await _run_prepared_power_routing(manager, -80, datetime.now())
+
+        intent = _manager_power_routing_intent(manager)
+        assert not intent.route_input
+        assert intent.home_output_budget == 20  # noqa: PLR2004
+        assert not intent.selected_primary_input_allowed
 
     async def test_secondary_pv_cover_allows_primary_input_below_raw_export_threshold(self, hass):
         """Secondary PV serving the home may make selected-primary input safe below the raw export threshold."""
