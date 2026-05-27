@@ -8155,6 +8155,63 @@ class TestPrimaryNoLocalSolarDefers:
         await manager._apply_primary_input(-400, datetime.now(), routing, allow_selected_primary_input=False)
 
         primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(250)
-        secondary.power_charge.assert_awaited_once_with(-72)
+        primary.power_discharge.assert_awaited_once_with(178)
+        secondary.power_charge.assert_awaited_once_with(0)
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_active_secondary_pv_input_is_not_counted_twice_as_ac_charge(self, hass):
+        """An input-mode secondary keeps local PV by stopping duplicate AC input."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="export-shaped-primary",
+            device_name="export shaped primary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=462,
+            battery_input=126,
+            input_limit=0,
+            output_limit=463,
+        )
+        primary.solarInput.update_value(588)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="export-shaped-secondary",
+            device_name="export shaped secondary",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            home_input=79,
+            battery_input=158,
+            input_limit=79,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(79)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(383)
+        secondary.power_charge.assert_awaited_once_with(0)
         secondary.power_discharge.assert_not_awaited()

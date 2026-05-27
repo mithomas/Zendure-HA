@@ -2004,7 +2004,38 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 capacity += routing.chargeable_produced_home(device)
             return capacity
 
-        surplus_floor_devices = [*active_secondary_charge_devices, *charge_devices, *idle_secondary_surplus_devices]
+        primary_input_blocked = blocked_primary_input is not None
+        active_secondary_local_pv_only_devices = [
+            device
+            for device in charge_devices
+            if (
+                primary_input_blocked
+                and device in self.charge
+                and device.homeOutput.asInt == 0
+                and routing.charge_surplus(device) > 0
+                and not positive_demand_charge_lag
+            )
+        ]
+        secondary_ac_input_to_stop = sum(
+            routing.route(device).charge_floor for device in active_secondary_local_pv_only_devices
+        )
+        if (
+            secondary_ac_input_to_stop > 0
+            and selected_primary is not None
+            and selected_primary in active_discharge_targets
+        ):
+            active_discharge_targets[selected_primary] = max(
+                0,
+                active_discharge_targets[selected_primary] - secondary_ac_input_to_stop,
+            )
+        charge_surplus_devices = [
+            device for device in charge_devices if device not in active_secondary_local_pv_only_devices
+        ]
+        surplus_floor_devices = [
+            *active_secondary_charge_devices,
+            *charge_surplus_devices,
+            *idle_secondary_surplus_devices,
+        ]
         charge_targets, setpoint = self._allocate_capped_targets(
             setpoint,
             surplus_floor_devices,
@@ -2025,7 +2056,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 replaced_non_primary_home_pv,
             )
             active_discharge_targets[selected_primary] += selected_primary_output_replacement_target
-        primary_input_blocked = blocked_primary_input is not None
         if (move_primary_charge_to_secondary and not pure_secondary_charge_devices) or primary_input_blocked:
             setpoint = 0
 
@@ -2064,6 +2094,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 active_discharge_targets[selected_primary],
                 allow_bypass_zero=True,
             )
+
+        for d in active_secondary_local_pv_only_devices:
+            await d.power_charge(0)
 
         dev_start = await self._apply_weighted_charge_allocation(
             setpoint,
