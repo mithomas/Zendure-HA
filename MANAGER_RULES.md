@@ -157,6 +157,17 @@ When P1 is exactly zero the grid is balanced and there is neither demand nor sur
 
 `MANUAL` mode follows the same primary-aware executor ordering as `MATCHING`. When a primary device is selected, charge and home-output commands prefer the primary before falling through to secondaries.
 
+### Selected-primary input gate
+
+In `MATCHING`, an output-mode selected primary should remain in output mode around zero grid flow unless switching it to input mode is low-risk. A corrected negative setpoint alone is not enough to move a home-serving primary into input mode, because SF800 Pro input/output mode switches can temporarily drop home output.
+
+The selected primary may be switched into input mode only when either condition is true:
+
+- the raw P1 meter is exporting at least 50 W (`p1 <= -50 W`), or
+- non-primary devices are already contributing more PV-backed home output than the measured household demand for the cycle.
+
+The 50 W gate uses the raw P1 reading, not the corrected routing setpoint. Household demand for the secondary-cover exception is calculated from raw P1 plus the active PV-backed home-output floor. The corrected setpoint still decides the charge budget after the primary is allowed to use the input path. Devices that are already reporting input mode may still receive charge and charge-lag corrections because no input/output mode switch is needed.
+
 ### Off-grid output at zero
 
 When a device with active off-grid production is stopped (commanded to zero home output), it receives a small negative command rather than zero to prevent off-grid production from being drawn from the grid. This is transparent to the routing rules above.
@@ -181,5 +192,5 @@ When a device with active off-grid production is stopped (commanded to zero home
 - Fast grid-meter changes are debounced through normal timing windows, except that primary-device changes trigger immediate routing recomputation. A reading is considered fast (and triggers immediate routing) when it deviates from the recent average or from the most recent reading by more than 3.5× the standard deviation of recent readings, with a minimum threshold of 15 W. For example, if recent readings average 100 W with a standard deviation of 10 W, the threshold is 35 W — a new reading of 140 W triggers immediately, a reading of 130 W does not. If readings are very stable (stddev below 15 W), the 15 W minimum applies, giving a fixed threshold of 52 W.
 - The optional P1 spike filter can be enabled through the manager switch. While enabled, upward P1 jumps above the configured threshold are held for the configured duration; if the jump falls back before the duration expires, it is ignored and not added to the recent P1 history.
 - Active charge-lag corrections that bypass normal timing still respect the minimum grid-meter update interval.
-- Around zero grid flow, prefer a small export or missed charge opportunity over switching a home-serving primary into charge mode and causing grid import.
+- Around zero grid flow, prefer a small export or missed charge opportunity over switching a home-serving primary into charge mode and causing grid import. The selected-primary input gate above is the concrete rule for that preference in `MATCHING`.
 - Starting with no available devices must not produce user-facing noise beyond expected warning or debug log output.

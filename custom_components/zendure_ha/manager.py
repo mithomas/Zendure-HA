@@ -27,7 +27,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.loader import async_get_integration
 
 from .api import Api
-from .const import CONF_AUTO_MQTT_USER, CONF_P1METER, DOMAIN, DeviceState, ManagerMode, ManagerState, SmartMode
+from .const import CONF_AUTO_MQTT_USER, CONF_P1METER, DOMAIN, AcMode, DeviceState, ManagerMode, ManagerState, SmartMode
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
 from .fusegroup import FuseGroup
@@ -58,6 +58,7 @@ PV_CHARGE_FIRST_OPERATIONS = {
 P1_CHARGE_LAG_FAST_DEVIATION = 20
 P1_EXPORT_TRIM_FAST_DEVIATION = 100
 CHARGE_HOLDOFF_SECONDS = 2
+PRIMARY_INPUT_EXPORT_THRESHOLD = 50
 
 P1_CHARGE_LAG_FAST_OPERATIONS = {
     ManagerMode.MATCHING,
@@ -128,6 +129,8 @@ class _PowerRoutingIntent:
     selected_primary_home_output: bool
     # True when selected-primary output may increase above its current reported output.
     selected_primary_output_growth_allowed: bool
+    # True when the selected primary may be switched into input mode this cycle.
+    selected_primary_input_allowed: bool
     # True when a strong-export cycle may only trim output, never start input.
     trim_home_output_only: bool
 
@@ -1430,6 +1433,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
+        selected_primary_input_allowed = self._selected_primary_input_allowed(p1, routing, pv_floors)
         selected_primary_output_growth_allowed = not (
             selected_primary_routing and self.operation == ManagerMode.MATCHING and p1 <= 0
         )
@@ -1439,11 +1443,28 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             policy,
             selected_primary_routing=selected_primary_routing,
             produced_only=produced_only,
+            selected_primary_input_allowed=selected_primary_input_allowed,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             trim_home_output_only=trim_home_output_only,
         )
 
         return intent, routing, setpoint
+
+    def _selected_primary_input_allowed(
+        self,
+        p1: int,
+        routing: _PowerRoutingSnapshot,
+        pv_floors: _PvFloorSummary,
+    ) -> bool:
+        """Return whether the selected primary may be switched into input mode."""
+        if self.operation != ManagerMode.MATCHING or not routing.primary_aware or routing.selected_primary is None:
+            return True
+        if routing.selected_primary.acMode.value == AcMode.INPUT:
+            return True
+        if p1 <= -PRIMARY_INPUT_EXPORT_THRESHOLD:
+            return True
+        household_demand = max(0, p1 + pv_floors.active_serving_pv_floor)
+        return pv_floors.active_non_primary_produced_floor > household_demand
 
     async def _poll_devices_and_prepare_routing_state(self, p1: int) -> int:
         """Poll devices, classify active flows, and return the adjusted setpoint."""
@@ -1702,6 +1723,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         selected_primary_routing: bool,
         produced_only: bool,
+        selected_primary_input_allowed: bool,
         selected_primary_output_growth_allowed: bool = True,
         trim_home_output_only: bool = False,
     ) -> _PowerRoutingIntent:
@@ -1719,6 +1741,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_input=selected_primary_routing and policy.selected_primary_charge,
             selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
+            selected_primary_input_allowed=selected_primary_input_allowed,
             trim_home_output_only=trim_home_output_only,
         )
 
@@ -1740,6 +1763,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     time,
                     routing,
                     strict_output_stop=intent.strict_home_output_stop,
+                    allow_selected_primary_input=intent.selected_primary_input_allowed,
                 )
             else:
                 await self._apply_standard_input(
@@ -1803,6 +1827,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         routing: _PowerRoutingSnapshot,
         *,
         strict_output_stop: bool = False,
+        allow_selected_primary_input: bool = True,
     ) -> None:
         """
         Apply an input budget while preserving selected-primary PV behavior.
@@ -1824,6 +1849,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         allow_home_pv_charge = not positive_demand_charge_lag
         primary = self._selected_primary_device(charging=True)
+        blocked_primary_input = None
+        if primary is not None and primary not in self.charge and not allow_selected_primary_input:
+            blocked_primary_input = primary
+            primary = None
         pv_floors = routing.pv_floor_summary()
         local_charge = routing.local_charge_summary(
             primary,
@@ -1854,11 +1883,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
 
+        def primary_input_excluded(device: ZendureDevice) -> bool:
+            return device is primary or device is blocked_primary_input
+
         charge_devices, idle_devices = self._collect_charge_candidates(
-            [device for device in self.charge if device is not primary],
-            [device for device in self.idle if device is not primary],
+            [device for device in self.charge if not primary_input_excluded(device)],
+            [device for device in self.idle if not primary_input_excluded(device)],
             promote_idle_devices=setpoint <= -SmartMode.POWER_START
-            and not any(device is not primary for device in self.charge),
+            and not any(not primary_input_excluded(device) for device in self.charge),
         )
         active_secondary_charge_devices = [
             device

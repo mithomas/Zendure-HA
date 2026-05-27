@@ -6254,6 +6254,103 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge.assert_awaited_once_with(250)
         secondary.power_discharge.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        ("p1", "primary_charge_allowed"),
+        [
+            pytest.param(-49, False, id="below-export-threshold"),
+            pytest.param(-50, True, id="at-export-threshold"),
+        ],
+    )
+    async def test_primary_input_switch_requires_raw_export_threshold(self, hass, p1, primary_charge_allowed):
+        """Small corrected surplus must not switch a home-serving selected primary into input mode."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"sf800-pro-primary-input-threshold-{p1}",
+            device_name=f"sf800 pro primary input threshold {p1}",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=20,
+            battery_input=120,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=20,
+        )
+        primary.solarInput.update_value(140)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, p1, datetime.now())
+
+        if primary_charge_allowed:
+            primary.power_charge.assert_awaited_once()
+            primary.power_discharge.assert_not_awaited()
+        else:
+            primary.power_charge.assert_not_awaited()
+            primary.power_discharge.assert_awaited_once_with(20)
+
+    async def test_secondary_pv_cover_allows_primary_input_below_raw_export_threshold(self, hass):
+        """Secondary PV serving the home may make selected-primary input safe below the raw export threshold."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-input-secondary-cover",
+            device_name="sf800 pro primary input secondary cover",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=10,
+            battery_input=120,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=10,
+        )
+        primary.solarInput.update_value(130)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-pv-cover-input-gate",
+            device_name="sf800 pro secondary pv cover input gate",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=30,
+        )
+        secondary.solarInput.update_value(30)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -49, datetime.now())
+
+        primary.power_charge.assert_awaited_once()
+        primary.power_discharge.assert_not_awaited()
+
     async def test_positive_p1_charge_lag_stays_on_the_primary_aware_charge_path(self, hass):
         """A positive-demand lag cycle should stay on the charge path when both systems are still reporting charging telemetry."""
         primary = make_device(
