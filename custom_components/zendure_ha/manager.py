@@ -2140,9 +2140,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self._reset_home_output_charge_state()
 
         selected_primary = routing.selected_primary
-        charge_produced_devices = [
-            device for device in self.charge if device.is_discharge_blocked() and routing.produced_limit(device) > 0
-        ]
+        charge_produced_devices = [device for device in self.charge if routing.produced_limit(device) > 0]
         await self._stop_charging_for_home_output(
             skip_devices=set(charge_produced_devices),
             allow_bypass_zero=True,
@@ -2283,8 +2281,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
         )
 
+        async def command_primary_aware_home_output(device: ZendureDevice, target: int) -> None:
+            route = routing.route(device)
+            if device.can_bypass and target <= route.bypass_passthrough:
+                await self._command_home_output(device, 0, allow_bypass_zero=True)
+            else:
+                await self._command_home_output(device, target, allow_bypass_zero=True)
+
         if primary is not None and primary_target > 0:
-            await self._command_home_output(primary, primary_target, allow_bypass_zero=True)
+            await command_primary_aware_home_output(primary, primary_target)
         elif (
             trim_home_output_only
             and selected_primary is not None
@@ -2293,7 +2298,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         ):
             await self._command_home_output(selected_primary, 0, allow_bypass_zero=True)
 
-        await self._command_home_output_targets(command_devices, targets, allow_bypass_zero=True)
+        for device in command_devices:
+            await command_primary_aware_home_output(device, targets[device])
 
         if produced_only:
             return

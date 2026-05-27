@@ -60,17 +60,16 @@ Apply sources in priority order, stopping when demand is covered:
 
 | Priority | Source                                       | Condition                                                                      |
 |----------|----------------------------------------------|--------------------------------------------------------------------------------|
-| 1        | PV / off-grid power already serving the home | Always                                                                         |
-| 2        | Selected primary device PV                   | Primary online and not empty/at-reserve/recovering                             |
-| 3        | Secondary device PV                          | —                                                                              |
-| 4        | Selected primary battery                     | Primary online, above all SoC/reserve/recovery floors, within discharge limit  |
-| 5        | Secondary device battery                     | Primary unavailable or at discharge limit                                      |
+| 1        | Selected primary device PV / off-grid / bypass PV | Primary online; bypass PV counts as primary PV when the primary is full |
+| 2        | Secondary device PV / off-grid / bypass PV   | Secondary PV is used before any battery-backed discharge                       |
+| 3        | Selected primary battery                     | Primary online, above all SoC/reserve/recovery floors, within discharge limit; full bypass-capable primary may discharge only after PV cannot cover demand |
+| 4        | Secondary device battery                     | Primary unavailable, at discharge limit, or unable to cover the remainder      |
 
 **Primary unavailability:** if the primary is offline, empty, at reserve, recovering, or at its discharge limit, remaining demand falls through to secondary devices.
 
 > **Note:** recovering devices are excluded from the produced-floor allocation in discharge routing to prevent them from holding a floor they might not sustain.
 
-> **Edge case — bypass at zero:** a device that supports bypass and has a full battery receives a bypass command instead of a zero-watt discharge command when no output is needed from it.
+> **Edge case — full-device bypass:** a full device that supports bypass stays in bypass while PV can cover the household demand. If PV from the primary and secondaries cannot cover demand, the selected primary may discharge before secondary batteries are used. A bypass-capable full device still receives a bypass command instead of a zero-watt discharge command when no battery-backed output is needed from it.
 
 ## Charge Routing (Grid Surplus)
 
