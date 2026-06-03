@@ -1109,3 +1109,65 @@ def test_raw_device_state_update_does_not_overwrite_derived_state_sensor(hass):
     assert changed is False
     assert device.state is DeviceState.SOCNEARLYFULL
     assert state_sensor.asInt == DeviceState.SOCNEARLYFULL.value
+
+
+@pytest.mark.parametrize(
+    (
+        "online",
+        "home_output",
+        "battery_output",
+        "battery_input",
+        "solar_input",
+        "pwr_produced",
+        "expected",
+    ),
+    [
+        # 1. Device Offline: should return False
+        (False, 100, 200, 0, 0, 0, False),
+        # 2. Low Home Output (<= POWER_TOLERANCE of 5): should return False
+        (True, 5, 200, 0, 0, 0, False),
+        (True, 0, 200, 0, 0, 0, False),
+        # 3. Direct Battery Output (battery_output - battery_input > 5): should return True
+        (True, 100, 10, 0, 100, 0, True),
+        (True, 100, 6, 0, 100, 0, True),  # 6 - 0 = 6 > 5
+        (True, 100, 10, 5, 100, 0, False),  # 10 - 5 = 5 <= 5, solar input covers it (100 - 100 = 0 <= 5)
+        # 4. Produced Solar Evidence (home_output - produced_evidence > 5)
+        # produced_evidence = max(0, -pwr_produced, solar_input)
+        # Case 4a: home_output - solar_input > 5 (no battery telemetry shown, but home output exceeds solar input)
+        (True, 200, 0, 0, 100, 0, True),  # 200 - 100 = 100 > 5
+        # Case 4b: home_output - solar_input <= 5
+        (True, 100, 0, 0, 100, 0, False),  # 100 - 100 = 0 <= 5
+        # Case 4c: home_output - (-pwr_produced) > 5 (using pwr_produced evidence)
+        (True, 200, 0, 0, 50, -150, True),  # produced_evidence = max(0, 150, 50) = 150. 200 - 150 = 50 > 5
+        # Case 4d: home_output - (-pwr_produced) <= 5
+        (True, 150, 0, 0, 50, -150, False),  # produced_evidence = 150. 150 - 150 = 0 <= 5
+    ],
+)
+def test_reports_battery_backed_home_output(
+    hass,
+    online,
+    home_output,
+    battery_output,
+    battery_input,
+    solar_input,
+    pwr_produced,
+    expected,
+):
+    """Verify reports_battery_backed_home_output under various telemetry states."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-battery-backed-output",
+        product_model="SolarFlow 800 Pro",
+        level=50,
+    )
+    # Configure telemetry state
+    device.connectionStatus.update_value(SmartMode.CONNECTED if online else 0)
+    device.homeOutput.update_value(home_output)
+    device.batteryOutput.update_value(battery_output)
+    device.batteryInput.update_value(battery_input)
+    device.solarInput.update_value(solar_input)
+    device.pwr_produced = pwr_produced
+
+    assert device.reports_battery_backed_home_output() is expected
+
