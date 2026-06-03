@@ -57,7 +57,7 @@ PV_CHARGE_FIRST_OPERATIONS = {
 
 P1_CHARGE_LAG_FAST_DEVIATION = 20
 P1_EXPORT_TRIM_FAST_DEVIATION = 100
-CHARGE_HOLDOFF_SECONDS = 2
+CHARGE_HOLDOFF_SECONDS = 1
 PRIMARY_INPUT_EXPORT_THRESHOLD = 50
 
 P1_CHARGE_LAG_FAST_OPERATIONS = {
@@ -2498,7 +2498,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # SF 2400 may show more gridInputPower than offGridPower and will be
             # recognized as charging, so set power to 10 instead of 0.
             if max(0, device.pwr_offgrid) == 0:
-                await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
+                if allow_bypass_zero and device.can_bypass:
+                    await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
+                else:
+                    # OPTIMIZATION: Stop charging by zeroing input limit instead of switching AC mode to output
+                    await device.power_charge(0)
             else:
                 await device.power_discharge(10)
 

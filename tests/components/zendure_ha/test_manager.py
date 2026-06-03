@@ -5220,9 +5220,9 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
-        primary.power_charge.assert_not_awaited()
+        primary.power_charge.assert_awaited_once_with(0)
         secondary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(0)
+        primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_awaited_once_with(50)
 
     @pytest.mark.parametrize("full_bypass_device_is_primary", [True, False])
@@ -5676,9 +5676,14 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, 150, datetime.now())
 
-        charging.power_charge.assert_not_awaited()
+        if selected_device == "charging":
+            charging.power_charge.assert_awaited_once_with(0)
+            charging.power_discharge.assert_not_awaited()
+        else:
+            charging.power_charge.assert_not_awaited()
+            charging.power_discharge.assert_awaited_once_with(0)
+
         mixed.power_charge.assert_not_awaited()
-        charging.power_discharge.assert_awaited_once_with(0)
         mixed.power_discharge.assert_awaited_once_with(100)
 
     async def test_positive_p1_with_mixed_secondary_output_uses_primary_pv_after_charge_reaches_zero(self, hass):
@@ -5730,9 +5735,9 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, 250, datetime.now())
 
-        primary.power_charge.assert_not_awaited()
+        primary.power_charge.assert_awaited_once_with(0)
         mixed.power_charge.assert_not_awaited()
-        assert primary.power_discharge.await_args_list == [call(0), call(100)]
+        primary.power_discharge.assert_awaited_once_with(100)
         mixed.power_discharge.assert_awaited_once_with(100)
 
     @pytest.mark.parametrize(
@@ -7937,11 +7942,11 @@ class TestNearFullChargeTaper:
 class TestChargeHoldoffTimers:
     """Verify the anti-oscillation charge holdoff uses the correct timer values."""
 
-    def test_holdoff_duration_is_two_seconds(self, hass) -> None:
-        """Holdoff is always 2 s."""
+    def test_holdoff_duration_is_one_second(self, hass) -> None:
+        """Holdoff is always 1 s."""
         from custom_components.zendure_ha.manager import CHARGE_HOLDOFF_SECONDS
 
-        assert CHARGE_HOLDOFF_SECONDS == 2
+        assert CHARGE_HOLDOFF_SECONDS == 1
 
         device = make_device(hass, device_id="holdoff-timer-device", device_name="holdoff timer device", level=50)
         manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING)
@@ -7952,7 +7957,7 @@ class TestChargeHoldoffTimers:
         manager._apply_charge_holdoff(-200, now, allow_charge=True)
 
         elapsed = (manager.charge_time - now).total_seconds()
-        assert abs(elapsed - 2) < 1
+        assert abs(elapsed - 1) < 1
 
 
 class TestLowSocImmediatePromotion:

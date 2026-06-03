@@ -81,7 +81,7 @@ Apply sources in priority order, stopping when demand is covered:
 6. **Primary with no local solar defers to secondaries:** if the primary is charging but has no solar of its own to contribute (it would draw from the grid to charge), and a secondary has its own solar available, the charge allocation shifts to that secondary instead.
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
 
-> **Anti-oscillation:** entering charge mode sets a 2 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home. At zero/export in `MATCHING`, a charging selected primary may preserve its current output and replace measured non-primary PV floors, but must not grow output simply because more local PV is available; that surplus remains available for charging.
+> **Anti-oscillation:** entering charge mode sets a 1 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 2 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home. At zero/export in `MATCHING`, a charging selected primary may preserve its current output and replace measured non-primary PV floors, but must not grow output simply because more local PV is available; that surplus remains available for charging.
 
 > **Input limits are requested caps:** the manager may assign an input limit that a device does not fully ingest. This is expected when the device firmware tapers charging near the target SoC. The manager does not pre-clamp input targets for tapering importers; if the importer accepts less than requested, remaining surplus can appear as grid export until telemetry or P1 feedback routes a later cycle.
 
@@ -91,17 +91,17 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 
 | Control | Default | Purpose | Trade-off of Reducing |
 |---------|---------|---------|----------------------|
-| Charge holdoff | 2 s | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
-| Charge debounce | 4 s | Delays charge mode when it would zero active PV floor, without growing charging selected-primary output during export | PV floor may drop briefly before recovery; visible power dips |
+| Charge holdoff | 1 s (was 2 s) | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
+| Charge debounce | 2 s (was 4 s) | Delays charge mode when it would zero active PV floor, without growing charging selected-primary output during export | PV floor may drop briefly before recovery; visible power dips |
 | Selected-primary export cap | P1 ≤ 0 in `MATCHING` | Preserves current primary output and measured non-primary PV floors while stopping PV-only output growth into grid export | Primary PV may cover import only after a positive P1 reading |
 | Battery-export trim threshold | 100 W export | Lets battery-backed export trim home output without waiting for normal debounce | More zero-flow noise can trigger output trims; stale telemetry can over-trim near zero |
 | Spike filter threshold | 800 W | Ignores sudden P1 spikes from appliance inrush | False positives cause overcorrection to transient loads |
 
 ### Adjustment guidance
 
-**Lower risk:**
-- Reducing charge holdoff from 2 s to 1 s — safe if load transients are infrequent.
-- Reducing charge debounce from 4 s to 2 s — minor risk of PV floor zeroing.
+**Optimized Defaults (Lower risk options applied):**
+- **Charge holdoff** set to 1 s — safe when coupled with zero-charge safe harbor limits.
+- **Charge debounce** set to 2 s — minor risk of PV floor zeroing; fast update lock-out (TIMEFAST) is proportionally set to 1.1 s.
 
 **Higher risk:**
 - Lowering spike filter threshold below typical appliance inrush (kettles, AC compressors).
@@ -145,6 +145,12 @@ The taper uses the near-full device state, but is otherwise treated as a normal 
 When P1 is exactly zero the grid is balanced and there is neither demand nor surplus. `MATCHING` treats this as a discharge situation and dispatches to the home-output executor, which leaves any active charging untouched.
 
 `STORE_SOLAR`, `MATCHING_CHARGE`, and `MANUAL` instead dispatch to the charge executor with a budget of zero. The charge executor explicitly commands every device to stop charging (`power_charge(0)`). This ensures that a device which was actively charging from a previous cycle receives a stop command rather than silently continuing until the next non-zero P1 reading arrives.
+
+### Zero-Charge Safe Harbor (Relay Protection)
+
+To prevent severe mechanical relay wear-and-tear on secondary or demoted inverters when grid load oscillates around zero, the manager commands active charging devices to stop by sending `power_charge(0)` (setting input limit to 0 W in AC mode 1) rather than switching the device to output mode 2 (`discharge(0)`). 
+
+A physical AC mode switch to output is only performed when an actual non-zero battery-backed discharge output is allocated to the device. Full devices supporting bypass are exempt: they still transition to bypass at zero output when allowed to keep home-serving PV active.
 
 ### Strict output stop
 
