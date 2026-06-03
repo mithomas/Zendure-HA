@@ -136,7 +136,7 @@ The taper uses the near-full device state, but is otherwise treated as a normal 
 - **Output-side taper is manager-handled.** When local PV would charge the near-full device above its taper cap, routing preserves or raises produced home output so the excess PV is exported instead of silently charging beyond the taper.
 - **Overflow is routed normally.** Capping charge at the taper rate reduces the surplus that the device will absorb. The remaining surplus is distributed to other sinks (home load → other batteries → grid export) through the normal routing logic — no special overflow handling is needed.
 - **"Keep local PV local" is suspended.** When a device is near-full, its charge cap may prevent it from absorbing all its own PV. Excess PV is routed outward rather than being withheld.
-- **Drop-back.** If SoC falls sufficiently below the target (e.g. during active discharge), the taper is removed, the state returns to normal, and the full charge rate is restored automatically.
+- **Taper exit.** The taper limit is only active within a specific SoC range below the target. If the SoC falls below this range (e.g. during active discharge), the taper limit naturally ceases to apply, and the full charge rate is restored automatically.
 
 ## Mode Mechanics
 
