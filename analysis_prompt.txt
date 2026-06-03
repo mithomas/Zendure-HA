@@ -1,0 +1,35 @@
+You are analyzing a Home Assistant solar/battery control system.
+
+Task:
+Use the CSV export and the existing manager rules to find avoidable grid import/export and propose rule changes that improve solar self-consumption while avoiding frequent charge/discharge switching.
+
+Steps:
+1. Inspect the CSV columns and infer sensor meanings, units, and sample interval.
+2. Load the CSV in Python.
+3. Normalize timestamps and power values.
+4. Compute approximate energy per interval using the sample duration.
+5. Detect inefficient patterns:
+   - Grid import > threshold while battery SoC is above reserve and battery is not discharging.
+   - Grid import while solar production could cover load or charge battery.
+   - Solar export > threshold while battery SoC is below maximum and battery is not charging.
+   - Battery charge/discharge reversals within short windows.
+   - Import/export oscillation within short windows.
+   - Periods where current manager rules appear to block useful battery behavior.
+6. Cross-check each finding against the manager rules.
+7. Estimate kWh impact for each finding.
+8. Recommend minimal rule changes.
+
+Constraints:
+- Avoid changes that increase cycling noise or cause rapid switching.
+- Prefer hysteresis over single thresholds.
+- Prefer minimum state duration over instant reaction.
+- Preserve battery reserve and safety limits.
+- Do not assume missing sensors. Mark uncertain findings as uncertain.
+- Recommendations must be based on measured intervals in the CSV.
+
+Deliverables:
+1. A short summary of total avoidable import/export found.
+2. A table of suspicious intervals with timestamps, duration, kWh estimate, SoC, solar/load/grid/battery values, and reason.
+3. A list of proposed manager threshold or logic changes.
+4. Explanation of how each change reduces waste.
+5. Explanation of how each change avoids frequent switching.
