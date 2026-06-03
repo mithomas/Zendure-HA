@@ -211,6 +211,8 @@ class _PowerRoutingDevice:
     produced_limit: int
     # Portion of current home output already covered by PV/off-grid production.
     produced_home: int
+    # Minimum home output required to keep local PV battery charge within taper.
+    taper_output_floor: int
     # Current device input that should be reduced before switching direction.
     charge_floor: int
     # Local production left for this device's own battery after current home output.
@@ -291,6 +293,10 @@ class _PowerRoutingSnapshot:
     def charge_surplus(self, device: ZendureDevice) -> int:
         """Return local production surplus that can remain on the device for charging."""
         return self.route(device).charge_surplus
+
+    def active_taper_output_floor(self, devices: list[ZendureDevice]) -> int:
+        """Return the total taper-driven output floor for active output devices."""
+        return sum(self.route(device).taper_output_floor for device in devices if device in self.discharge_devices)
 
     def chargeable_produced_home(self, device: ZendureDevice) -> int:
         """Return produced home output that can move into local charging."""
@@ -476,6 +482,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     restores debounce timing after the cycle. _execute_power_routing() dispatches
     to _apply_standard_input(), _apply_primary_input(), _apply_standard_home_output(),
     or _apply_primary_home_output().
+
+    The behavioral routing rules are documented in MANAGER_RULES.md.
     """
 
     devices: list[ZendureDevice] = []
@@ -986,6 +994,24 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if primary_aware:
             return min(limit, self._primary_discharge_limit(device))
         return min(limit, max(0, device.fuseGrp.discharge_limit(device)))
+
+    def _current_taper_output_floor(self, device: ZendureDevice, *, primary_aware: bool = False) -> int:
+        """Return local-PV home output needed to keep battery charge within taper."""
+        if device.discharge_limit <= 0:
+            return 0
+
+        taper = device.taper_charge_limit
+        if taper is None:
+            return 0
+
+        local_production = max(0, -device.pwr_produced)
+        floor = max(0, local_production - taper)
+        if floor == 0:
+            return 0
+
+        if primary_aware:
+            return min(floor, self._primary_discharge_limit(device))
+        return min(floor, max(0, device.fuseGrp.discharge_limit(device)))
 
     def _primary_charge_limit(self, device: ZendureDevice) -> int:
         """Return the maximum charge power for the primary within its fusegroup."""
@@ -1586,6 +1612,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 discharging=device in self.discharge,
                 produced_limit=produced_limit,
                 produced_home=produced_home,
+                taper_output_floor=self._current_taper_output_floor(device, primary_aware=primary_aware),
                 charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
                 charge_surplus=device.current_charge_surplus_limit(),
                 bypass_passthrough=bypass_passthrough,
@@ -2235,6 +2262,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         discharge_devices = routing.discharge_candidates(
             list(self.discharge), list(self.idle), promote_idle_devices=False
         )
+        setpoint = max(setpoint, routing.active_taper_output_floor(discharge_devices))
         idle_devices = [device for device in self.idle if device not in discharge_devices]
         idle_lvlmax, _idle_lvlmin = self._idle_levels(idle_devices)
         self.operationstate.update_value(
@@ -2271,6 +2299,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """
         _LOGGER.info("Home output (primary-aware) => setpoint %sW", setpoint)
         requested_setpoint = setpoint
+        setpoint = max(setpoint, routing.active_taper_output_floor(list(self.discharge)))
 
         self._reset_home_output_charge_state()
 
@@ -2299,7 +2328,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 for device in routing.discharge_devices
                 if device is not selected_primary
             )
-            primary_output_cap = max(0, selected_primary.homeOutput.asInt) + replaceable_non_primary_floor
+            primary_output_cap = max(
+                max(0, selected_primary.homeOutput.asInt) + replaceable_non_primary_floor,
+                routing.route(selected_primary).taper_output_floor,
+            )
         primary_bypass_floor = 0
         if (
             selected_primary is not None
@@ -2358,7 +2390,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             setpoint,
             [device for device in remaining_active if device.state != DeviceState.RESERVE_RECOVERY],
             {
-                device: min(max(0, device.homeOutput.asInt), routing.produced_limit(device))
+                device: routing.route(device).active_produced_home
                 for device in remaining_active
                 if device.state != DeviceState.RESERVE_RECOVERY
             },

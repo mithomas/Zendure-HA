@@ -83,6 +83,8 @@ Apply sources in priority order, stopping when demand is covered:
 
 > **Anti-oscillation:** entering charge mode sets a 2 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 4 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home. At zero/export in `MATCHING`, a charging selected primary may preserve its current output and replace measured non-primary PV floors, but must not grow output simply because more local PV is available; that surplus remains available for charging.
 
+> **Input limits are requested caps:** the manager may assign an input limit that a device does not fully ingest. This is expected when the device firmware tapers charging near the target SoC. The manager does not pre-clamp input targets for tapering importers; if the importer accepts less than requested, remaining surplus can appear as grid export until telemetry or P1 feedback routes a later cycle.
+
 ## Anti-oscillation Controls
 
 The manager deliberately slows P1 convergence to prevent hunting. Each control protects against a specific failure mode at the cost of slower response.
@@ -135,8 +137,10 @@ To prevent hardware-level PV curtailment near the configured target SoC, devices
 The taper uses the near-full device state, but is otherwise treated as a normal chargeable state:
 
 - **Charge is allowed** but capped at the taper rate via the effective charge limit.
+- **Input-mode taper is firmware-handled.** Manager input commands remain requested limits; a near-full importer may ingest less than assigned, and any leftover surplus may be exported until the next feedback cycle.
 - **Bypass is not triggered.** Bypass is reserved for the full state. A near-full device receives normal charge commands, not a bypass command.
 - **Discharge is unrestricted.** The taper does not block battery discharge.
+- **Output-side taper is manager-handled.** When local PV would charge the near-full device above its taper cap, routing preserves or raises produced home output so the excess PV is exported instead of silently charging beyond the taper.
 - **Overflow is routed normally.** Capping charge at the taper rate reduces the surplus that the device will absorb. The remaining surplus is distributed to other sinks (home load → other batteries → grid export) through the normal routing logic — no special overflow handling is needed.
 - **"Keep local PV local" is suspended.** When a device is near-full, its charge cap may prevent it from absorbing all its own PV. Excess PV is routed outward rather than being withheld.
 - **Drop-back.** If SoC falls more than 6 percentage points below the target (e.g. during active discharge), the taper is removed, the state returns to normal, and the full charge rate is restored automatically.

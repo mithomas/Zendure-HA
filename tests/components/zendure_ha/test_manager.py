@@ -7850,6 +7850,34 @@ class TestZeroFastRecovery:
 class TestNearFullChargeTaper:
     """Manager routing tests for near-full (SOCNEARLYFULL) charge taper behavior."""
 
+    async def test_near_full_sf800_pro_output_accounts_for_local_pv_taper(self, hass):
+        """Local PV already flowing into the battery should raise the output target to honor taper."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-nearlyfull-local-pv-output",
+            product_model="SolarFlow 800 Pro",
+            level=98,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=250,
+            battery_input=322,
+            output_limit=250,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        assert device.state is DeviceState.SOCNEARLYFULL
+        device.power_discharge.assert_awaited_once_with(472)
+
     async def test_near_full_sf800_pro_is_not_bypassed_when_reduced_to_zero(self, hass):
         """A near-full SF800 Pro should NOT switch to bypass; bypass is reserved for SOCFULL."""
         device = make_device(
