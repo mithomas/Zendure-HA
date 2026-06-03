@@ -125,14 +125,7 @@ The fast path is not active in `MATCHING_CHARGE`, `STORE_SOLAR`, `MANUAL`, or `O
 
 ## Near-full Charge Taper
 
-To prevent hardware-level PV curtailment near the configured target SoC, devices with charge taper support apply a software charge cap once SoC enters the taper range. The cap reduces the charge rate in steps as SoC rises:
-
-| SoC band relative to target | Example at target = 80 % | Max charge rate |
-|-----------------------------|--------------------------|------------------|
-| target − 6 through target − 5 | 74 – 75 %                | 200 W            |
-| target − 4 through target − 3 | 76 – 77 %                | 150 W            |
-| target − 2 through target − 1 | 78 – 79 %                | 100 W            |
-| At or above target            | 80 % or above            | Bypass (full)    |
+To prevent hardware-level PV curtailment near the configured target SoC, devices with charge taper support apply a software charge cap once SoC enters the taper range. The cap reduces the charge rate in progressive steps as the SoC approaches the target limit.
 
 The taper uses the near-full device state, but is otherwise treated as a normal chargeable state:
 
@@ -143,7 +136,7 @@ The taper uses the near-full device state, but is otherwise treated as a normal 
 - **Output-side taper is manager-handled.** When local PV would charge the near-full device above its taper cap, routing preserves or raises produced home output so the excess PV is exported instead of silently charging beyond the taper.
 - **Overflow is routed normally.** Capping charge at the taper rate reduces the surplus that the device will absorb. The remaining surplus is distributed to other sinks (home load → other batteries → grid export) through the normal routing logic — no special overflow handling is needed.
 - **"Keep local PV local" is suspended.** When a device is near-full, its charge cap may prevent it from absorbing all its own PV. Excess PV is routed outward rather than being withheld.
-- **Drop-back.** If SoC falls more than 6 percentage points below the target (e.g. during active discharge), the taper is removed, the state returns to normal, and the full charge rate is restored automatically.
+- **Drop-back.** If SoC falls sufficiently below the target (e.g. during active discharge), the taper is removed, the state returns to normal, and the full charge rate is restored automatically.
 
 ## Mode Mechanics
 

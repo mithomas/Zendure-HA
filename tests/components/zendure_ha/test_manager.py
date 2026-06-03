@@ -7876,7 +7876,7 @@ class TestNearFullChargeTaper:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         assert device.state is DeviceState.SOCNEARLYFULL
-        device.power_discharge.assert_awaited_once_with(472)
+        device.power_discharge.assert_awaited_once_with(422)
 
     async def test_near_full_sf800_pro_is_not_bypassed_when_reduced_to_zero(self, hass):
         """A near-full SF800 Pro should NOT switch to bypass; bypass is reserved for SOCFULL."""
@@ -7885,7 +7885,7 @@ class TestNearFullChargeTaper:
             device_cls=SolarFlow800Pro,
             device_id="sf800-pro-nearlyfull-nobypass",
             product_model="SolarFlow 800 Pro",
-            level=95,
+            level=98,
             soc_set=100,
             home_input=100,
         )
