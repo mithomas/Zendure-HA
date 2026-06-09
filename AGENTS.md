@@ -18,6 +18,13 @@ Use the local venv when present:
 - Avoid adding user-visible entities or convenience sensors unless the task explicitly requires them.
 - Do not change user-visible entity names or semantics as part of test-only work.
 - Leave `examples/` alone unless the task is explicitly about examples or docs.
+- Do not create analysis scripts for each specific day; instead, re-use and potentially adjust the existing ones.
+
+## Analysis Scripts
+The `analysis/` directory contains tools to process and interpret telemetry exports.
+- `analyze_all_days.py`: The primary, comprehensive script for identifying patterns (e.g., unexpected secondary AC charging, primary output blockages, mode switches) across one or multiple CSV exports. By default, it scans for `export*.csv` in the current directory or a provided path.
+- `run_analysis.py`: Contains core analysis logic, interval calculations, and metric extractions.
+- `generate_markdown_table.py` & `generate_report.py`: Utilities for converting parsed metrics and episodes into structured markdown reports.
 
 
 ## Test Expectations
