@@ -1437,9 +1437,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         selected_charge_primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
-        selected_primary_input_allowed_for_shaping = (
-            self._selected_primary_input_allowed(p1, routing, pv_floors) if p1 <= 0 else True
-        )
+        selected_primary_input_allowed_for_shaping = self._selected_primary_input_allowed(p1, routing, pv_floors)
         local_charge = routing.local_charge_summary(
             selected_charge_primary,
             pv_charge_first_mode=pv_charge_first_mode,
@@ -1734,7 +1732,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
             )
 
-        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
+        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0 and selected_primary_input_allowed:
             setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
 
         positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
@@ -1950,6 +1948,30 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             time,
             allow_charge=adjusts_active_charge or keeps_non_primary_local_charge,
         )
+
+        # OPTIMIZATION: Primary Output Self-Trimming under grid export
+        if setpoint < 0 and selected_primary is not None and selected_primary in active_discharge_targets:
+            primary_target = active_discharge_targets[selected_primary]
+            if primary_target > 0 and selected_primary.state in EMPTY_SOC_STATES:
+                secondary_local_surplus = sum(
+                    max(0, routing.charge_surplus(device))
+                    for device in self.devices
+                    if device is not selected_primary
+                )
+                leftover_export = max(0, -setpoint - secondary_local_surplus)
+                if leftover_export > 0:
+                    trim = min(leftover_export, primary_target)
+                    active_discharge_targets[selected_primary] -= trim
+                    setpoint += trim
+                    _LOGGER.info(
+                        "Primary Output Self-Trimming: Trimming primary solar output %s by %sW to %sW to absorb export setpoint of %sW (secondary surplus: %sW)",
+                        selected_primary.name,
+                        trim,
+                        active_discharge_targets[selected_primary],
+                        setpoint - trim,
+                        secondary_local_surplus,
+                    )
+
         self.operationstate.update_value(ManagerState.CHARGE.value if setpoint < 0 else ManagerState.IDLE.value)
 
         def primary_input_excluded(device: ZendureDevice) -> bool:
