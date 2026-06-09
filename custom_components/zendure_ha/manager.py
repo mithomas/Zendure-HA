@@ -131,6 +131,8 @@ class _PowerRoutingIntent:
     selected_primary_output_growth_allowed: bool
     # True when the selected primary may be switched into input mode this cycle.
     selected_primary_input_allowed: bool
+    # True when secondary charge may absorb export from a gated selected-primary taper floor.
+    blocked_primary_taper_overflow_charge_allowed: bool
     # True when a strong-export cycle may only trim output, never start input.
     trim_home_output_only: bool
 
@@ -1465,6 +1467,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_primary_output_growth_allowed = not (
             selected_primary_routing and self.operation == ManagerMode.MATCHING and p1 <= 0
         )
+        blocked_primary_taper_overflow_charge_allowed = self._blocked_primary_taper_overflow_charge_allowed(
+            routing,
+            requested_setpoint,
+            selected_primary_input_allowed=selected_primary_input_allowed,
+            local_charge=local_charge,
+        )
         intent = self._power_routing_intent(
             requested_setpoint,
             setpoint,
@@ -1472,6 +1480,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_routing=selected_primary_routing,
             produced_only=produced_only,
             selected_primary_input_allowed=selected_primary_input_allowed,
+            blocked_primary_taper_overflow_charge_allowed=blocked_primary_taper_overflow_charge_allowed,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             trim_home_output_only=trim_home_output_only,
         )
@@ -1524,6 +1533,24 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         controlled_export += min(remaining_export, battery_trim_capacity)
 
         return max(0, meter_export - controlled_export)
+
+    @staticmethod
+    def _blocked_primary_taper_overflow_charge_allowed(
+        routing: _PowerRoutingSnapshot,
+        requested_setpoint: int,
+        *,
+        selected_primary_input_allowed: bool,
+        local_charge: _LocalChargeSummary,
+    ) -> bool:
+        """Return whether secondary charge may absorb a gated primary taper overflow."""
+        selected_primary = routing.selected_primary
+        return (
+            not selected_primary_input_allowed
+            and requested_setpoint < -local_charge.non_primary_local_chargeable_surplus
+            and selected_primary is not None
+            and selected_primary in routing.discharge_devices
+            and routing.route(selected_primary).taper_output_floor > 0
+        )
 
     async def _poll_devices_and_prepare_routing_state(self, p1: int) -> int:
         """Poll devices, classify active flows, and return the adjusted setpoint."""
@@ -1707,10 +1734,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 )
                 if protects_selected_primary_floor:
                     requested_charge = max(0, -surplus_setpoint)
-                    uncovered_primary_floor = max(
-                        0,
-                        pv_floors.active_primary_produced_floor - max(0, discharge_candidate_setpoint),
-                    )
+                    if self._blocked_primary_taper_overflow_charge_allowed(
+                        routing,
+                        surplus_setpoint,
+                        selected_primary_input_allowed=selected_primary_input_allowed,
+                        local_charge=local_charge,
+                    ):
+                        uncovered_primary_floor = 0
+                    else:
+                        uncovered_primary_floor = max(
+                            0,
+                            pv_floors.active_primary_produced_floor - max(0, discharge_candidate_setpoint),
+                        )
                     blocked_primary_local_surplus = (
                         0 if selected_primary_input_allowed else local_charge.selected_primary_local_surplus
                     )
@@ -1747,6 +1782,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and setpoint < 0
             and -setpoint <= non_primary_preservable_charge
         )
+        blocked_primary_taper_overflow_charge_allowed = self._blocked_primary_taper_overflow_charge_allowed(
+            routing,
+            setpoint,
+            selected_primary_input_allowed=selected_primary_input_allowed,
+            local_charge=local_charge,
+        )
         debounce_charge_flip = (
             matching_primary_aware
             and pv_floors.uncovered_chargeable_serving_pv_floor > 0
@@ -1754,6 +1795,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and setpoint < 0
             and not positive_demand_charge_lag
             and not charge_uses_only_non_primary_local_surplus
+            and not blocked_primary_taper_overflow_charge_allowed
         )
         if debounce_charge_flip:
             if self.charge_debounce_since is None:
@@ -1791,6 +1833,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_primary_routing: bool,
         produced_only: bool,
         selected_primary_input_allowed: bool,
+        blocked_primary_taper_overflow_charge_allowed: bool = False,
         selected_primary_output_growth_allowed: bool = True,
         trim_home_output_only: bool = False,
     ) -> _PowerRoutingIntent:
@@ -1809,6 +1852,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             selected_primary_input_allowed=selected_primary_input_allowed,
+            blocked_primary_taper_overflow_charge_allowed=blocked_primary_taper_overflow_charge_allowed,
             trim_home_output_only=trim_home_output_only,
         )
 
@@ -1831,6 +1875,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     routing,
                     strict_output_stop=intent.strict_home_output_stop,
                     allow_selected_primary_input=intent.selected_primary_input_allowed,
+                    allow_blocked_primary_taper_overflow_charge=intent.blocked_primary_taper_overflow_charge_allowed,
                 )
             else:
                 await self._apply_standard_input(
@@ -1895,6 +1940,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         strict_output_stop: bool = False,
         allow_selected_primary_input: bool = True,
+        allow_blocked_primary_taper_overflow_charge: bool = False,
     ) -> None:
         """
         Apply an input budget while preserving selected-primary PV behavior.
@@ -1946,7 +1992,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         setpoint = self._apply_charge_holdoff(
             setpoint,
             time,
-            allow_charge=adjusts_active_charge or keeps_non_primary_local_charge,
+            allow_charge=adjusts_active_charge
+            or keeps_non_primary_local_charge
+            or allow_blocked_primary_taper_overflow_charge,
         )
 
         # OPTIMIZATION: Primary Output Self-Trimming under grid export
@@ -1954,9 +2002,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             primary_target = active_discharge_targets[selected_primary]
             if primary_target > 0 and selected_primary.state in EMPTY_SOC_STATES:
                 secondary_local_surplus = sum(
-                    max(0, routing.charge_surplus(device))
-                    for device in self.devices
-                    if device is not selected_primary
+                    max(0, routing.charge_surplus(device)) for device in self.devices if device is not selected_primary
                 )
                 leftover_export = max(0, -setpoint - secondary_local_surplus)
                 if leftover_export > 0:
@@ -2059,6 +2105,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in charge_devices
             if (
                 primary_input_blocked
+                and not allow_blocked_primary_taper_overflow_charge
                 and device in self.charge
                 and device.homeOutput.asInt == 0
                 and routing.charge_surplus(device) > 0
@@ -2070,6 +2117,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in idle_secondary_surplus_devices
             if (
                 primary_input_blocked
+                and not allow_blocked_primary_taper_overflow_charge
                 and device.homeOutput.asInt == 0
                 and routing.charge_surplus(device) > 0
                 and not positive_demand_charge_lag
@@ -2080,6 +2128,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in charge_devices
             if (
                 primary_input_blocked
+                and not allow_blocked_primary_taper_overflow_charge
                 and device in self.idle
                 and device.homeOutput.asInt == 0
                 and routing.charge_surplus(device) > 0
@@ -2132,7 +2181,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 replaced_non_primary_home_pv,
             )
             active_discharge_targets[selected_primary] += selected_primary_output_replacement_target
-        if (move_primary_charge_to_secondary and not pure_secondary_charge_devices) or primary_input_blocked:
+        if (move_primary_charge_to_secondary and not pure_secondary_charge_devices) or (
+            primary_input_blocked and not allow_blocked_primary_taper_overflow_charge
+        ):
             setpoint = 0
 
         for d in self.discharge:

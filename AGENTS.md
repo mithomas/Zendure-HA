@@ -15,6 +15,7 @@ Use the local venv when present:
 - Do not introduce a dependency from `device.py` to `manager.py`.
 - Keep device-derived discharge and recovery state owned by the device.
 - Let the manager consume device state rather than recompute it from back-references.
+- For manager routing changes, preserve the pipeline approach: poll and classify device state, build routing snapshot facts once, shape the setpoint, build an intent, then execute from those prepared facts without recomputing policy from raw back-references.
 - Avoid adding user-visible entities or convenience sensors unless the task explicitly requires them.
 - Do not change user-visible entity names or semantics as part of test-only work.
 - Leave `examples/` alone unless the task is explicitly about examples or docs.
