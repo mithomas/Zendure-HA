@@ -140,6 +140,19 @@ The taper uses the near-full device state, but is otherwise treated as a normal 
 
 ## Mode Mechanics
 
+### Output mode as default posture
+
+Prefer keeping devices in output mode, including zero-output output mode, unless a cycle has a specific reason to leave it. Output mode is the manager's neutral posture because it avoids unnecessary input/output relay switches and preserves already-serving PV or off-grid power for the home.
+
+A device should leave output mode only when one of these conditions applies:
+
+- Actual AC/input charging is allocated to the device.
+- The active manager mode requires home output to stop, such as `STORE_SOLAR` strict output stop.
+- The selected-primary input gate allows input because unexplained export is large enough or non-primary PV can cover household demand.
+- The device is empty and PV-charge-first routing should send current PV to its own battery before home load.
+- The device is full and supports explicit bypass; bypass is reserved for the full state, not near-full taper.
+- The device is already in an input/charge flow that should be reduced or stopped without immediately flipping back to output mode.
+
 ### Zero-setpoint charge path
 
 When P1 is exactly zero the grid is balanced and there is neither demand nor surplus. `MATCHING` treats this as a discharge situation and dispatches to the home-output executor, which leaves any active charging untouched.
