@@ -499,6 +499,94 @@ class TestStoreSolarRouting:
 
 
 class TestSmartMatchingPrimaryAware:
+
+    async def test_taper_export_stuck(self, hass, freezer):
+        """Test that primary taper floor doesn't cause infinite holdoff loop."""
+        from custom_components.zendure_ha.const import ManagerMode, DeviceState, AcMode
+        from tests.components.zendure_ha.common import make_manager, make_device, make_p1_event
+        from unittest.mock import PropertyMock, patch, AsyncMock
+        from datetime import datetime, timedelta
+
+        primary = make_device(
+            hass,
+            device_id="A1",
+            device_name="Primary",
+            level=99,
+            ac_mode=AcMode.OUTPUT,
+            home_output=343,
+            battery_input=600,
+            battery_output=0,
+        )
+        primary.power_charge = AsyncMock(return_value=0)
+        primary.power_discharge = AsyncMock(return_value=343)
+        
+        # Mock SolarFlow 800 taper behavior using patch so it doesn't break other tests
+        with patch("custom_components.zendure_ha.devices.solarflow800.SolarFlow800.taper_charge_limit", new_callable=PropertyMock) as mock_taper:
+            mock_taper.return_value = 600
+            primary.pwr_max = 1200
+            primary.charge_limit = -1200
+            primary.discharge_limit = 1200
+            primary.update_device_state(None, DeviceState.RESERVE_RECOVERY.value)
+            
+            # We must explicitly set pwr_produced or solarInput so that local_production is calculated.
+            primary.pwr_produced = -950
+            primary.solarInput.update_value(950)
+        
+            secondary = make_device(
+                hass,
+                device_id="A2",
+                device_name="Secondary",
+                level=50,
+                ac_mode=AcMode.INPUT,
+                home_input=0,
+                battery_input=80,
+                battery_output=0,
+            )
+            secondary.power_charge = AsyncMock(return_value=-600)
+            secondary.power_discharge = AsyncMock(return_value=0)
+            
+            secondary.pwr_max = 1200
+            secondary.charge_limit = -1200
+            secondary.discharge_limit = 1200
+            secondary.update_device_state(None, DeviceState.INACTIVE.value)
+            secondary.pwr_produced = 0
+            secondary.solarInput.update_value(0)
+        
+            manager = make_manager(
+                hass,
+                devices=[primary, secondary],
+                operation=ManagerMode.MATCHING,
+                primary_device_id="A1",
+            )
+        
+            # Initial routing cycle with small demand, so it outputs 343W from primary.
+            await manager._p1_changed(make_p1_event(170))
+            
+            # Now simulate export: p1 meter reads -170W because primary is pushing 343W.
+            freezer.tick(timedelta(seconds=15))
+            # We need to simulate that primary is now outputting 343.
+            primary.homeOutput.update_value(343)
+            await manager._p1_changed(make_p1_event(-170))
+            
+            # Secondary is expected to be in input mode with homeInput = 0.
+            # The manager should have held off charging and set charge_time.
+            assert manager.charge_time > datetime.now()
+            
+            # Reset mock to see the next calls
+            secondary.power_charge.reset_mock()
+
+            # Loop for 5 minutes, as if the grid keeps exporting -170W.
+            # The primary keeps outputting 343W.
+            for i in range(10):
+                freezer.tick(timedelta(seconds=30))
+                await manager._p1_changed(make_p1_event(-170))
+                
+            # Secondary should have started AC charging to absorb the export
+            # We assert it was called with a negative power (charging)
+            assert secondary.power_charge.await_count > 0
+            last_charge_call = secondary.power_charge.await_args_list[-1].args[0]
+            print(f"last_charge_call = {last_charge_call}")
+            assert last_charge_call < 0
     async def test_includes_idle_devices_that_already_have_produced_power(self, hass):
         """Idle devices that already contribute produced power should still join discharge candidate selection."""
         active = make_device(

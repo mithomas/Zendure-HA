@@ -1722,7 +1722,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 setpoint <= 0
                 or local_charge.active_charge_local_surplus > 0
                 or local_charge.active_non_primary_local_surplus > 0
-                or (protects_selected_primary_floor and local_charge.idle_non_primary_local_surplus > 0)
+                or (
+                    protects_selected_primary_floor
+                    and (local_charge.idle_non_primary_local_surplus > 0 or selected_primary_input_allowed)
+                )
                 or (p1 < 0 and local_charge.active_non_primary_empty_chargeable > 0)
                 or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
             ):
