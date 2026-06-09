@@ -4745,6 +4745,77 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge.assert_awaited_once_with(-100)
         secondary.power_charge.assert_not_awaited()
 
+    async def test_socempty_primary_solar_does_not_charge_secondary_during_grid_import(self, hass):
+        """pv_charge_first must not fire while the house is still importing from the grid.
+
+        When the primary hits SOCEMPTY its solar passthrough is small and the
+        house is still drawing from the grid (p1 > 0).  The pv_charge_first
+        clamp must not convert the positive demand setpoint into a negative
+        charge setpoint, which would flip the secondary (which has its own solar
+        surplus) from output into charging mode and worsen the import.
+        """
+        # Primary: SOCEMPTY, 52 W solar passing straight through to home.
+        # ac_mode is OUTPUT (device is in pass-through, not accepting AC input)
+        # — this matches the real-world state where the device cannot be switched
+        # to input because p1 is positive (house is importing).
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-import-pvcf-primary",
+            device_name="sf800 pro import pvcf primary",
+            product_model="SolarFlow 800 Pro",
+            level=5,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=52,
+            battery_input=0,
+            battery_output=0,
+        )
+        # Secondary: healthy level, 317 W solar – 106 W stored as surplus, 211 W
+        # serving home.  Before the fix the pv_charge_first clamp would redirect
+        # secondary into input mode and consume 52 W of AC to charge primary.
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-import-pvcf-secondary",
+            device_name="sf800 pro import pvcf secondary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            home_output=211,
+            battery_input=106,
+            battery_output=0,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            discharge_recovery_margin=5,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        # House is still importing 300 W from the grid – pv_charge_first must
+        # not convert this into a charge setpoint.
+        await _run_prepared_power_routing(manager, 300, datetime.now())
+
+        assert primary.state is DeviceState.SOCEMPTY
+        # Secondary must never receive a charge command.
+        secondary.power_charge.assert_not_awaited()
+        # Secondary must keep contributing its home output.
+        secondary.power_discharge.assert_awaited()
+        assert secondary.power_discharge.call_args_list[-1].args[0] > 0
+
     @pytest.mark.parametrize(
         ("secondary_level", "expected_state"),
         [
@@ -7018,6 +7089,78 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, -300, datetime.now())
 
         secondary.power_charge.assert_awaited_once_with(-300)
+
+    async def test_empty_primary_output_self_trimming_under_export(self, hass):
+        """EMPTY_SOC_STATES primary trims its solar home output before charging at the residual setpoint.
+
+        When the primary is outputting solar to the home (100 W) and the house is
+        exporting (setpoint = -180 W), the staged code should trim the primary's
+        discharge target by 100 W (absorbing that portion of the export), leaving a
+        -80 W residual that goes to primary battery input.
+
+        Without the fix the primary would receive both power_charge(-180) AND
+        power_discharge(100) in the same cycle — a contradictory pair.
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-empty-primary-trim",
+            device_name="sf800 pro empty primary trim",
+            product_model="SolarFlow 800 Pro",
+            level=10,  # SOCRESERVE, which is in EMPTY_SOC_STATES
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            home_output=100,
+            battery_input=0,
+            battery_output=0,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-ac-charging",
+            device_name="sf800 pro secondary ac charging",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            home_input=30,
+            battery_input=30,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+            discharge_devices=(primary,),
+            charge_devices=(secondary,),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.pwr_produced = -100  # 100 W solar passing through to home
+        secondary.pwr_produced = 0
+        routing = manager._power_routing_snapshot(primary, primary_aware=True)
+
+        # setpoint = -180: house is exporting 180 W net.  Primary's 100 W solar
+        # output should absorb 100 W of that export (trim), leaving -80 W as
+        # the residual charge command sent to primary battery input.
+        await manager._apply_primary_input(-180, datetime.now(), routing)
+
+        assert primary.state is DeviceState.SOCRESERVE
+        # Home output must be stopped because the discharge target was zeroed by the trim.
+        primary.power_discharge.assert_awaited_once_with(0)
+        # Primary is charged at the residual setpoint: 180 - 100 (trim) = 80 W.
+        primary.power_charge.assert_awaited_once_with(-80)
+        # Secondary must not receive any additional AC charge.
+        secondary.power_charge.assert_not_awaited()
 
 
 class TestP1RoutingPipeline:
