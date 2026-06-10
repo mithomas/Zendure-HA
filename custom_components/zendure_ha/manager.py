@@ -132,6 +132,12 @@ class _PowerRoutingIntent:
     selected_primary_output_growth_allowed: bool
     # True when the selected primary may be switched into input mode this cycle.
     selected_primary_input_allowed: bool
+    # True when the cycle has proven source power that can justify input mode.
+    input_source_available: bool
+    # True when an output-mode device may physically switch into input mode.
+    input_switch_allowed: bool
+    # True when non-empty devices may keep or enter local-PV input handling.
+    non_empty_local_input_allowed: bool
     # True when secondary charge may absorb export from a gated selected-primary taper floor.
     blocked_primary_taper_overflow_charge_allowed: bool
     # Measured export watts that should reduce selected-primary home output during input handling.
@@ -267,6 +273,20 @@ class _LocalChargeSummary:
     active_non_primary_empty_chargeable: int
     non_primary_local_chargeable_surplus: int
     selected_primary_local_surplus: int
+
+
+@dataclass(frozen=True, slots=True)
+class _InputSourceSummary:
+    """Per-cycle evidence for allowing device input mode."""
+
+    source_budget: int
+    meter_export: int
+    battery_trim_capacity: int
+
+    @property
+    def available(self) -> bool:
+        """Return whether there is enough proven source to justify input mode."""
+        return self.source_budget >= SmartMode.POWER_START
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +449,50 @@ class _PowerRoutingSnapshot:
             active_non_primary_empty_chargeable=active_non_primary_empty_chargeable,
             non_primary_local_chargeable_surplus=non_primary_local_chargeable_surplus,
             selected_primary_local_surplus=selected_primary_local_surplus,
+        )
+
+    def input_source_summary(self, p1: int) -> _InputSourceSummary:
+        """
+        Return source evidence that is allowed to drive input mode.
+
+        Normal or reserve devices may have local PV, but that PV is not a
+        system surplus source for AC/input mode. Input source evidence is
+        limited to full-device bypass/pass-through and near-full taper overflow.
+        """
+        source_budget = 0
+        for route in self.devices.values():
+            device = route.device
+            if device.state == DeviceState.SOCFULL and device.online and device.reports_pv():
+                source_budget += max(route.bypass_passthrough, max(0, -device.pwr_produced, device.solarInput.asInt))
+            elif device.state == DeviceState.SOCNEARLYFULL:
+                source_budget += route.taper_output_floor
+
+        battery_trim_capacity = sum(
+            max(0, device.homeOutput.asInt - self.route(device).produced_home)
+            for device in self.discharge_devices
+            if device.reports_battery_backed_home_output()
+        )
+        return _InputSourceSummary(
+            source_budget=source_budget,
+            meter_export=max(0, -p1),
+            battery_trim_capacity=battery_trim_capacity,
+        )
+
+    def has_active_local_input_source(self) -> bool:
+        """Return whether an already-input device is consuming its own local production."""
+        return any(
+            device.acMode.value == AcMode.INPUT
+            and device.state not in {DeviceState.RESERVE_RECOVERY, DeviceState.SOCRESERVE}
+            and (self.route(device).charge_surplus > 0 or device.reports_active_pv_charge())
+            for device in self.devices
+        )
+
+    def has_pv_charge_first_source(self) -> bool:
+        """Return whether a SOCEMPTY device has local production that should charge first."""
+        return any(
+            device.state in PV_CHARGE_FIRST_STATES
+            and (self.route(device).charge_surplus > 0 or self.chargeable_produced_home(device) > 0)
+            for device in self.devices
         )
 
     @property
@@ -1444,7 +1508,29 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         selected_charge_primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
-        selected_primary_input_allowed_for_shaping = self._selected_primary_input_allowed(p1, routing, pv_floors)
+        input_source = routing.input_source_summary(p1)
+        unexplained_input_export = self._unexplained_export_for_primary_input(p1, routing, pv_floors)
+        matching_input_switch_allowed = (
+            self.operation != ManagerMode.MATCHING
+            or not selected_primary_routing
+            or routing.selected_primary is None
+            or not routing.selected_primary.online
+            or input_source.available
+            or unexplained_input_export >= PRIMARY_INPUT_EXPORT_THRESHOLD
+            or routing.has_pv_charge_first_source()
+        )
+        non_empty_local_input_allowed = input_source.available or routing.has_active_local_input_source()
+        input_source_available = (
+            self.operation != ManagerMode.MATCHING
+            or not selected_primary_routing
+            or routing.selected_primary is None
+            or not routing.selected_primary.online
+            or matching_input_switch_allowed
+            or non_empty_local_input_allowed
+        )
+        selected_primary_input_allowed_for_shaping = self._selected_primary_input_allowed(
+            routing, input_source, unexplained_input_export
+        )
         local_charge = routing.local_charge_summary(
             selected_charge_primary,
             pv_charge_first_mode=pv_charge_first_mode,
@@ -1468,7 +1554,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
-        selected_primary_input_allowed = self._selected_primary_input_allowed(p1, routing, pv_floors)
+        selected_primary_input_allowed = self._selected_primary_input_allowed(
+            routing, input_source, unexplained_input_export
+        )
         selected_primary_output_growth_allowed = not (
             selected_primary_routing and self.operation == ManagerMode.MATCHING and p1 <= 0
         )
@@ -1486,6 +1574,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_routing=selected_primary_routing,
             produced_only=produced_only,
             selected_primary_input_allowed=selected_primary_input_allowed,
+            input_source_available=input_source_available,
+            input_switch_allowed=matching_input_switch_allowed,
+            non_empty_local_input_allowed=non_empty_local_input_allowed,
             blocked_primary_taper_overflow_charge_allowed=blocked_primary_taper_overflow_charge_allowed,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             primary_output_export_trim=primary_output_export_trim,
@@ -1507,19 +1598,35 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _selected_primary_input_allowed(
         self,
-        p1: int,
         routing: _PowerRoutingSnapshot,
-        pv_floors: _PvFloorSummary,
+        input_source: _InputSourceSummary,
+        unexplained_input_export: int,
     ) -> bool:
         """Return whether the selected primary may be switched into input mode."""
         if self.operation != ManagerMode.MATCHING or not routing.primary_aware or routing.selected_primary is None:
             return True
-        if routing.selected_primary.acMode.value == AcMode.INPUT:
+        selected_primary = routing.selected_primary
+        selected_primary_active_local_input = (
+            selected_primary.acMode.value == AcMode.INPUT
+            and selected_primary.state not in {DeviceState.RESERVE_RECOVERY, DeviceState.SOCRESERVE}
+            and (routing.route(selected_primary).charge_surplus > 0 or selected_primary.reports_active_pv_charge())
+        )
+        selected_primary_pv_charge_first = selected_primary.state in PV_CHARGE_FIRST_STATES and (
+            routing.charge_surplus(selected_primary) > 0 or routing.chargeable_produced_home(selected_primary) > 0
+        )
+        if selected_primary_pv_charge_first:
             return True
-        household_demand = max(0, p1 + pv_floors.active_serving_pv_floor)
-        if pv_floors.active_non_primary_produced_floor > household_demand:
+        if selected_primary_active_local_input:
             return True
-        return self._unexplained_export_for_primary_input(p1, routing, pv_floors) >= PRIMARY_INPUT_EXPORT_THRESHOLD
+        if selected_primary.acMode.value == AcMode.INPUT:
+            return True
+        primary_absorption_headroom = max(
+            0,
+            -self._primary_charge_limit(selected_primary) - routing.charge_surplus(selected_primary),
+        )
+        if primary_absorption_headroom <= 0:
+            return False
+        return input_source.available or unexplained_input_export >= PRIMARY_INPUT_EXPORT_THRESHOLD
 
     def _unexplained_export_for_primary_input(
         self,
@@ -1788,7 +1895,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
             )
 
-        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0 and selected_primary_input_allowed:
+        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
             setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
 
         positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
@@ -1854,6 +1961,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_primary_routing: bool,
         produced_only: bool,
         selected_primary_input_allowed: bool,
+        input_source_available: bool,
+        input_switch_allowed: bool,
+        non_empty_local_input_allowed: bool,
         blocked_primary_taper_overflow_charge_allowed: bool = False,
         selected_primary_output_growth_allowed: bool = True,
         primary_output_export_trim: int = 0,
@@ -1874,6 +1984,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_home_output=selected_primary_routing and policy.selected_primary_output,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             selected_primary_input_allowed=selected_primary_input_allowed,
+            input_source_available=input_source_available,
+            input_switch_allowed=input_switch_allowed,
+            non_empty_local_input_allowed=non_empty_local_input_allowed,
             blocked_primary_taper_overflow_charge_allowed=blocked_primary_taper_overflow_charge_allowed,
             primary_output_export_trim=primary_output_export_trim,
             trim_home_output_only=trim_home_output_only,
@@ -1898,6 +2011,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     routing,
                     strict_output_stop=intent.strict_home_output_stop,
                     allow_selected_primary_input=intent.selected_primary_input_allowed,
+                    input_source_available=intent.input_source_available,
+                    input_switch_allowed=intent.input_switch_allowed,
+                    non_empty_local_input_allowed=intent.non_empty_local_input_allowed,
                     allow_blocked_primary_taper_overflow_charge=intent.blocked_primary_taper_overflow_charge_allowed,
                     primary_output_export_trim=intent.primary_output_export_trim,
                 )
@@ -1915,6 +2031,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 routing,
                 produced_only=intent.produced_only_output,
                 selected_primary_output_growth_allowed=intent.selected_primary_output_growth_allowed,
+                input_source_available=intent.input_source_available,
                 trim_home_output_only=intent.trim_home_output_only,
             )
         else:
@@ -1964,6 +2081,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         strict_output_stop: bool = False,
         allow_selected_primary_input: bool = True,
+        input_source_available: bool = True,
+        input_switch_allowed: bool = True,
+        non_empty_local_input_allowed: bool = True,
         allow_blocked_primary_taper_overflow_charge: bool = False,
         primary_output_export_trim: int = 0,
     ) -> None:
@@ -2073,19 +2193,40 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         def primary_input_excluded(device: ZendureDevice) -> bool:
             return device is primary or device is blocked_primary_input
 
+        def device_may_use_input(device: ZendureDevice) -> bool:
+            if device.acMode.value == AcMode.INPUT:
+                return True
+            if positive_demand_charge_lag:
+                return True
+            return input_switch_allowed or device.state in PV_CHARGE_FIRST_STATES
+
         charge_devices, idle_devices = self._collect_charge_candidates(
             [device for device in self.charge if not primary_input_excluded(device)],
-            [device for device in self.idle if not primary_input_excluded(device)],
-            promote_idle_devices=setpoint <= -SmartMode.POWER_START
+            [device for device in self.idle if not primary_input_excluded(device) and device_may_use_input(device)],
+            promote_idle_devices=input_source_available
+            and (input_switch_allowed or positive_demand_charge_lag)
+            and setpoint <= -SmartMode.POWER_START
             and not any(not primary_input_excluded(device) for device in self.charge),
         )
         active_secondary_charge_devices = [
             device
             for device in self.discharge
             if device is not selected_primary
+            and device_may_use_input(device)
             and (
-                routing.charge_surplus(device) > 0
-                or (allow_home_pv_charge and routing.chargeable_produced_home(device) > 0)
+                (
+                    (input_switch_allowed or positive_demand_charge_lag or device.acMode.value == AcMode.INPUT)
+                    and routing.charge_surplus(device) > 0
+                )
+                or (
+                    allow_home_pv_charge
+                    and routing.chargeable_produced_home(device) > 0
+                    and (
+                        input_switch_allowed
+                        or device.acMode.value == AcMode.INPUT
+                        or device.state in PV_CHARGE_FIRST_STATES
+                    )
+                )
             )
         ]
         pure_secondary_charge_devices = [
@@ -2093,7 +2234,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in charge_devices
             if device in self.charge and device.homeOutput.asInt == 0 and routing.charge_surplus(device) > 0
         ]
-        idle_secondary_surplus_devices = [device for device in idle_devices if routing.charge_surplus(device) > 0]
+        idle_secondary_surplus_devices = [
+            device
+            for device in idle_devices
+            if routing.charge_surplus(device) > 0
+            and (
+                input_switch_allowed
+                or positive_demand_charge_lag
+                or device.acMode.value == AcMode.INPUT
+                or device.state in PV_CHARGE_FIRST_STATES
+            )
+        ]
         full_primary_bypass_handoff_promotions: list[ZendureDevice] = []
         if selected_primary is not None:
             full_primary_bypass_handoff_promotions = [
@@ -2149,6 +2300,27 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 capacity += routing.chargeable_produced_home(device)
             return capacity
 
+        output_secondary_input_candidates = {
+            device
+            for device in [*charge_devices, *active_secondary_charge_devices, *idle_secondary_surplus_devices]
+            if device is not selected_primary
+            and device.acMode.value != AcMode.INPUT
+            and device.state not in PV_CHARGE_FIRST_STATES
+        }
+        primary_charge_target = 0
+        if (
+            self.operation == ManagerMode.MATCHING
+            and primary is not None
+            and selected_primary is primary
+            and primary.acMode.value != AcMode.INPUT
+            and input_switch_allowed
+            and output_secondary_input_candidates
+            and setpoint < 0
+            and not positive_demand_charge_lag
+        ):
+            primary_charge_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
+            setpoint -= primary_charge_target
+
         primary_input_blocked = blocked_primary_input is not None
         active_secondary_local_pv_only_devices = [
             device
@@ -2159,6 +2331,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and device in self.charge
                 and device.homeOutput.asInt == 0
                 and routing.charge_surplus(device) > 0
+                and device.state not in PV_CHARGE_FIRST_STATES
+                and not (non_empty_local_input_allowed and device.acMode.value == AcMode.INPUT)
                 and not positive_demand_charge_lag
             )
         ]
@@ -2170,6 +2344,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and not allow_blocked_primary_taper_overflow_charge
                 and device.homeOutput.asInt == 0
                 and routing.charge_surplus(device) > 0
+                and device.state not in PV_CHARGE_FIRST_STATES
+                and not (non_empty_local_input_allowed and device.acMode.value == AcMode.INPUT)
                 and not positive_demand_charge_lag
             )
         ]
@@ -2182,6 +2358,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and device in self.idle
                 and device.homeOutput.asInt == 0
                 and routing.charge_surplus(device) > 0
+                and device.state not in PV_CHARGE_FIRST_STATES
+                and not (non_empty_local_input_allowed and device.acMode.value == AcMode.INPUT)
                 and not positive_demand_charge_lag
             )
         ]
@@ -2217,6 +2395,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             {device: local_charge_capacity(device) for device in surplus_floor_devices},
             direction=-1,
         )
+        if not input_source_available and not positive_demand_charge_lag:
+            setpoint = 0
         selected_primary_output_replacement_target = 0
         if not strict_output_stop and selected_primary is not None and selected_primary in active_discharge_targets:
             replaced_non_primary_home_pv = sum(
@@ -2248,18 +2428,27 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         if move_primary_charge_to_secondary and primary is not None:
             await primary.power_charge(0)
-        elif primary is not None and setpoint < 0:
-            primary_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
-            if primary_target != 0:
-                setpoint -= await primary.power_charge(primary_target)
+        elif primary is not None:
+            if primary_charge_target != 0:
+                await primary.power_charge(primary_charge_target)
+            elif setpoint < 0:
+                primary_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
+                if primary_target != 0:
+                    setpoint -= await primary.power_charge(primary_target)
+                elif (
+                    not strict_output_stop
+                    and active_discharge_targets.get(primary, 0) > 0
+                    and not positive_demand_charge_lag
+                ):
+                    await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
             elif (
                 not strict_output_stop
                 and active_discharge_targets.get(primary, 0) > 0
                 and not positive_demand_charge_lag
             ):
                 await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
-        elif positive_demand_charge_lag and primary is not None and primary in self.charge:
-            await primary.power_charge(0)
+            elif positive_demand_charge_lag and primary in self.charge:
+                await primary.power_charge(0)
         elif (
             not strict_output_stop
             and selected_primary is not None
@@ -2411,6 +2600,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         produced_only: bool = False,
         selected_primary_output_growth_allowed: bool = True,
+        input_source_available: bool = True,
         trim_home_output_only: bool = False,
     ) -> None:
         """
@@ -2427,6 +2617,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self._reset_home_output_charge_state()
 
         selected_primary = routing.selected_primary
+        input_exit_devices = {
+            device
+            for device in self.devices
+            if not input_source_available
+            and device.acMode.value == AcMode.INPUT
+            and (device.limitInput.asInt > 0 or device.homeInput.asInt > 0)
+            and device not in self.charge
+        }
         pv_floors = routing.pv_floor_summary()
         charge_produced_devices = [
             device
@@ -2440,6 +2638,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
 
         primary_produced_cap = routing.produced_limit(selected_primary) if selected_primary is not None else 0
+        if selected_primary in input_exit_devices:
+            primary_produced_cap = 0
         primary_output_cap = None
         if (
             selected_primary is not None
@@ -2494,7 +2694,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             else None
         )
         remaining_active = [device for device in self.discharge if device is not primary]
-        idle_devices = [device for device in self.idle if device is not primary]
+        idle_devices = [device for device in self.idle if device is not primary and device not in input_exit_devices]
         idle_produced_devices = [device for device in idle_devices if routing.produced_limit(device) > 0]
         idle_battery_devices = [device for device in idle_devices if device not in idle_produced_devices]
         produced_devices = sorted(
@@ -2583,6 +2783,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 await self._command_home_output(device, 0, allow_bypass_zero=True)
             else:
                 await self._command_home_output(device, target, allow_bypass_zero=True)
+
+        for device in input_exit_devices:
+            await self._command_home_output(device, 0, allow_bypass_zero=True)
 
         if primary is not None and primary_target > 0:
             await command_primary_aware_home_output(primary, primary_target)

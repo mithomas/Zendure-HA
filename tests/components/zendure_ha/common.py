@@ -87,7 +87,7 @@ def make_device(
     reserve: int = 10,
     soc_set: int = 80,
     kwh: float = 2.0,
-    ac_mode: int = AcMode.INPUT,
+    ac_mode: int = AcMode.OUTPUT,
     input_limit: float | None = None,
     output_limit: float | None = None,
     home_input: int = 0,

@@ -4524,6 +4524,7 @@ class TestSmartMatchingPrimaryAware:
             min_soc=5,
             reserve=10,
             soc_set=100,
+            ac_mode=AcMode.INPUT,
             home_output=200,
             battery_input=250,
         )
@@ -4538,8 +4539,8 @@ class TestSmartMatchingPrimaryAware:
             reserve=10,
             soc_set=100,
             battery_input=100,
-            ac_mode=AcMode.OUTPUT,
-            input_limit=0,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
             output_limit=0,
         )
         manager = make_manager(
@@ -4594,8 +4595,8 @@ class TestSmartMatchingPrimaryAware:
             soc_set=100,
             home_output=50,
             battery_input=50,
-            ac_mode=AcMode.OUTPUT,
-            input_limit=0,
+            ac_mode=AcMode.INPUT,
+            input_limit=50,
             output_limit=0,
         )
         manager = make_manager(
@@ -4652,6 +4653,8 @@ class TestSmartMatchingPrimaryAware:
             min_soc=5,
             reserve=10,
             soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=20,
             battery_input=20,
         )
         manager = make_manager(
@@ -4803,6 +4806,8 @@ class TestSmartMatchingPrimaryAware:
             min_soc=5,
             reserve=10,
             soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=20,
             battery_input=20,
         )
         manager = make_manager(
@@ -5002,10 +5007,10 @@ class TestSmartMatchingPrimaryAware:
             (10, DeviceState.SOCRESERVE),
         ],
     )
-    async def test_grid_charging_targets_a_blocked_secondary_even_when_the_primary_is_full(
+    async def test_below_threshold_export_does_not_target_a_blocked_secondary_without_source(
         self, hass, secondary_level, expected_state
     ):
-        """With no solar and a charge request, a recovering or empty secondary should still be targeted even if the primary is full."""
+        """Without source evidence or enough unexplained export, a blocked secondary should not switch to grid input."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -5044,11 +5049,11 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await _run_prepared_power_routing(manager, -300, datetime.now())
+        await _run_prepared_power_routing(manager, -49, datetime.now())
 
         assert secondary.state is expected_state
         primary.power_charge.assert_not_awaited()
-        secondary.power_charge.assert_awaited_once_with(-300)
+        secondary.power_charge.assert_not_awaited()
 
     async def test_routes_surplus_charge_to_a_recovering_secondary(self, hass):
         """Surplus charge should be routed to a recovering secondary when the selected primary is already full."""
@@ -5154,7 +5159,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_awaited_once_with(-300)
 
     async def test_charges_the_non_full_primary_when_the_secondary_is_already_full(self, hass):
-        """A negative setpoint should stay on the selected primary even when the full secondary is passing through 50W PV."""
+        """A negative setpoint should stay on the selected primary when the full secondary has enough PV source."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -5182,7 +5187,7 @@ class TestSmartMatchingPrimaryAware:
             ac_mode=AcMode.OUTPUT,
             input_limit=0,
             output_limit=0,
-            home_output=50,
+            home_output=100,
         )
         manager = make_manager(
             hass,
@@ -5221,6 +5226,7 @@ class TestSmartMatchingPrimaryAware:
             input_limit=300,
             output_limit=0,
             home_input=300,
+            battery_input=300,
         )
         secondary = make_device(
             hass,
@@ -5253,7 +5259,7 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
-        primary.power_charge.assert_awaited_once_with(-300)
+        primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
 
     async def test_keeps_secondary_local_pv_on_the_secondary_when_both_devices_are_already_charging(self, hass):
@@ -5365,8 +5371,8 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
-    async def test_charges_secondary_home_pv_when_primary_charge_can_replace_home_supply(self, hass):
-        """Secondary home-serving PV can move to charge when the primary can cover it."""
+    async def test_keeps_output_secondary_home_pv_when_primary_charge_can_absorb_it(self, hass):
+        """Output-mode secondary home-serving PV should not switch to input when primary charge can absorb the surplus."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -5415,10 +5421,10 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
-        primary.power_charge.assert_awaited_once_with(-355)
-        secondary.power_charge.assert_awaited_once_with(-50)
+        primary.power_charge.assert_awaited_once_with(-405)
+        secondary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_not_awaited()
-        secondary.power_discharge.assert_not_awaited()
+        secondary.power_discharge.assert_awaited_once_with(50)
 
     async def test_keeps_secondary_home_pv_on_home_when_primary_charge_has_no_pv(self, hass):
         """Home-serving secondary PV should remain protected without selected-primary PV evidence."""
@@ -5621,6 +5627,8 @@ class TestSmartMatchingPrimaryAware:
             min_soc=5,
             reserve=10,
             soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
             battery_input=100,
         )
         manager = make_manager(
@@ -6485,6 +6493,8 @@ class TestSmartMatchingPrimaryAware:
             min_soc=5,
             reserve=10,
             soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=50,
             home_output=50,
             battery_input=50,
         )
@@ -6516,7 +6526,7 @@ class TestSmartMatchingPrimaryAware:
         ],
     )
     async def test_primary_input_switch_requires_unexplained_export_threshold(self, hass, p1, primary_charge_allowed):
-        """Controlled selected-primary output should not count toward the export threshold."""
+        """Controlled selected-primary output should not become input without source evidence."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -6625,8 +6635,8 @@ class TestSmartMatchingPrimaryAware:
         assert intent.home_output_budget == 20  # noqa: PLR2004
         assert not intent.selected_primary_input_allowed
 
-    async def test_secondary_pv_cover_allows_primary_input_below_raw_export_threshold(self, hass):
-        """Secondary PV serving the home may make selected-primary input safe below the raw export threshold."""
+    async def test_secondary_pv_cover_does_not_allow_primary_input_without_source_evidence(self, hass):
+        """Secondary PV serving the home is not enough to switch the selected primary into input."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -6673,8 +6683,8 @@ class TestSmartMatchingPrimaryAware:
 
         await _run_prepared_power_routing(manager, -49, datetime.now())
 
-        primary.power_charge.assert_awaited_once()
-        primary.power_discharge.assert_not_awaited()
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(0)
 
     async def test_positive_p1_charge_lag_stays_on_the_primary_aware_charge_path(self, hass):
         """A positive-demand lag cycle should stay on the charge path when both systems are still reporting charging telemetry."""
@@ -7121,6 +7131,114 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge.assert_not_awaited()
         primary.power_charge.assert_awaited_once_with(-100)
         secondary.power_charge.assert_awaited_once_with(-200)
+
+    async def test_primary_absorbs_unexplained_surplus_before_secondary_switches_to_input(self, hass):
+        """An output-mode secondary should not switch to input when the selected primary can absorb all surplus."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-absorbs-export",
+            device_name="sf800 pro primary absorbs export",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        primary.charge_limit = -600
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-stays-output-on-export",
+            device_name="sf800 pro secondary stays output on export",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        secondary.charge_limit = -600
+        FuseGroup("group-primary-absorbs-export", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -400, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-400)
+        secondary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_secondary_switches_to_input_only_for_surplus_remaining_after_primary_capacity(self, hass):
+        """Secondary input is allowed only for the residual surplus the selected primary cannot absorb."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-partial-export",
+            device_name="sf800 pro primary partial export",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        primary.charge_limit = -100
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-residual-export",
+            device_name="sf800 pro secondary residual export",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        secondary.charge_limit = -600
+        FuseGroup("group-secondary-residual-export", 800, -700, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -250, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-100)
+        secondary.power_charge.assert_awaited_once_with(-150)
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
 
     async def test_routes_near_full_primary_pv_overflow_to_the_secondary(self, hass):
         """
@@ -8352,11 +8470,11 @@ class TestChargeHoldoffTimers:
 
 
 class TestLowSocImmediatePromotion:
-    """Idle devices in low-SoC states are promoted to charging without waiting for a surplus threshold."""
+    """Low-SoC devices avoid AC input unless there is a real external source."""
 
     @pytest.mark.parametrize("level, state", LOW_SOC_DEVICE_CASES)
-    async def test_idle_low_soc_device_is_promoted_to_charging_immediately(self, hass, level, state):
-        """An idle empty or at-reserve device should receive a charge command even if the surplus is small."""
+    async def test_idle_low_soc_device_is_not_promoted_to_ac_input_for_small_meter_export(self, hass, level, state):
+        """At-reserve devices should not switch to AC input for a small export alone."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -8398,12 +8516,120 @@ class TestLowSocImmediatePromotion:
         idle_low.power_charge = AsyncMock(side_effect=lambda power: power)
         idle_low.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        # Small surplus — well below the startup threshold for a normal idle device.
-        await _run_prepared_power_routing(manager, -50, datetime.now())
+        await _run_prepared_power_routing(manager, -49, datetime.now())
 
-        idle_low.power_charge.assert_awaited_once()
-        charged = idle_low.power_charge.call_args[0][0]
-        assert charged < 0
+        if state == DeviceState.SOCEMPTY:
+            idle_low.power_charge.assert_awaited_once_with(-800)
+        else:
+            idle_low.power_charge.assert_not_awaited()
+
+    async def test_recovery_primary_local_pv_does_not_start_input_without_external_source(self, hass):
+        """The 13:45-style reserve-recovery primary should not switch to input for local PV only."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="source-gated-recovery-primary",
+            device_name="source gated recovery primary",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=15,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+            battery_input=72,
+        )
+        primary.solarInput.update_value(72)
+        primary.update_device_state(None, DeviceState.RESERVE_RECOVERY.value)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="source-gated-normal-secondary",
+            device_name="source gated normal secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=15,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+            battery_input=80,
+        )
+        secondary.solarInput.update_value(80)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()
+
+    async def test_already_input_device_exits_when_no_external_source_remains(self, hass):
+        """A device already in input mode should switch back to output when only local PV remains."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="source-gated-input-primary",
+            device_name="source gated input primary",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=15,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=1,
+            output_limit=0,
+            battery_input=17,
+        )
+        primary.solarInput.update_value(17)
+        primary.update_device_state(None, DeviceState.RESERVE_RECOVERY.value)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="source-gated-input-secondary",
+            device_name="source gated input secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=15,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=180,
+            home_output=180,
+            battery_output=164,
+        )
+        secondary.solarInput.update_value(16)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 167, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        assert call(0) in primary.power_discharge.await_args_list
 
 
 class TestPrimaryNoLocalSolarDefers:
@@ -8421,6 +8647,8 @@ class TestPrimaryNoLocalSolarDefers:
             min_soc=5,
             reserve=10,
             soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
             home_input=300,  # currently charging from grid — no local solar
         )
         secondary = make_device(
@@ -8434,8 +8662,8 @@ class TestPrimaryNoLocalSolarDefers:
             reserve=10,
             soc_set=100,
             battery_input=300,
-            ac_mode=AcMode.OUTPUT,
-            input_limit=0,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
             output_limit=0,
         )
         secondary.solarInput.update_value(300)
@@ -8635,7 +8863,8 @@ class TestPrimaryNoLocalSolarDefers:
 
         primary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_awaited_once_with(209)
-        secondary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.call_args.args[0] < 0
         secondary.power_discharge.assert_not_awaited()
 
     async def test_selected_primary_output_trim_reduces_non_local_charge_budget(self, hass):
@@ -8689,7 +8918,8 @@ class TestPrimaryNoLocalSolarDefers:
         await _run_prepared_power_routing(manager, -143, datetime.now())
 
         primary.power_discharge.assert_awaited_once_with(109)
-        secondary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.call_args.args[0] < 0
 
     async def test_blocked_primary_input_does_not_fall_back_to_weighted_secondary_charge(self, hass):
         """Gated selected-primary input must not fall back to weighted secondary charge."""
@@ -8748,8 +8978,8 @@ class TestPrimaryNoLocalSolarDefers:
         await manager._apply_primary_input(-400, datetime.now(), routing, allow_selected_primary_input=False)
 
         primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(178)
-        secondary.power_charge.assert_awaited_once_with(0)
+        primary.power_discharge.assert_awaited_once_with(250)
+        secondary.power_charge.assert_awaited_once_with(-72)
         secondary.power_discharge.assert_not_awaited()
 
     async def test_active_secondary_pv_input_is_not_counted_twice_as_ac_charge(self, hass):
@@ -8805,8 +9035,8 @@ class TestPrimaryNoLocalSolarDefers:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(383)
-        secondary.power_charge.assert_awaited_once_with(0)
+        primary.power_discharge.assert_awaited_once_with(462)
+        secondary.power_charge.assert_awaited_once_with(-79)
         secondary.power_discharge.assert_not_awaited()
 
     async def test_idle_secondary_pv_input_is_not_restarted_as_ac_charge(self, hass):

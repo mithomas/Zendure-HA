@@ -151,10 +151,10 @@ A device should leave output mode only when one of these conditions applies:
 
 - Actual AC/input charging is allocated to the device.
 - The active manager mode requires home output to stop, such as `STORE_SOLAR` strict output stop.
-- The selected-primary input gate allows input because unexplained export is large enough or non-primary PV can cover household demand.
+- The `MATCHING` input gate allows input because the cycle has unexplained surplus, full/near-full overflow, or bypass/pass-through overflow.
 - The device is empty and PV-charge-first routing should send current PV to its own battery before home load.
 - The device is full and supports explicit bypass; bypass is reserved for the full state, not near-full taper.
-- The device is already in an input/charge flow that should be reduced or stopped without immediately flipping back to output mode.
+- The device is already in an input/charge flow that is still backed by local PV. If no eligible source remains, `MATCHING` may switch it back to zero-output output mode rather than holding input mode at zero.
 
 ### Zero-setpoint charge path
 
@@ -176,18 +176,20 @@ A physical AC mode switch to output is only performed when an actual non-zero ba
 
 `MANUAL` mode follows the same primary-aware executor ordering as `MATCHING`. When a primary device is selected, charge and home-output commands prefer the primary before falling through to secondaries.
 
-### Selected-primary input gate
+### MATCHING input switch gate
 
-In `MATCHING`, an output-mode selected primary should remain in output mode around zero grid flow unless switching it to input mode is low-risk. A corrected negative setpoint alone is not enough to move a home-serving primary into input mode, because SF800 Pro input/output mode switches can temporarily drop home output.
+In `MATCHING`, output-mode primary and secondary devices should remain in output mode around zero grid flow unless switching to input mode is justified. A corrected negative setpoint alone is not enough to move a home-serving device into input mode, because SF800 Pro input/output mode switches can temporarily drop home output.
 
-The selected primary may be switched into input mode only when either condition is true:
+An output-mode device may be switched into input mode only for one of these reasons:
 
-- the P1 meter is exporting at least 50 W that cannot be explained by manager-controlled selected-primary output or trimmable battery-backed output, or
-- non-primary devices are already contributing more PV-backed home output than the measured household demand for the cycle.
+- unexplained meter export of at least 50 W after manager-controlled output and trimmable battery-backed output are accounted for,
+- full-device bypass or pass-through PV overflow,
+- near-full taper overflow that the near-full device cannot absorb,
+- the `SOCEMPTY` PV-charge-first exception for the device's own PV.
 
-The 50 W gate uses export remaining after controlled output is accounted for, not the corrected routing setpoint. Household demand for the secondary-cover exception is calculated from raw P1 plus the active PV-backed home-output floor. The corrected setpoint still decides the charge budget after the primary is allowed to use the input path. If the selected-primary input path is gated off, primary-local surplus must not fall through to weighted secondary charging; secondaries may only keep charge backed by their own local PV or active charge evidence. Devices that are already reporting input mode may still receive charge-lag corrections because no input/output mode switch is needed, but local PV that is already charging the secondary battery must not be mirrored as matching AC input. Stopping that AC input reduces the selected-primary home-output target by the same load so the freed primary PV stays on the primary.
+Normal or at-reserve local PV is not system surplus while it can remain in output mode and serve the home. Output-mode secondaries follow the same switch reasons as the selected primary and are not promoted into input mode for normal local PV alone. If switching the selected primary to input can absorb the available unexplained surplus or overflow, the secondary stays in output mode; only residual surplus or overflow falls through to an output-mode secondary. Already-input devices may continue or reduce local-PV input without authorizing unrelated output-mode devices to switch.
 
-The 50 W selected-primary input gate is separate from primary-output export trimming. In normal `MATCHING` cycles, measured export greater than 10 W may reduce active selected-primary home output even when the remaining unexplained export is below the 50 W threshold and the primary must stay in output mode. Export of 10 W or less is ignored as zero-flow noise for this trim path.
+Input-switch gating is separate from primary-output export trimming. In normal `MATCHING` cycles, measured export greater than 10 W may reduce active selected-primary home output even when devices must stay in output mode. Export of 10 W or less is ignored as zero-flow noise for this trim path.
 
 ### Off-grid output at zero
 
@@ -213,5 +215,5 @@ When a device with active off-grid production is stopped (commanded to zero home
 - Fast grid-meter changes are debounced through normal timing windows, except that primary-device changes trigger immediate routing recomputation. A reading is considered fast (and triggers immediate routing) when it deviates from the recent average or from the most recent reading by more than 3.5× the standard deviation of recent readings, with a minimum threshold of 15 W. For example, if recent readings average 100 W with a standard deviation of 10 W, the threshold is 35 W — a new reading of 140 W triggers immediately, a reading of 130 W does not. If readings are very stable (stddev below 15 W), the 15 W minimum applies, giving a fixed threshold of 52 W.
 - The optional P1 spike filter can be enabled through the manager switch. While enabled, upward P1 jumps above the configured threshold are held for the configured duration; if the jump falls back before the duration expires, it is ignored and not added to the recent P1 history.
 - Active charge-lag corrections that bypass normal timing still respect the minimum grid-meter update interval.
-- Around zero grid flow, prefer a small export or missed charge opportunity over switching a home-serving primary into charge mode and causing grid import. The selected-primary input gate above is the concrete rule for that preference in `MATCHING`.
+- Around zero grid flow, prefer a small export or missed charge opportunity over switching a home-serving device into charge mode and causing grid import. The `MATCHING` input switch gate above is the concrete rule for that preference.
 - Starting with no available devices must not produce user-facing noise beyond expected warning or debug log output.
