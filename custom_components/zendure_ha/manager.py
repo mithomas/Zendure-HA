@@ -1886,7 +1886,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     )
                     setpoint = (
                         -charge_without_primary_floor
-                        if charge_without_primary_floor > 0
+                        if charge_without_primary_floor > 0 and surplus_setpoint <= 0
                         else max(0, discharge_candidate_setpoint, pv_floors.active_serving_pv_floor)
                     )
                 else:

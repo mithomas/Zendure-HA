@@ -9160,3 +9160,84 @@ class TestPrimaryNoLocalSolarDefers:
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
+
+    async def test_secondary_local_solar_surplus_does_not_suppress_primary_battery_under_household_demand(
+        self, hass
+    ):
+        """
+        Regression: secondary local PV surplus must not suppress primary battery discharge when household
+        demand is unmet.
+
+        Scenario mirrors the 2026-06-10 17:54 telemetry export:
+        - Primary (k_balkon): OUTPUT mode, 247 W home output (192 W battery + 45 W solar), 50 % SoC
+        - Secondary (wz_balkon): OUTPUT mode, 27 W home output (33 W solar), 6 W going into battery
+        - p1 = -34 W (tiny grid export because solar slightly exceeds demand)
+
+        The bug in _shape_primary_aware_setpoint incorrectly set setpoint = -6 (charge mode)
+        because protects_selected_primary_floor was True and charge_without_primary_floor = 6 > 0,
+        ignoring that surplus_setpoint = 162 > 0 (household demand is not fully covered by solar).
+
+        The fix adds ``and surplus_setpoint <= 0`` to the condition so that the else branch fires
+        when there is unmet demand, keeping setpoint = 240 (home-output mode).
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-surplus-suppresses-primary-primary",
+            device_name="secondary surplus suppresses primary primary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=247,
+            battery_output=192,
+            input_limit=0,
+            output_limit=247,
+        )
+        # pwr_produced = min(0, 192+0-0-247) = -55 but solarInput=45 caps produced_limit at 45
+        primary.solarInput.update_value(45)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-surplus-suppresses-primary-secondary",
+            device_name="secondary surplus suppresses primary secondary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=27,
+            battery_input=6,
+            input_limit=0,
+            output_limit=27,
+        )
+        # pwr_produced = min(0, 0+0-6-27) = -33; charge_surplus = max(0, 33-27) = 6
+        secondary.solarInput.update_value(33)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        # p1 = -34: household import from grid = 34 W export, total home demand = 247+27-34 = 240 W
+        await _run_prepared_power_routing(manager, -34, datetime.now())
+
+        # Primary must NOT be switched to charging while household demand is unmet.
+        primary.power_charge.assert_not_awaited()
+        # Primary must discharge at a substantial level to serve household demand (not trimmed to ≤10 W).
+        primary.power_discharge.assert_awaited_once()
+        assert primary.power_discharge.call_args.args[0] > 45, (
+            f"Primary was commanded {primary.power_discharge.call_args.args[0]} W; "
+            "expected > 45 W to serve unmet household demand"
+        )
