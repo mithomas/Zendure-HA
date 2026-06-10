@@ -499,7 +499,6 @@ class TestStoreSolarRouting:
 
 
 class TestSmartMatchingPrimaryAware:
-
     async def test_taper_export_stuck(self, hass, freezer):
         """Test that primary taper floor doesn't cause infinite holdoff loop."""
         from custom_components.zendure_ha.const import ManagerMode, DeviceState, AcMode
@@ -519,19 +518,22 @@ class TestSmartMatchingPrimaryAware:
         )
         primary.power_charge = AsyncMock(return_value=0)
         primary.power_discharge = AsyncMock(return_value=343)
-        
+
         # Mock SolarFlow 800 taper behavior using patch so it doesn't break other tests
-        with patch("custom_components.zendure_ha.devices.solarflow800.SolarFlow800.taper_charge_limit", new_callable=PropertyMock) as mock_taper:
+        with patch(
+            "custom_components.zendure_ha.devices.solarflow800.SolarFlow800.taper_charge_limit",
+            new_callable=PropertyMock,
+        ) as mock_taper:
             mock_taper.return_value = 600
             primary.pwr_max = 1200
             primary.charge_limit = -1200
             primary.discharge_limit = 1200
             primary.update_device_state(None, DeviceState.RESERVE_RECOVERY.value)
-            
+
             # We must explicitly set pwr_produced or solarInput so that local_production is calculated.
             primary.pwr_produced = -950
             primary.solarInput.update_value(950)
-        
+
             secondary = make_device(
                 hass,
                 device_id="A2",
@@ -544,34 +546,34 @@ class TestSmartMatchingPrimaryAware:
             )
             secondary.power_charge = AsyncMock(return_value=-600)
             secondary.power_discharge = AsyncMock(return_value=0)
-            
+
             secondary.pwr_max = 1200
             secondary.charge_limit = -1200
             secondary.discharge_limit = 1200
             secondary.update_device_state(None, DeviceState.INACTIVE.value)
             secondary.pwr_produced = 0
             secondary.solarInput.update_value(0)
-        
+
             manager = make_manager(
                 hass,
                 devices=[primary, secondary],
                 operation=ManagerMode.MATCHING,
                 primary_device_id="A1",
             )
-        
+
             # Initial routing cycle with small demand, so it outputs 343W from primary.
             await manager._p1_changed(make_p1_event(170))
-            
+
             # Now simulate export: p1 meter reads -170W because primary is pushing 343W.
             freezer.tick(timedelta(seconds=15))
             # We need to simulate that primary is now outputting 343.
             primary.homeOutput.update_value(343)
             await manager._p1_changed(make_p1_event(-170))
-            
+
             # Secondary is expected to be in input mode with homeInput = 0.
             # The manager should have held off charging and set charge_time.
             assert manager.charge_time > datetime.now()
-            
+
             # Reset mock to see the next calls
             secondary.power_charge.reset_mock()
 
@@ -580,13 +582,14 @@ class TestSmartMatchingPrimaryAware:
             for i in range(10):
                 freezer.tick(timedelta(seconds=30))
                 await manager._p1_changed(make_p1_event(-170))
-                
+
             # Secondary should have started AC charging to absorb the export
             # We assert it was called with a negative power (charging)
             assert secondary.power_charge.await_count > 0
             last_charge_call = secondary.power_charge.await_args_list[-1].args[0]
             print(f"last_charge_call = {last_charge_call}")
             assert last_charge_call < 0
+
     async def test_includes_idle_devices_that_already_have_produced_power(self, hass):
         """Idle devices that already contribute produced power should still join discharge candidate selection."""
         active = make_device(
@@ -697,6 +700,93 @@ class TestSmartMatchingPrimaryAware:
 
         primary.power_discharge.assert_awaited_once_with(200)
         other.power_discharge.assert_awaited_once_with(0)
+
+    @pytest.mark.parametrize(
+        ("level", "state", "expected"),
+        [
+            pytest.param(10, DeviceState.SOCRESERVE, 245, id="reserve-allows-pv-only-output"),
+            pytest.param(5, DeviceState.SOCEMPTY, 0, id="empty-keeps-pv-for-recovery"),
+        ],
+    )
+    async def test_low_soc_primary_pv_only_output_capacity_respects_recovery_state(self, hass, level, state, expected):
+        """SOCRESERVE can serve PV-only output, while SOCEMPTY keeps solar for recovery."""
+        primary = make_device(
+            hass,
+            device_id=f"pv-only-primary-{state.value}",
+            device_name=f"pv only primary {state.value}",
+            level=level,
+            min_soc=5,
+            reserve=10,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_input=245,
+            input_limit=0,
+            output_limit=0,
+        )
+        primary.solarInput.update_value(245)
+        primary.pwr_produced = -245
+        primary.update_device_state(None, state.value)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+
+        assert manager._available_discharge_power(primary, primary_aware=True, allow_produced_only=True) == expected
+
+    @pytest.mark.parametrize(
+        ("level", "state", "expected_capacity"),
+        [
+            pytest.param(10, DeviceState.SOCRESERVE, 52, id="reserve-replaces-secondary-output"),
+            pytest.param(5, DeviceState.SOCEMPTY, 0, id="empty-keeps-pv-local"),
+        ],
+    )
+    async def test_low_soc_primary_replacement_capacity_uses_1106_export_pattern(
+        self, hass, level, state, expected_capacity
+    ):
+        """Unused primary PV from the 11:00:08 pattern is usable only after reserve recovery."""
+        primary = make_device(
+            hass,
+            device_id=f"primary-1106-{state.value}",
+            device_name=f"primary 1106 {state.value}",
+            level=level,
+            min_soc=5,
+            reserve=10,
+            ac_mode=AcMode.OUTPUT,
+            home_output=193,
+            battery_input=52,
+            input_limit=0,
+            output_limit=194,
+        )
+        primary.solarInput.update_value(245)
+        primary.pwr_produced = -245
+        primary.update_device_state(None, state.value)
+        secondary = make_device(
+            hass,
+            device_id=f"secondary-1106-{state.value}",
+            device_name=f"secondary 1106 {state.value}",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            ac_mode=AcMode.OUTPUT,
+            home_output=419,
+            battery_output=214,
+            input_limit=0,
+            output_limit=205,
+        )
+        secondary.solarInput.update_value(205)
+        secondary.pwr_produced = -205
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            discharge_devices=(primary, secondary),
+        )
+        routing = manager._power_routing_snapshot(primary, primary_aware=True)
+
+        assert routing.selected_primary_output_replacement_capacity == expected_capacity
 
     async def test_uses_bypass_when_a_full_sf800_pro_is_reduced_to_zero(self, hass):
         """A full SF800 Pro should switch to bypass instead of receiving a zero-watt discharge command."""

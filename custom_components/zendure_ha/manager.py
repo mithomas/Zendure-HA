@@ -981,6 +981,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     ) -> int:
         """Return the currently available discharge contribution for a device."""
         if not device.is_discharge_capable():
+            if allow_produced_only and device.state == DeviceState.SOCRESERVE:
+                return self._current_produced_output_limit(device, primary_aware=primary_aware)
             return 0
         if device.is_discharge_blocked():
             return (

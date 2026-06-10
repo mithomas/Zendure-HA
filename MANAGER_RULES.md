@@ -65,7 +65,7 @@ Apply sources in priority order, stopping when demand is covered:
 | 3        | Selected primary battery                     | Primary online, above all SoC/reserve/recovery floors, within discharge limit; full bypass-capable primary may discharge only after PV cannot cover demand |
 | 4        | Secondary device battery                     | Primary unavailable, at discharge limit, or unable to cover the remainder      |
 
-**Primary unavailability:** if the primary is offline, empty, at reserve, recovering, or at its discharge limit, remaining demand falls through to secondary devices.
+**Primary unavailability:** if the primary is offline, empty, recovering, or at its discharge limit, remaining demand falls through to secondary devices. If the primary is at reserve, only battery-backed discharge is unavailable; its current PV/off-grid output is still priority 1 and should serve household demand before secondary battery discharge.
 
 > **Note:** recovering devices are excluded from the produced-floor allocation in discharge routing to prevent them from holding a floor they might not sustain.
 
@@ -76,7 +76,7 @@ Apply sources in priority order, stopping when demand is covered:
 1. **Primary first:** charge the selected primary if it is online and can accept charge.
 2. **Secondary fallback:** if the primary cannot use the surplus, route to secondary devices.
 3. **Home-serving PV is not reassigned:** if the primary is actively passing PV to the home and has no local surplus beyond that home output, that PV must not be redirected to primary charging — *unless* the device is empty.
-4. **Empty device exception:** empty devices in primary-aware automatic modes are charge-first. Their current PV is redirected to their own battery before being preserved for home load. Once the device reaches at-reserve state it returns to normal household-load-first routing.
+4. **Empty device exception:** empty devices in primary-aware automatic modes are charge-first. Their current PV is redirected to their own battery before being preserved for home load. `SOCEMPTY` is the only low-SoC state that is PV-charge-first; once the device reaches at-reserve state it returns to normal household-load-first routing, so current primary PV should serve household demand before being treated as primary-local charge surplus.
 5. **Keep local PV local:** prefer charging a secondary device with its own PV over causing the primary to discharge or increasing grid consumption. A secondary that is both serving the home and charging should keep its PV locally when the primary can cover remaining demand, either by reducing active primary PV charging or by increasing PV-backed primary home output. For an already-input secondary, local PV evidence may justify keeping the device in charge mode, but it must not be added again as AC input. If the only desired secondary charge is its own PV, reduce existing AC input first and command zero AC input.
 6. **Primary with no local solar defers to secondaries:** if the primary is charging but has no solar of its own to contribute (it would draw from the grid to charge), and a secondary has its own solar available, the charge allocation shifts to that secondary instead.
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
