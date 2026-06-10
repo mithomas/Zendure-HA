@@ -2447,7 +2447,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             elif (
                 not strict_output_stop
                 and active_discharge_targets.get(primary, 0) > 0
-                and not positive_demand_charge_lag
+                and (not positive_demand_charge_lag or routing.route(primary).taper_output_floor > 0)
             ):
                 await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
             elif positive_demand_charge_lag and primary in self.charge:
@@ -2456,7 +2456,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             not strict_output_stop
             and selected_primary is not None
             and active_discharge_targets.get(selected_primary, 0) > 0
-            and not positive_demand_charge_lag
+            and (not positive_demand_charge_lag or routing.route(selected_primary).taper_output_floor > 0)
         ):
             await self._command_home_output(
                 selected_primary,

@@ -7372,6 +7372,68 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_awaited_once_with(-456)
         secondary.power_discharge.assert_not_awaited()
 
+    async def test_1638_near_full_primary_keeps_output_while_trimming_secondary_input_lag(self, hass):
+        """The 16:38-style input lag should trim the secondary without dropping near-full primary output."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-primary-1638-input-lag",
+            device_name="sf800 pro primary 1638 input lag",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=497,
+            home_output=497,
+            battery_input=100,
+        )
+        primary.solarInput.update_value(597)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-secondary-1638-input-lag",
+            device_name="sf800 pro secondary 1638 input lag",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=1000,
+            output_limit=0,
+            home_input=1000,
+            battery_input=1177,
+        )
+        secondary.solarInput.update_value(177)
+        primary.fuseGrp.devices = [primary, secondary]
+        secondary.fuseGrp = primary.fuseGrp
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 521, datetime.now())
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(497)
+        primary.power_bypass.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-479)
+        secondary.power_discharge.assert_not_awaited()
+
     async def test_falls_back_to_the_secondary_for_discharge_when_the_primary_is_offline(self, hass):
         """If the selected primary is offline, the secondary should take over the discharge target."""
         primary = make_device(
