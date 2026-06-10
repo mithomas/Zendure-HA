@@ -363,10 +363,11 @@ class _PowerRoutingSnapshot:
 
     def pv_floor_summary(self) -> _PvFloorSummary:
         """Return floor and replacement facts for one routing cycle."""
-        if self.selected_primary is not None and self.selected_primary in self.discharge_devices:
-            active_primary = self.route(self.selected_primary).active_produced_home
-        else:
-            active_primary = 0
+        active_primary = (
+            self.route(self.selected_primary).active_produced_home
+            if self.selected_primary in self.discharge_devices
+            else 0
+        )
         active_non_primary = sum(
             self.route(device).active_produced_home
             for device in self.discharge_devices
@@ -598,7 +599,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _restore_p1_update_timing(self, time: datetime | None = None) -> None:
         """Restore P1 debounce timers after a routing update."""
-        time = datetime.now() if time is None else time
+        time = time or datetime.now()
         self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
         self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
 
@@ -961,15 +962,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.operation = operation
         if self.p1meterEvent is not None:
-            if operation != ManagerMode.OFF and (len(self.devices) == 0 or all(not d.online for d in self.devices)):
+            if operation != ManagerMode.OFF and not any(d.online for d in self.devices):
                 _LOGGER.warning("No devices online, not possible to start the operation")
                 return
 
             match self.operation:
                 case ManagerMode.OFF:
-                    if len(self.devices) > 0:
-                        for d in self.devices:
-                            await d.power_off()
+                    for d in self.devices:
+                        await d.power_off()
 
     async def update_primary_device(self, entity: ZendureSelect, _device_id: Any) -> None:
         """Handle updates to the selected primary device."""
@@ -1002,12 +1002,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _selected_primary_device(self, charging: bool | None = None) -> ZendureDevice | None:
         """Return the selected primary device, optionally filtered by routing direction."""
-        device = None
-        if hasattr(self, "primarydevice"):
-            device_id = self.primarydevice.value
-            if device_id not in (None, PRIMARY_DEVICE_DISABLED):
-                device = next((candidate for candidate in self.devices if candidate.deviceId == device_id), None)
+        if not hasattr(self, "primarydevice"):
+            return None
 
+        device_id = self.primarydevice.value
+        if device_id in (None, PRIMARY_DEVICE_DISABLED):
+            return None
+
+        device = next((candidate for candidate in self.devices if candidate.deviceId == device_id), None)
         if charging is None or device is None:
             return device
 
@@ -1125,7 +1127,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             target = min(max(0, capacities.get(device, 0)), remaining)
             if target <= 0:
                 continue
-            allocated[device] = allocated.get(device, 0) + direction * target
+            allocated[device] += direction * target
             remaining -= target
 
         return allocated, direction * remaining
@@ -1250,7 +1252,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         setpoint = min(setpoint, battery_limit)
         dev_start = max(0, setpoint - battery_optimal * 2) if setpoint > SmartMode.POWER_START else 0
         limit = battery_limit
-        for i, d in enumerate(devices):
+        for d in devices:
             cap = battery_caps[d]
             if cap == 0:
                 continue
@@ -1339,7 +1341,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.p1meterEvent = None
 
     def writeSimulation(self, time: datetime, p1: int) -> None:
-        if Path("simulation.csv").exists() is False:
+        if not Path("simulation.csv").exists():
             with Path("simulation.csv").open("w") as f:
                 f.write(
                     "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
@@ -1399,7 +1401,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         avg = self._p1_history_average()
         stddev = SmartMode.P1_STDDEV_FACTOR * max(
-            SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history))
+            SmartMode.P1_STDDEV_MIN, sqrt(sum(pow(i - avg, 2) for i in self.p1_history) / len(self.p1_history))
         )
         return abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev
 
@@ -1698,7 +1700,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # feed into the home using solar power or off-grid power.
                 elif (home := d.homeOutput.asInt) > 0:
                     self.discharge.append(d)
-                    self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL else 0
+                    if d.state == DeviceState.SOCFULL:
+                        self.discharge_bypass -= d.pwr_produced
                     setpoint += home
 
                 else:
@@ -2513,7 +2516,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         dev_start = min(0, setpoint - charge_optimal * 2) if setpoint < -SmartMode.POWER_START else 0
         limit = charge_limit
         setpoint = max(limit, setpoint)
-        for i, d in enumerate(sorted(charge_devices, key=lambda d: d.electricLevel.asInt, reverse=True)):
+        for d in sorted(charge_devices, key=lambda d: d.electricLevel.asInt, reverse=True):
             pwr = (
                 int(setpoint * (d.pwr_max * (100 - d.electricLevel.asInt)) / charge_weight) if charge_weight != 0 else 0
             )
@@ -2817,20 +2820,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         allow_bypass_zero: bool = False,
     ) -> None:
         """Stop active charging devices before assigning home output."""
-        skip_devices = set() if skip_devices is None else skip_devices
+        skip_devices = skip_devices or set()
         for device in self.charge:
             if device in skip_devices:
                 continue
             # SF 2400 may show more gridInputPower than offGridPower and will be
             # recognized as charging, so set power to 10 instead of 0.
-            if max(0, device.pwr_offgrid) == 0:
-                if allow_bypass_zero and device.can_bypass:
-                    await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
-                else:
-                    # OPTIMIZATION: Stop charging by zeroing input limit instead of switching AC mode to output
-                    await device.power_charge(0)
-            else:
+            if max(0, device.pwr_offgrid) > 0:
                 await device.power_discharge(10)
+            elif allow_bypass_zero and device.can_bypass:
+                await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
+            else:
+                # OPTIMIZATION: Stop charging by zeroing input limit instead of switching AC mode to output
+                await device.power_charge(0)
 
     async def _command_home_output_targets(
         self,
