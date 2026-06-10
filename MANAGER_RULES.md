@@ -48,7 +48,7 @@ Primary-aware modes follow the same rules but prefer the selected primary device
 
 | Mode                 | Positive reading (demand)                  | Negative reading (surplus)         |
 |----------------------|--------------------------------------------|------------------------------------|
-| `MATCHING`           | Discharge                                  | Charge; strong battery-backed export may trim home output only |
+| `MATCHING`           | Discharge                                  | Charge; selected-primary output may be trimmed for export >10 W; strong battery-backed export may trim home output only |
 | `MATCHING_DISCHARGE` | Discharge                                  | No action; strong battery-backed export may trim home output only |
 | `MATCHING_CHARGE`    | PV pass-through only; no battery discharge | Charge                             |
 | `STORE_SOLAR`        | Home output stopped for non-full devices; full devices pass through | Charge                             |
@@ -94,6 +94,7 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 | Charge holdoff | 1 s (was 2 s) | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
 | Charge debounce | 2 s (was 4 s) | Delays charge mode when it would zero active PV floor, without growing charging selected-primary output during export | PV floor may drop briefly before recovery; visible power dips |
 | Selected-primary export cap | P1 ≤ 0 in `MATCHING` | Preserves current primary output and measured non-primary PV floors while stopping PV-only output growth into grid export | Primary PV may cover import only after a positive P1 reading |
+| Primary-output export trim threshold | >10 W export | Lets normal `MATCHING` cycles reduce selected-primary output that is causing measurable grid export | More zero-flow noise can trigger output trims near balance |
 | Battery-export trim threshold | 100 W export | Lets battery-backed export trim home output without waiting for normal debounce | More zero-flow noise can trigger output trims; stale telemetry can over-trim near zero |
 | Spike filter threshold | 800 W | Ignores sudden P1 spikes from appliance inrush | False positives cause overcorrection to transient loads |
 
@@ -122,6 +123,8 @@ In selected-primary `MATCHING` and `MATCHING_DISCHARGE`, battery-backed export s
 5. Sends output-side zero commands when the trim target reaches zero, so an actively discharging device stays in discharge/home-output handling until the next normal calculation.
 
 The fast path is not active in `MATCHING_CHARGE`, `STORE_SOLAR`, `MANUAL`, or `OFF`, and it is not triggered by PV-only home output.
+
+This 100 W threshold is only the debounce-bypass threshold. Normal `MATCHING` routing may still trim selected-primary output for measured export greater than 10 W, but that normal trim does not bypass the grid-meter debounce and does not by itself allow selected-primary input mode.
 
 ## Near-full Charge Taper
 
@@ -183,6 +186,8 @@ The selected primary may be switched into input mode only when either condition 
 - non-primary devices are already contributing more PV-backed home output than the measured household demand for the cycle.
 
 The 50 W gate uses export remaining after controlled output is accounted for, not the corrected routing setpoint. Household demand for the secondary-cover exception is calculated from raw P1 plus the active PV-backed home-output floor. The corrected setpoint still decides the charge budget after the primary is allowed to use the input path. If the selected-primary input path is gated off, primary-local surplus must not fall through to weighted secondary charging; secondaries may only keep charge backed by their own local PV or active charge evidence. Devices that are already reporting input mode may still receive charge-lag corrections because no input/output mode switch is needed, but local PV that is already charging the secondary battery must not be mirrored as matching AC input. Stopping that AC input reduces the selected-primary home-output target by the same load so the freed primary PV stays on the primary.
+
+The 50 W selected-primary input gate is separate from primary-output export trimming. In normal `MATCHING` cycles, measured export greater than 10 W may reduce active selected-primary home output even when the remaining unexplained export is below the 50 W threshold and the primary must stay in output mode. Export of 10 W or less is ignored as zero-flow noise for this trim path.
 
 ### Off-grid output at zero
 

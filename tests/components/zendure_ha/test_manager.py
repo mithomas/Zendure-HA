@@ -4539,7 +4539,7 @@ class TestSmartMatchingPrimaryAware:
     async def test_near_zero_surplus_keeps_primary_pv_on_home_while_secondary_charges_locally(
         self, hass, primary_level, expected_primary_state
     ):
-        """A small negative P1 swing must not move home-serving primary PV into primary charging."""
+        """A small export trims primary output without moving home-serving primary PV into primary charging."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -4585,7 +4585,7 @@ class TestSmartMatchingPrimaryAware:
         assert primary.state is expected_primary_state
         primary.power_charge.assert_not_awaited()
         assert secondary.power_charge.await_args_list == [call(-20), call(-20)]
-        assert primary.power_discharge.await_args_list == [call(250), call(250)]
+        assert primary.power_discharge.await_args_list == [call(230), call(230)]
         secondary.power_discharge.assert_not_awaited()
 
     @pytest.mark.parametrize(("p1", "expected_primary", "expected_secondary"), [(0, 100, 50), (-30, 100, 20)])
@@ -4690,7 +4690,7 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge.assert_awaited_once_with(0)
 
     async def test_charge_hysteresis_keeps_secondary_local_pv_when_primary_pv_serves_home(self, hass):
-        """Charge hysteresis must not block a secondary from absorbing its own PV near the primary PV floor."""
+        """Charge hysteresis must not block secondary local PV while small export trims primary output."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -4733,7 +4733,7 @@ class TestSmartMatchingPrimaryAware:
         assert primary.state is DeviceState.INACTIVE
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once_with(-20)
-        primary.power_discharge.assert_awaited_once_with(250)
+        primary.power_discharge.assert_awaited_once_with(230)
         secondary.power_discharge.assert_not_awaited()
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
@@ -6462,7 +6462,7 @@ class TestSmartMatchingPrimaryAware:
             primary.power_discharge.assert_not_awaited()
         else:
             primary.power_charge.assert_not_awaited()
-            primary.power_discharge.assert_awaited_once_with(20)
+            primary.power_discharge.assert_awaited_once_with(0)
 
     async def test_primary_output_explains_meter_export_without_input_switch(self, hass):
         """Selected-primary PV-backed output should block an AC-input switch when it explains the export."""
@@ -8431,6 +8431,175 @@ class TestPrimaryNoLocalSolarDefers:
         primary.power_discharge.assert_awaited_once_with(250)
         secondary.power_charge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("p1", "expected_output"),
+        [
+            pytest.param(-10, 252, id="ten-watts-ignored"),
+            pytest.param(-11, 241, id="above-ten-watts-trims"),
+            pytest.param(10, 262, id="import-does-not-trim"),
+        ],
+    )
+    async def test_selected_primary_output_trim_uses_strict_export_threshold(self, hass, p1, expected_output):
+        """Primary output is only trimmed when measured export is greater than 10 W."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"primary-output-trim-threshold-{p1}",
+            device_name=f"primary output trim threshold {p1}",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=252,
+            battery_input=88,
+            input_limit=0,
+            output_limit=252,
+        )
+        primary.solarInput.update_value(340)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"secondary-output-trim-threshold-{p1}",
+            device_name=f"secondary output trim threshold {p1}",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            battery_input=200,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(200)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, p1, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(expected_output)
+
+    async def test_selected_primary_output_trim_reproduces_low_export_local_pv_pattern(self, hass):
+        """A 10:12-style low export should reduce primary output without restarting secondary AC input."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-output-trim-low-export-pattern",
+            device_name="primary output trim low export pattern",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=252,
+            battery_input=88,
+            input_limit=0,
+            output_limit=252,
+        )
+        primary.solarInput.update_value(340)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-output-trim-low-export-pattern",
+            device_name="secondary output trim low export pattern",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            battery_input=200,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(200)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -43, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(209)
+        secondary.power_charge.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
+    async def test_selected_primary_output_trim_reduces_non_local_charge_budget(self, hass):
+        """Trimming output must not also keep AC charge that would create import."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-output-trim-no-import",
+            device_name="primary output trim no import",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=252,
+            battery_input=88,
+            input_limit=0,
+            output_limit=252,
+        )
+        primary.solarInput.update_value(340)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-output-trim-no-import",
+            device_name="secondary output trim no import",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            battery_input=100,
+            output_limit=0,
+        )
+        secondary.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -143, datetime.now())
+
+        primary.power_discharge.assert_awaited_once_with(109)
+        secondary.power_charge.assert_not_awaited()
 
     async def test_blocked_primary_input_does_not_fall_back_to_weighted_secondary_charge(self, hass):
         """Gated selected-primary input must not fall back to weighted secondary charge."""

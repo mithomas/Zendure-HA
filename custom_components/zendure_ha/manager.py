@@ -58,6 +58,7 @@ PV_CHARGE_FIRST_OPERATIONS = {
 P1_CHARGE_LAG_FAST_DEVIATION = 20
 P1_EXPORT_TRIM_FAST_DEVIATION = 100
 CHARGE_HOLDOFF_SECONDS = 1
+PRIMARY_OUTPUT_EXPORT_TRIM_THRESHOLD = 10
 PRIMARY_INPUT_EXPORT_THRESHOLD = 50
 
 P1_CHARGE_LAG_FAST_OPERATIONS = {
@@ -133,6 +134,8 @@ class _PowerRoutingIntent:
     selected_primary_input_allowed: bool
     # True when secondary charge may absorb export from a gated selected-primary taper floor.
     blocked_primary_taper_overflow_charge_allowed: bool
+    # Measured export watts that should reduce selected-primary home output during input handling.
+    primary_output_export_trim: int
     # True when a strong-export cycle may only trim output, never start input.
     trim_home_output_only: bool
 
@@ -1473,6 +1476,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_input_allowed=selected_primary_input_allowed,
             local_charge=local_charge,
         )
+        primary_output_export_trim = self._primary_output_export_trim_budget(p1, routing)
         intent = self._power_routing_intent(
             requested_setpoint,
             setpoint,
@@ -1482,10 +1486,22 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_input_allowed=selected_primary_input_allowed,
             blocked_primary_taper_overflow_charge_allowed=blocked_primary_taper_overflow_charge_allowed,
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
+            primary_output_export_trim=primary_output_export_trim,
             trim_home_output_only=trim_home_output_only,
         )
 
         return intent, routing, setpoint
+
+    def _primary_output_export_trim_budget(self, p1: int, routing: _PowerRoutingSnapshot) -> int:
+        """Return measured export eligible to reduce selected-primary output."""
+        if self.operation != ManagerMode.MATCHING or not routing.primary_aware:
+            return 0
+        selected_primary = routing.selected_primary
+        if selected_primary is None or selected_primary not in routing.discharge_devices:
+            return 0
+
+        meter_export = max(0, -p1)
+        return meter_export if meter_export > PRIMARY_OUTPUT_EXPORT_TRIM_THRESHOLD else 0
 
     def _selected_primary_input_allowed(
         self,
@@ -1838,6 +1854,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_primary_input_allowed: bool,
         blocked_primary_taper_overflow_charge_allowed: bool = False,
         selected_primary_output_growth_allowed: bool = True,
+        primary_output_export_trim: int = 0,
         trim_home_output_only: bool = False,
     ) -> _PowerRoutingIntent:
         """Build the compact input-or-home-output decision consumed by the executor."""
@@ -1856,6 +1873,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary_output_growth_allowed=selected_primary_output_growth_allowed,
             selected_primary_input_allowed=selected_primary_input_allowed,
             blocked_primary_taper_overflow_charge_allowed=blocked_primary_taper_overflow_charge_allowed,
+            primary_output_export_trim=primary_output_export_trim,
             trim_home_output_only=trim_home_output_only,
         )
 
@@ -1879,6 +1897,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     strict_output_stop=intent.strict_home_output_stop,
                     allow_selected_primary_input=intent.selected_primary_input_allowed,
                     allow_blocked_primary_taper_overflow_charge=intent.blocked_primary_taper_overflow_charge_allowed,
+                    primary_output_export_trim=intent.primary_output_export_trim,
                 )
             else:
                 await self._apply_standard_input(
@@ -1944,6 +1963,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         strict_output_stop: bool = False,
         allow_selected_primary_input: bool = True,
         allow_blocked_primary_taper_overflow_charge: bool = False,
+        primary_output_export_trim: int = 0,
     ) -> None:
         """
         Apply an input budget while preserving selected-primary PV behavior.
@@ -1999,6 +2019,31 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or keeps_non_primary_local_charge
             or allow_blocked_primary_taper_overflow_charge,
         )
+
+        if (
+            setpoint < 0
+            and primary_output_export_trim > 0
+            and selected_primary is not None
+            and selected_primary in active_discharge_targets
+            and (primary is not selected_primary or keeps_non_primary_local_charge)
+        ):
+            primary_target = active_discharge_targets[selected_primary]
+            trim_cap = max(0, primary_target - routing.route(selected_primary).taper_output_floor)
+            trim = min(primary_output_export_trim, trim_cap)
+            if trim > 0:
+                active_discharge_targets[selected_primary] -= trim
+                local_charge_budget = local_charge.non_primary_local_chargeable_surplus
+                local_charge_budget += local_charge.selected_primary_local_surplus
+                if allow_home_pv_charge:
+                    local_charge_budget += pv_floors.replaceable_non_primary_serving_pv
+                non_local_charge_budget = max(0, -setpoint - local_charge_budget)
+                setpoint += min(trim, non_local_charge_budget)
+                _LOGGER.info(
+                    "Primary Output Export Trim: Trimming primary output %s by %sW to %sW for measured export",
+                    selected_primary.name,
+                    trim,
+                    active_discharge_targets[selected_primary],
+                )
 
         # OPTIMIZATION: Primary Output Self-Trimming under grid export
         if setpoint < 0 and selected_primary is not None and selected_primary in active_discharge_targets:
