@@ -9241,3 +9241,362 @@ class TestPrimaryNoLocalSolarDefers:
             f"Primary was commanded {primary.power_discharge.call_args.args[0]} W; "
             "expected > 45 W to serve unmet household demand"
         )
+
+
+class TestBypassModeChargeStability:
+    """Regression tests for charge oscillation when a battery is in SOCFULL bypass mode.
+
+    Root cause: devices in self.charge that have their own solar production were counted
+    in extra_surplus inside _shape_primary_aware_setpoint. When p1 ≤ 0 the routing added
+    that solar to the charge setpoint, causing an overcorrection on every export cycle.
+    This created a self-sustaining oscillation (charge too much → import → charge too
+    little → export → charge too much …).
+
+    Fix: charge_device_produced is subtracted from extra_surplus so that solar already
+    flowing through a charging device does not cause a double-correction.
+    """
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _make_socfull_bypass_device(hass, *, device_id: str, solar_w: int = 400):
+        """SOCFULL device in bypass mode — solar passes straight through to the home."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=device_id,
+            device_name=f"bypass-{device_id}",
+            product_model="SolarFlow 800 Pro",
+            level=100,  # 100 % ≥ soc_set(80) → SOCFULL
+            soc_set=80,
+            ac_mode=AcMode.OUTPUT,
+            home_output=solar_w,
+            home_input=0,
+            battery_input=0,
+            battery_output=0,
+        )
+        device.byPass.update_value(1)
+        device.solarInput.update_value(solar_w)
+        # After poll: pwr_produced = min(0, 0+0-0-solar_w) = -solar_w
+        return device
+
+    @staticmethod
+    def _make_charging_device(
+        hass,
+        *,
+        device_id: str,
+        ac_draw_w: int,
+        solar_w: int,
+        level: int = 50,
+    ):
+        """Device in charge mode drawing from grid plus local solar."""
+        device = make_device(
+            hass,
+            device_id=device_id,
+            device_name=f"charging-{device_id}",
+            level=level,
+            ac_mode=AcMode.INPUT,
+            home_input=ac_draw_w,
+            home_output=0,
+            battery_input=ac_draw_w + solar_w,
+            battery_output=0,
+        )
+        device.solarInput.update_value(solar_w)
+        # After poll: pwr_produced = min(0, 0+ac_draw_w-(ac_draw_w+solar_w)-0) = -solar_w
+        return device
+
+    @staticmethod
+    def _mock_all(primary, secondary):
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(return_value=0)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(return_value=0)
+        secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
+
+    # ------------------------------------------------------------------ tests
+
+    async def test_primary_bypass_export_not_overcorrected_by_secondary_solar(self, hass):
+        """Core regression: export correction must not include secondary solar.
+
+        Scenario from CSV 13:38: wz-balkon in SOCFULL bypass (solar=400 W) passes
+        through to home; k-keller charges at 200 W AC + 225 W solar.
+
+        setpoint = -172 + 400(wz_out) - 200(k_AC) = 28
+        net_setpoint = 28 - 400(discharge_bypass) = -372 W
+
+        Before fix: extra_surplus = 625-400 = 225 W → command = -597 W (overcorrects).
+        After fix:  extra_surplus = max(0, 625-400-225) = 0 → command = -372 W.
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k", ac_draw_w=200, solar_w=225)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        await _run_prepared_power_routing(manager, -172, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.await_args.args[0] == -372  # noqa: PLR2004
+
+    async def test_primary_bypass_small_export_no_solar_overcorrection(self, hass):
+        """Small export (below 100 W) must be corrected without including secondary solar.
+
+        setpoint = -30 + 400 - 200 = 170 → net = -230 W
+        Without fix: -230 - 225 = -455 W (overcorrects).
+        With fix:    -230 W.
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-small", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k-small", ac_draw_w=200, solar_w=225)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        await _run_prepared_power_routing(manager, -30, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.await_args.args[0] == -230  # noqa: PLR2004
+
+    async def test_primary_bypass_p1_zero_no_solar_overcorrection(self, hass):
+        """At p1=0 (balanced), the charge command must not include secondary solar.
+
+        setpoint = 0 + 400 - 200 = 200 → net = -200 W
+        Without fix: extra_surplus=225 → -200 - 225 = -425 W.
+        With fix:    -200 W.
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-zero", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k-zero", ac_draw_w=200, solar_w=225)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.await_args.args[0] == -200  # noqa: PLR2004
+
+    async def test_primary_bypass_import_reduces_secondary_charge(self, hass):
+        """Positive P1 (import) must reduce secondary charging proportionally.
+
+        p1>0 never enters the extra_surplus path, so this case is the same before/after
+        the fix. Included to guard against regressions in the positive branch.
+
+        setpoint = 131 + 400 - 200 = 331 → net = -69 W
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-pos", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k-pos", ac_draw_w=200, solar_w=225)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        await _run_prepared_power_routing(manager, 131, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.await_args.args[0] == -69  # noqa: PLR2004
+
+    async def test_secondary_bypass_primary_charging_not_overcorrected(self, hass):
+        """Symmetric case: secondary in SOCFULL bypass, primary charges with local solar.
+
+        The fix is symmetric — charge_device_produced covers whichever device is charging.
+        setpoint = -172 + 400(k_out) - 200(wz_AC) = 28 → net = -372 W
+        Before fix: -597 W.  After fix: -372 W.
+        """
+        primary = self._make_charging_device(hass, device_id="wz-sym", ac_draw_w=200, solar_w=225)
+        secondary = self._make_socfull_bypass_device(hass, device_id="k-sym", solar_w=400)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(return_value=0)
+        secondary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
+
+        await _run_prepared_power_routing(manager, -172, datetime.now())
+
+        secondary.power_charge.assert_not_awaited()
+        primary.power_charge.assert_awaited_once()
+        assert primary.power_charge.await_args.args[0] == -372  # noqa: PLR2004
+
+    async def test_bypassed_battery_receives_no_charge_command_across_p1_range(self, hass):
+        """A SOCFULL bypass device must never receive a charge command, regardless of P1."""
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-nochg", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k-nochg", ac_draw_w=200, solar_w=225)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        for p1 in (-172, -50, 0, 88, 205):
+            primary.power_charge.reset_mock()
+            await _run_prepared_power_routing(manager, p1, datetime.now())
+            assert not primary.power_charge.called, (
+                f"Bypassed primary must not be charged at p1={p1}; "
+                f"was called with {primary.power_charge.call_args}"
+            )
+
+    async def test_charging_device_without_local_solar_fix_is_inert(self, hass):
+        """When the charging device has no solar, charge_device_produced=0, fix is no-op.
+
+        setpoint = -80 + 400 - 100 = 220 → net = -180 W (same before and after fix).
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-nosol", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k-nosol", ac_draw_w=100, solar_w=0)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        await _run_prepared_power_routing(manager, -80, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once()
+        assert secondary.power_charge.await_args.args[0] == -180  # noqa: PLR2004
+
+    async def test_charge_setpoint_equals_export_plus_current_ac_draw(self, hass):
+        """Charge target must equal -(export + current_AC_draw) after bypass correction.
+
+        General identity: net_setpoint = p1 + bypass_out - ac_draw - discharge_bypass
+                                       = p1 + bypass_out - ac_draw - bypass_out
+                                       = p1 - ac_draw
+        So |target| = |p1| + ac_draw  (for negative p1 and with fix).
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-sign", solar_w=300)
+        secondary = self._make_charging_device(hass, device_id="k-sign", ac_draw_w=150, solar_w=180)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        export_w = 90  # p1 = -90 W
+        # net_setpoint = -90 + 300 - 150 - 300 = -240 W = -(90 + 150)
+        await _run_prepared_power_routing(manager, -export_w, datetime.now())
+
+        secondary.power_charge.assert_awaited_once()
+        expected = -(export_w + 150)
+        assert secondary.power_charge.await_args.args[0] == expected
+
+    async def test_two_cycles_stable_no_oscillation(self, hass):
+        """Two consecutive routing cycles must not produce a growing charge oscillation.
+
+        Cycle 1 (p1=-172): command = -372 W  (with fix).
+        Cycle 2 (device responds, p1≈0): command must stay near -372 W, not swing to ≈0 W
+        or -597 W, which would indicate the oscillation is still present.
+        """
+        primary = self._make_socfull_bypass_device(hass, device_id="wz-osc", solar_w=400)
+        secondary = self._make_charging_device(hass, device_id="k-osc", ac_draw_w=200, solar_w=225)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_all(primary, secondary)
+
+        # Cycle 1: exporting 172 W.
+        await _run_prepared_power_routing(manager, -172, datetime.now())
+        cycle1 = secondary.power_charge.await_args.args[0]
+        assert cycle1 == -372  # noqa: PLR2004
+
+        # Simulate device response: secondary AC draw rises from 200 W to 372 W.
+        secondary.homeInput.update_value(372)
+        secondary.batteryInput.update_value(372 + 225)
+        secondary.power_charge.reset_mock()
+
+        # Cycle 2: p1 ≈ 0 (balanced after device responded).
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        secondary.power_charge.assert_awaited_once()
+        cycle2 = secondary.power_charge.await_args.args[0]
+        # Must stay near -372 W — not oscillate toward 0 W (undershoot) or -597 W (overshoot).
+        assert -400 <= cycle2 <= -344, (  # noqa: PLR2004
+            f"Oscillation detected: cycle1={cycle1} W, cycle2={cycle2} W; expected ~-372 W"
+        )
+
+    async def test_normal_two_battery_discharge_not_regressed(self, hass):
+        """Normal two-battery discharge operation (no bypass) must be unaffected by the fix.
+
+        Both devices in self.discharge; self.charge is empty, so charge_device_produced=0
+        and the extra_surplus subtraction is a no-op.
+        """
+        primary = make_device(
+            hass,
+            device_id="norm-primary",
+            device_name="normal primary",
+            level=60,
+            ac_mode=AcMode.OUTPUT,
+            home_output=400,
+            battery_input=0,
+            battery_output=300,
+        )
+        secondary = make_device(
+            hass,
+            device_id="norm-secondary",
+            device_name="normal secondary",
+            level=55,
+            ac_mode=AcMode.OUTPUT,
+            home_output=200,
+            battery_input=0,
+            battery_output=150,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(return_value=0)
+        primary.power_discharge = AsyncMock(side_effect=lambda p: p)
+        secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
+
+        # p1=+100 W: net household demand requires sustained discharge.
+        await _run_prepared_power_routing(manager, 100, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()

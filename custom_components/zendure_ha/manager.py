@@ -1829,7 +1829,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 setpoint = max(setpoint, gross_discharge_setpoint)
         discharge_candidate_setpoint = setpoint
 
-        extra_surplus = self.produced - self.discharge_bypass
+        # When a SOCFULL bypass device is present (discharge_bypass > 0), any
+        # other charging device's solar is already captured by that device's own
+        # battery and must NOT be counted again in extra_surplus — doing so
+        # overcorrects the charge setpoint on every p1 ≤ 0 cycle and produces a
+        # self-sustaining oscillation.
+        # Without a bypass device the extra_surplus is kept as-is to allow the
+        # allocation layer to redistribute load from non-solar to solar-capable
+        # charge devices.
+        if self.discharge_bypass > 0:
+            charge_device_produced = sum(-d.pwr_produced for d in self.charge)
+            extra_surplus = max(0, self.produced - self.discharge_bypass - charge_device_produced)
+        else:
+            extra_surplus = self.produced - self.discharge_bypass
         charge_transition_would_zero = self.charge_time > time
         protects_selected_primary_floor = (
             matching_primary_aware
