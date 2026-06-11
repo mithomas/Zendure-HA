@@ -9600,3 +9600,266 @@ class TestBypassModeChargeStability:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
+
+
+class TestPrimaryOutputOscillation:
+    """Regression tests for oscillation when a discharging primary has local solar surplus.
+
+    Root cause: inside _shape_primary_aware_setpoint when discharge_bypass > 0:
+
+    Bug 1 — extra_surplus counts the full solar of discharging devices, including
+    the portion already absorbed by their battery in output mode.  Consequence: the
+    surplus figure is inflated, pushing the shaped setpoint negative (input mode).
+
+    Bug 2 — selected_primary_local_surplus remains non-zero even when the primary is
+    already in routing.discharge_devices (output mode), treating its battery-absorbed
+    solar as free capacity for new grid-side charging.  Both bugs together cause the
+    shaped setpoint to target −34 W, switching the primary from OUTPUT to INPUT mode.
+
+    Both bugs are required to reproduce the oscillation observed in the 2026-06-11
+    export (16:30–17:24): primary (k_balkon) in OUTPUT mode, homeOutput=229 W, solar=263 W
+    (battery absorbs 34 W); secondary (wz_balkon) in SOCFULL bypass, homeOutput=135 W.
+    With P1=−65 W the logic incorrectly shaped a −34 W setpoint, switching k_balkon to
+    INPUT.  That immediately dropped 229 W of home coverage, the meter jumped to ≈ +200 W,
+    the fast-change detector fired at once, and the cycle repeated continuously.
+
+    Fix 1: subtract discharge-device battery-charge (charge_surplus) from extra_surplus.
+    Fix 2: zero selected_primary_local_surplus when the primary is in discharge_devices.
+    """
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _make_primary_discharging_with_solar(
+        hass,
+        *,
+        device_id: str,
+        home_output_w: int,
+        solar_w: int,
+        level: int = 60,
+    ):
+        """Primary in output mode: solar charges battery, battery serves home.
+
+        pwr_produced = min(0, battery_output + home_input - battery_input - home_output)
+                     = min(0, home_output_w + 0 - solar_w - home_output_w) = −solar_w
+        charge_surplus = min(1000, max(0, solar_w − home_output_w))
+        """
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=device_id,
+            device_name=f"primary-{device_id}",
+            product_model="SolarFlow 800 Pro",
+            level=level,
+            soc_set=80,
+            ac_mode=AcMode.OUTPUT,
+            home_output=home_output_w,
+            home_input=0,
+            battery_input=solar_w,
+            battery_output=home_output_w,
+        )
+        device.solarInput.update_value(solar_w)
+        device.byPass.update_value(0)
+        return device
+
+    @staticmethod
+    def _make_socfull_bypass_secondary(
+        hass,
+        *,
+        device_id: str,
+        solar_w: int,
+        home_output_w: int,
+    ):
+        """Secondary in SOCFULL bypass mode: solar passes through to home.
+
+        pwr_produced = min(0, 0 + 0 − 0 − home_output_w) = −home_output_w
+        discharge_bypass contribution = +home_output_w (SOCFULL device)
+        """
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=device_id,
+            device_name=f"secondary-{device_id}",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            soc_set=80,
+            ac_mode=AcMode.OUTPUT,
+            home_output=home_output_w,
+            home_input=0,
+            battery_input=0,
+            battery_output=0,
+        )
+        device.solarInput.update_value(solar_w)
+        device.byPass.update_value(1)
+        return device
+
+    @staticmethod
+    def _mock_both(primary, secondary):
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(return_value=0)
+        primary.power_discharge = AsyncMock(side_effect=lambda p: p)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(return_value=0)
+        secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
+        secondary.power_bypass = AsyncMock(return_value=0)
+
+    # ------------------------------------------------------------------ tests
+
+    async def test_primary_not_switched_to_input_with_small_export(self, hass):
+        """Primary in output mode must stay in output mode when P1 shows a small export.
+
+        Exact scenario from export-2026-06-11_1615.csv at ~16:31:09:
+          k_balkon (primary): OUTPUT, homeOutput=229 W, solar=263 W, battery absorbs 34 W.
+          wz_balkon (secondary): SOCFULL bypass, homeOutput=135 W, solar=166 W.
+          P1 = −65 W (small export).
+
+        Before fix: extra_surplus=263 W; selected_primary_local_surplus=34 W.
+          Together they target setpoint=−34 W → primary switches to INPUT.
+        After fix: extra_surplus=229 W; selected_primary_local_surplus=0.
+          setpoint=+229 W (primary output floor) → primary stays in OUTPUT.
+        """
+        primary = self._make_primary_discharging_with_solar(
+            hass, device_id="k-primary", home_output_w=229, solar_w=263
+        )
+        secondary = self._make_socfull_bypass_secondary(
+            hass, device_id="wz-secondary", solar_w=166, home_output_w=135
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_both(primary, secondary)
+
+        await _run_prepared_power_routing(manager, -65, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+
+    async def test_two_consecutive_cycles_stable_with_small_export(self, hass):
+        """Two consecutive routing cycles with small export must not oscillate.
+
+        The oscillation pattern: cycle 1 shapes a negative setpoint → primary switches
+        to INPUT → household meter jumps → cycle 2 routes back to OUTPUT.  After the fix
+        both cycles must keep the primary in OUTPUT mode.
+        """
+        primary = self._make_primary_discharging_with_solar(
+            hass, device_id="k-primary", home_output_w=229, solar_w=263
+        )
+        secondary = self._make_socfull_bypass_secondary(
+            hass, device_id="wz-secondary", solar_w=166, home_output_w=135
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+
+        self._mock_both(primary, secondary)
+        await _run_prepared_power_routing(manager, -65, datetime.now())
+        primary.power_charge.assert_not_awaited()
+
+        self._mock_both(primary, secondary)
+        await _run_prepared_power_routing(manager, -65, datetime.now())
+        primary.power_charge.assert_not_awaited()
+
+    async def test_genuine_large_export_exceeding_primary_floor_still_triggers_input(self, hass):
+        """When P1 export exceeds the primary produced floor, input mode must still be allowed.
+
+        With P1=−300 W the primary's 229 W floor is exceeded (−300 < −229), so
+        protects_selected_primary_floor is False and the shaping code routes directly to
+        surplus_setpoint without entering the fix path.  The primary must switch to INPUT.
+        This verifies the fix does not suppress legitimate large-surplus routing.
+        """
+        primary = self._make_primary_discharging_with_solar(
+            hass, device_id="k-primary", home_output_w=229, solar_w=263
+        )
+        secondary = self._make_socfull_bypass_secondary(
+            hass, device_id="wz-secondary", solar_w=166, home_output_w=135
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        self._mock_both(primary, secondary)
+
+        await _run_prepared_power_routing(manager, -300, datetime.now())
+
+        primary.power_charge.assert_awaited()
+
+    async def test_primary_battery_charge_surplus_is_34w_in_csv_scenario(self, hass):
+        """Confirm device fixture: primary absorbs exactly 34 W in its battery in the CSV scenario.
+
+        current_charge_surplus_limit() = min(−effective_charge_limit, max(0, solar−home_output))
+                                       = min(1000, max(0, 263−229)) = 34 W.
+        This is the exact value Fix 1 subtracts from extra_surplus.
+        """
+        primary = self._make_primary_discharging_with_solar(
+            hass, device_id="k-primary", home_output_w=229, solar_w=263
+        )
+        # Simulate pwr_produced as _poll_devices_and_prepare_routing_state does.
+        primary.pwr_produced = min(
+            0,
+            primary.batteryOutput.asInt
+            + primary.homeInput.asInt
+            - primary.batteryInput.asInt
+            - primary.homeOutput.asInt,
+        )
+        assert primary.pwr_produced == -263  # noqa: PLR2004
+        assert primary.current_charge_surplus_limit() == 34  # noqa: PLR2004
+
+    async def test_no_regression_on_pure_discharge_without_bypass(self, hass):
+        """Pure battery-discharge (no solar, no SOCFULL bypass) must be unaffected by the fix.
+
+        Without a SOCFULL bypass device, discharge_bypass stays at 0 and the
+        extra_surplus fix branch is never entered; behaviour must be identical to before.
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-primary",
+            device_name="k-primary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=80,
+            ac_mode=AcMode.OUTPUT,
+            home_output=400,
+            battery_output=400,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-secondary",
+            device_name="wz-secondary",
+            product_model="SolarFlow 800 Pro",
+            level=55,
+            soc_set=80,
+            ac_mode=AcMode.OUTPUT,
+            home_output=200,
+            battery_output=200,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(return_value=0)
+        primary.power_discharge = AsyncMock(side_effect=lambda p: p)
+        secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
+
+        await _run_prepared_power_routing(manager, 100, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()

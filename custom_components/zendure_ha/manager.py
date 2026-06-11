@@ -1839,7 +1839,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # charge devices.
         if self.discharge_bypass > 0:
             charge_device_produced = sum(-d.pwr_produced for d in self.charge)
-            extra_surplus = max(0, self.produced - self.discharge_bypass - charge_device_produced)
+            discharge_device_battery_charge = sum(routing.route(d).charge_surplus for d in self.discharge)
+            extra_surplus = max(0, self.produced - self.discharge_bypass - charge_device_produced - discharge_device_battery_charge)
         else:
             extra_surplus = self.produced - self.discharge_bypass
         charge_transition_would_zero = self.charge_time > time
@@ -1870,7 +1871,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 or (primary_keeps_local_surplus and surplus_setpoint < -SmartMode.POWER_START)
             ):
                 selected_primary_local_surplus = (
-                    local_charge.selected_primary_local_surplus if selected_primary_input_allowed else 0
+                    local_charge.selected_primary_local_surplus
+                    if selected_primary_input_allowed
+                    and (selected_primary is None or selected_primary not in routing.discharge_devices)
+                    else 0
                 )
                 local_chargeable_surplus = (
                     local_charge.non_primary_local_chargeable_surplus + selected_primary_local_surplus
