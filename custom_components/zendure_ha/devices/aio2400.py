@@ -18,7 +18,7 @@ class AIO2400(ZendureLegacy):
         self.setLimits(0, 1200)
         self.maxSolar = -1200
 
-    async def charge(self, power: int) -> int:
+    async def charge(self, _power: int) -> int:
         _LOGGER.info("No AC charge for %s available", self.name)
         return 0
 
@@ -37,10 +37,10 @@ class AIO2400(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 8,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -59,8 +59,8 @@ class AIO2400(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 0,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )

@@ -4,7 +4,7 @@ import logging
 import traceback
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -21,14 +21,17 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    _hass: HomeAssistant,
+    _config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Zendure sensor."""
     ZendureSensor.add = async_add_entities
 
 
 class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
-    EntityZendure, SensorEntity
+    EntityZendure,
+    SensorEntity,
 ):
     add: AddEntitiesCallback
 
@@ -104,7 +107,8 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
-    ZendureSensor, RestoreEntity
+    ZendureSensor,
+    RestoreEntity,
 ):
     """Representation of a Zendure sensor entity with restore."""
 
@@ -159,10 +163,9 @@ class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverrid
                 get_last_statistics,
             )
 
+            columns: set[Literal["last_reset", "max", "mean", "min", "state", "sum"]] = {"sum", "state"}
             for getter in (get_last_short_term_statistics, get_last_statistics):
-                stats = await self.hass.async_add_executor_job(
-                    getter, self.hass, 1, self.entity_id, True, {"sum", "state"}
-                )
+                stats = await self.hass.async_add_executor_job(getter, self.hass, 1, self.entity_id, True, columns)
                 if stats and self.entity_id in stats:
                     row = stats[self.entity_id][0]
                     value = row.get("sum") or row.get("state")
@@ -238,10 +241,10 @@ class ZendureCalcSensor(ZendureSensor):
         version = int(value)
         version = (
             f"v{(version & 0xF000) >> 12}.{(version & 0x0F00) >> 8}.{version & 0x00FF}"
-            if version > 10
+            if version > 10  # noqa: PLR2004
             else "not provided"
             if version <= 0
-            else version
+            else str(version)
         )
         if self._attr_native_value == version:
             return version

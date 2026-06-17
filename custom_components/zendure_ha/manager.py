@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from math import sqrt
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.auth.providers import homeassistant as auth_ha
@@ -491,7 +491,7 @@ class _PowerRoutingSnapshot:
         for route in self.devices.values():
             device = route.device
             if device.state == DeviceState.SOCFULL and device.online and device.reports_pv():
-                source_budget += max(route.bypass_passthrough, max(0, -device.pwr_produced, device.solarInput.asInt))
+                source_budget += max(route.bypass_passthrough, 0, -device.pwr_produced, device.solarInput.asInt)
             elif device.state == DeviceState.SOCNEARLYFULL:
                 source_budget += route.taper_output_floor
 
@@ -771,7 +771,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.manualpower = ZendureRestoreNumber(
-            self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True
+            self,
+            "manual_power",
+            None,
+            None,
+            "W",
+            "power",
+            12000,
+            -12000,
+            NumberMode.BOX,
+            True,
         )
         self.discharge_recovery_margin = ZendureRestoreNumber(
             self,
@@ -841,18 +850,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 auto_mqtt = self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)
                 if auto_mqtt and Api.localServer is not None and Api.localServer != "":
                     try:
-                        psw = hashlib.md5(deviceId.encode()).hexdigest().upper()[8:24]
-                        provider: auth_ha.HassAuthProvider = auth_ha.async_get_provider(self.hass)
+                        psw = hashlib.md5(deviceId.encode()).hexdigest().upper()[8:24]  # noqa: S324
+                        provider = cast("auth_ha.HassAuthProvider", auth_ha.async_get_provider(self.hass))
                         credentials = await provider.async_get_or_create_credentials({"username": deviceId.lower()})
                         user = await self.hass.auth.async_get_user_by_credentials(credentials)
                         if user is None:
                             user = await self.hass.auth.async_create_user(
-                                deviceId, group_ids=[GROUP_ID_USER], local_only=True
+                                deviceId,
+                                group_ids=[GROUP_ID_USER],
+                                local_only=True,
                             )
-                            await provider.async_add_auth(deviceId.lower(), psw)
+                            await cast("Any", provider).async_add_auth(deviceId.lower(), psw)
                             await self.hass.auth.async_link_user(user, credentials)
                         else:
-                            await provider.async_change_password(deviceId.lower(), psw)
+                            await cast("Any", provider).async_change_password(deviceId.lower(), psw)
 
                         _LOGGER.info("Managed MQTT user for device: %s", deviceId)
 
@@ -914,7 +925,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         continue
                     case _:
                         _LOGGER.debug(
-                            "Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state
+                            "Device %s has unsupported fuseGroup state: %s",
+                            device.name,
+                            device.fuseGroup.state,
                         )
                         continue
 
@@ -923,13 +936,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     fuseGroups[device.deviceId] = fg
             except AttributeError as err:
                 _LOGGER.error("Device %s missing fuseGroup attribute: %s", device.name, err)
-            except Exception as err:
-                _LOGGER.error(
-                    "Unable to create fusegroup for device %s (%s): %s",
+            except Exception:
+                _LOGGER.exception(
+                    "Unable to create fusegroup for device %s (%s)",
                     device.name,
                     device.deviceId,
-                    err,
-                    exc_info=True,
                 )
 
         # Update the fusegroups and select optins for each device
@@ -951,13 +962,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 device.fuseGroup.setDict(fusegroups)
             except AttributeError as err:
                 _LOGGER.error("Device %s missing fuseGroup attribute: %s", device.name, err)
-            except Exception as err:
-                _LOGGER.error(
-                    "Unable to update fusegroup options for device %s (%s): %s",
+            except Exception:
+                _LOGGER.exception(
+                    "Unable to update fusegroup options for device %s (%s)",
                     device.name,
                     device.deviceId,
-                    err,
-                    exc_info=True,
                 )
 
         # Add devices to fusegroups
@@ -1061,7 +1070,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     def refresh_energy_kwh(self) -> None:
         """Refresh all manager energy aggregates derived from device availability."""
         self.availableKwh.update_value(
-            sum(device.available_kwh_contribution() for device in self.devices if device.state != DeviceState.OFFLINE)
+            sum(device.available_kwh_contribution() for device in self.devices if device.state != DeviceState.OFFLINE),
         )
         self.totalAvailableKwh.update_value(sum(device.available_kwh_contribution() for device in self.devices))
 
@@ -1298,7 +1307,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         return dev_start
 
     async def _start_idle_discharge_devices(
-        self, idle_devices: list[ZendureDevice], dev_start: int, *, primary_aware: bool = False
+        self,
+        idle_devices: list[ZendureDevice],
+        dev_start: int,
+        *,
+        primary_aware: bool = False,
     ) -> None:
         """Start additional idle devices when the remainder distribution requires it."""
         if dev_start <= 0 or not idle_devices:
@@ -1319,14 +1332,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         def isBleDevice(device: ZendureDevice, si: bluetooth.BluetoothServiceInfoBleak) -> bool:
             for d in si.manufacturer_data.values():
                 try:
-                    if d is None or len(d) <= 1:
+                    if len(d) <= 1:
                         continue
                     sn = d.decode("utf8")[:-1]
                     if device.snNumber.endswith(sn):
                         _LOGGER.info("Found Zendure Bluetooth device: %s", si)
                         device.attr_device_info["connections"] = {("bluetooth", str(si.address))}
                         return True
-                except Exception:
+                except Exception as e:
+                    _LOGGER.debug("Error decoding bluetooth manufacturer data: %s", e)
                     continue
             return False
 
@@ -1361,7 +1375,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if p1meter:
             self.p1meterEvent = async_track_state_change_event(self.hass, [p1meter], self._p1_changed)
             if (entity := self.hass.states.get(p1meter)) is not None and entity.attributes.get(
-                "unit_of_measurement", "W"
+                "unit_of_measurement",
+                "W",
             ) in ("kW", "kilowatt", "kilowatts"):
                 self.p1_factor = 1000
         else:
@@ -1390,9 +1405,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                                 )
                             }"
                             for d in self.devices
-                        ]
+                        ],
                     )
-                    + "\n"
+                    + "\n",
                 )
 
         with Path("simulation.csv").open("a") as f:
@@ -1408,7 +1423,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
 
             f.write(
-                f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n"
+                f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n",
             )
 
     def _p1_value_from_event(self, event: Event[EventStateChangedData]) -> int | None:
@@ -1428,7 +1443,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         avg = self._p1_history_average()
         stddev = SmartMode.P1_STDDEV_FACTOR * max(
-            SmartMode.P1_STDDEV_MIN, sqrt(sum(pow(i - avg, 2) for i in self.p1_history) / len(self.p1_history))
+            SmartMode.P1_STDDEV_MIN,
+            sqrt(sum(pow(i - avg, 2) for i in self.p1_history) / len(self.p1_history)),
         )
         return abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev
 
@@ -1558,7 +1574,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or non_empty_local_input_allowed
         )
         selected_primary_input_allowed_for_shaping = self._selected_primary_input_allowed(
-            routing, input_source, unexplained_input_export
+            routing,
+            input_source,
+            unexplained_input_export,
         )
         local_charge = routing.local_charge_summary(
             selected_charge_primary,
@@ -1584,7 +1602,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
         selected_primary_input_allowed = self._selected_primary_input_allowed(
-            routing, input_source, unexplained_input_export
+            routing,
+            input_source,
+            unexplained_input_export,
         )
         selected_primary_output_growth_allowed = not (
             selected_primary_routing and self.operation == ManagerMode.MATCHING and p1 <= 0
@@ -1673,7 +1693,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         primary_produced_floor = pv_floors.active_primary_produced_floor
         if routing.selected_primary is not None:
             primary_produced_floor = min(
-                primary_produced_floor, _pv_evidence_for_output_replacement(routing.selected_primary)
+                primary_produced_floor,
+                _pv_evidence_for_output_replacement(routing.selected_primary),
             )
         primary_produced_excess = max(0, primary_produced_floor - primary_needed_for_load)
         controlled_export = min(meter_export, primary_produced_excess)
@@ -1715,7 +1736,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if await d.power_get():
                 # get power production
                 d.pwr_produced = min(
-                    0, d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt
+                    0,
+                    d.batteryOutput.asInt + d.homeInput.asInt - d.batteryInput.asInt - d.homeOutput.asInt,
                 )
                 self.produced -= d.pwr_produced
 
@@ -1798,7 +1820,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 bypass_passthrough=bypass_passthrough,
                 available_discharge=self._available_discharge_power(device, primary_aware=primary_aware),
                 available_discharge_with_produced=self._available_discharge_power(
-                    device, primary_aware=primary_aware, allow_produced_only=True
+                    device,
+                    primary_aware=primary_aware,
+                    allow_produced_only=True,
                 ),
             )
 
@@ -1868,7 +1892,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             charge_device_produced = sum(-d.pwr_produced for d in self.charge)
             discharge_device_battery_charge = sum(routing.route(d).charge_surplus for d in self.discharge)
             extra_surplus = max(
-                0, self.produced - self.discharge_bypass - charge_device_produced - discharge_device_battery_charge
+                0,
+                self.produced - self.discharge_bypass - charge_device_produced - discharge_device_battery_charge,
             )
         else:
             extra_surplus = self.produced - self.discharge_bypass
@@ -2228,7 +2253,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     active_discharge_targets[selected_primary] -= trim
                     setpoint += trim
                     _LOGGER.info(
-                        "Primary Output Self-Trimming: Trimming primary solar output %s by %sW to %sW to absorb export setpoint of %sW (secondary surplus: %sW)",
+                        "Primary Output Self-Trimming: Trimming primary solar output %s by %sW to %sW to absorb "
+                        "export setpoint of %sW (secondary surplus: %sW)",
                         selected_primary.name,
                         trim,
                         active_discharge_targets[selected_primary],
@@ -2312,7 +2338,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 any(device.fuseGrp is not selected_primary.fuseGrp for device in charge_devices)
                 or any(device.fuseGrp is not selected_primary.fuseGrp for device in active_secondary_charge_devices)
                 or any(device.fuseGrp is not selected_primary.fuseGrp for device in idle_secondary_surplus_devices)
-                or full_primary_bypass_handoff_promotions
+                or full_primary_bypass_handoff_promotions,
             )
         )
         primary_local_surplus = routing.charge_surplus(primary) if primary is not None else 0
@@ -2640,13 +2666,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             await d.power_charge(
                 -SmartMode.POWER_START - max(0, d.pwr_offgrid)
                 if d.state != DeviceState.SOCFULL
-                else -max(0, d.pwr_offgrid)
+                else -max(0, d.pwr_offgrid),
             )
             if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                 break
 
     async def _apply_standard_home_output(
-        self, setpoint: int, routing: _PowerRoutingSnapshot, *, produced_only: bool = False
+        self,
+        setpoint: int,
+        routing: _PowerRoutingSnapshot,
+        *,
+        produced_only: bool = False,
     ) -> None:
         """
         Apply a home-output budget without selected-primary ordering.
@@ -2661,13 +2691,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         await self._stop_charging_for_home_output()
 
         discharge_devices = routing.discharge_candidates(
-            list(self.discharge), list(self.idle), promote_idle_devices=False
+            list(self.discharge),
+            list(self.idle),
+            promote_idle_devices=False,
         )
         setpoint = max(setpoint, routing.active_taper_output_floor(discharge_devices))
         idle_devices = [device for device in self.idle if device not in discharge_devices]
         idle_lvlmax, _idle_lvlmin = self._idle_levels(idle_devices)
         self.operationstate.update_value(
-            ManagerState.DISCHARGE.value if setpoint > 0 and discharge_devices else ManagerState.IDLE.value
+            ManagerState.DISCHARGE.value if setpoint > 0 and discharge_devices else ManagerState.IDLE.value,
         )
         targets, setpoint = self._allocate_produced_floor(setpoint, discharge_devices)
 
@@ -2856,7 +2888,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.operationstate.update_value(
             ManagerState.DISCHARGE.value
             if requested_setpoint > 0 and (primary is not None or produced_devices or discharge_devices)
-            else ManagerState.IDLE.value
+            else ManagerState.IDLE.value,
         )
         command_devices = sorted({*produced_devices, *discharge_devices}, key=lambda device: device.electricLevel.asInt)
         targets = {device: produced_targets.get(device, 0) for device in command_devices}

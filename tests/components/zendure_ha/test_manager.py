@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
@@ -250,7 +250,7 @@ class TestPrimaryAwareModeFolding:
         await _run_prepared_power_routing(manager, 200, datetime.now())
 
         intent = self._power_routing_intent(mocks)
-        assert intent.home_output_budget == 200  # noqa: PLR2004
+        assert intent.home_output_budget == 200
         assert not intent.route_input
         assert not intent.selected_primary_home_output
 
@@ -258,7 +258,7 @@ class TestPrimaryAwareModeFolding:
         await _run_prepared_power_routing(manager, -200, datetime.now())
 
         intent = self._power_routing_intent(mocks)
-        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.input_budget == -200
         assert intent.route_input
         assert not intent.selected_primary_input
 
@@ -268,7 +268,7 @@ class TestPrimaryAwareModeFolding:
         await _run_prepared_power_routing(manager, 200, datetime.now())
 
         intent = self._power_routing_intent(mocks)
-        assert intent.home_output_budget == 200  # noqa: PLR2004
+        assert intent.home_output_budget == 200
         assert not intent.route_input
         assert intent.selected_primary_home_output
 
@@ -276,14 +276,16 @@ class TestPrimaryAwareModeFolding:
         await _run_prepared_power_routing(manager, -200, datetime.now())
 
         intent = self._power_routing_intent(mocks)
-        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.input_budget == -200
         assert intent.route_input
         assert intent.selected_primary_input
 
     async def test_matching_discharge_uses_primary_aware_path_only_with_primary(self, hass):
         normal, normal_mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING_DISCHARGE)
         primary, primary_mocks = self._manager_with_dispatch_mocks(
-            hass, operation=ManagerMode.MATCHING_DISCHARGE, primary=True
+            hass,
+            operation=ManagerMode.MATCHING_DISCHARGE,
+            primary=True,
         )
 
         await _run_prepared_power_routing(normal, 200, datetime.now())
@@ -291,15 +293,17 @@ class TestPrimaryAwareModeFolding:
 
         normal_intent = self._power_routing_intent(normal_mocks)
         primary_intent = self._power_routing_intent(primary_mocks)
-        assert normal_intent.home_output_budget == 200  # noqa: PLR2004
+        assert normal_intent.home_output_budget == 200
         assert not normal_intent.selected_primary_home_output
-        assert primary_intent.home_output_budget == 200  # noqa: PLR2004
+        assert primary_intent.home_output_budget == 200
         assert primary_intent.selected_primary_home_output
 
     async def test_matching_charge_uses_primary_aware_path_only_with_primary(self, hass):
         normal, normal_mocks = self._manager_with_dispatch_mocks(hass, operation=ManagerMode.MATCHING_CHARGE)
         primary, primary_mocks = self._manager_with_dispatch_mocks(
-            hass, operation=ManagerMode.MATCHING_CHARGE, primary=True
+            hass,
+            operation=ManagerMode.MATCHING_CHARGE,
+            primary=True,
         )
 
         await _run_prepared_power_routing(normal, -200, datetime.now())
@@ -307,9 +311,9 @@ class TestPrimaryAwareModeFolding:
 
         normal_intent = self._power_routing_intent(normal_mocks)
         primary_intent = self._power_routing_intent(primary_mocks)
-        assert normal_intent.input_budget == -200  # noqa: PLR2004
+        assert normal_intent.input_budget == -200
         assert not normal_intent.selected_primary_input
-        assert primary_intent.input_budget == -200  # noqa: PLR2004
+        assert primary_intent.input_budget == -200
         assert primary_intent.selected_primary_input
 
     @pytest.mark.parametrize(
@@ -321,10 +325,15 @@ class TestPrimaryAwareModeFolding:
     )
     async def test_manual_uses_primary_aware_path_only_with_primary(self, hass, manual_power, route_input, expected):
         normal, normal_mocks = self._manager_with_dispatch_mocks(
-            hass, operation=ManagerMode.MANUAL, manual_power=manual_power
+            hass,
+            operation=ManagerMode.MANUAL,
+            manual_power=manual_power,
         )
         primary, primary_mocks = self._manager_with_dispatch_mocks(
-            hass, operation=ManagerMode.MANUAL, primary=True, manual_power=manual_power
+            hass,
+            operation=ManagerMode.MANUAL,
+            primary=True,
+            manual_power=manual_power,
         )
 
         await _run_prepared_power_routing(normal, 0, datetime.now())
@@ -347,7 +356,7 @@ class TestPrimaryAwareModeFolding:
         await _run_prepared_power_routing(manager, -200, datetime.now())
 
         intent = self._power_routing_intent(mocks)
-        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.input_budget == -200
         assert intent.route_input
         assert intent.selected_primary_input
         assert intent.strict_home_output_stop
@@ -358,7 +367,7 @@ class TestPrimaryAwareModeFolding:
         await _run_prepared_power_routing(manager, -200, datetime.now())
 
         intent = self._power_routing_intent(mocks)
-        assert intent.input_budget == -200  # noqa: PLR2004
+        assert intent.input_budget == -200
         assert intent.route_input
         assert not intent.selected_primary_input
         assert intent.strict_home_output_stop
@@ -501,10 +510,11 @@ class TestStoreSolarRouting:
 class TestSmartMatchingPrimaryAware:
     async def test_taper_export_stuck(self, hass, freezer):
         """Test that primary taper floor doesn't cause infinite holdoff loop."""
-        from custom_components.zendure_ha.const import ManagerMode, DeviceState, AcMode
-        from tests.components.zendure_ha.common import make_manager, make_device, make_p1_event
-        from unittest.mock import PropertyMock, patch, AsyncMock
         from datetime import datetime, timedelta
+        from unittest.mock import AsyncMock, PropertyMock, patch
+
+        from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode
+        from tests.components.zendure_ha.common import make_device, make_manager, make_p1_event
 
         primary = make_device(
             hass,
@@ -579,7 +589,7 @@ class TestSmartMatchingPrimaryAware:
 
             # Loop for 5 minutes, as if the grid keeps exporting -170W.
             # The primary keeps outputting 343W.
-            for i in range(10):
+            for _i in range(10):
                 freezer.tick(timedelta(seconds=30))
                 await manager._p1_changed(make_p1_event(-170))
 
@@ -587,7 +597,6 @@ class TestSmartMatchingPrimaryAware:
             # We assert it was called with a negative power (charging)
             assert secondary.power_charge.await_count > 0
             last_charge_call = secondary.power_charge.await_args_list[-1].args[0]
-            print(f"last_charge_call = {last_charge_call}")
             assert last_charge_call < 0
 
     async def test_includes_idle_devices_that_already_have_produced_power(self, hass):
@@ -743,7 +752,11 @@ class TestSmartMatchingPrimaryAware:
         ],
     )
     async def test_low_soc_primary_replacement_capacity_uses_1106_export_pattern(
-        self, hass, level, state, expected_capacity
+        self,
+        hass,
+        level,
+        state,
+        expected_capacity,
     ):
         """Unused primary PV from the 11:00:08 pattern is usable only after reserve recovery."""
         primary = make_device(
@@ -967,7 +980,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_bypass.assert_not_awaited()
 
     async def test_prefers_the_selected_primary_for_battery_remainder_when_it_is_99_percent_and_already_bypassing(
-        self, hass
+        self,
+        hass,
     ):
         """A non-full primary already reporting bypass should still take the battery-backed remainder."""
         primary = make_device(
@@ -1173,7 +1187,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_transfers_discharge_to_the_secondary_after_the_primary_becomes_empty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         """Once the selected primary is empty, the secondary should take over the discharge load."""
         first = make_device(
@@ -1414,7 +1431,8 @@ class TestSmartMatchingPrimaryAware:
         spill_secondary.power_discharge.assert_awaited_once_with(30)
 
     async def test_two_system_demand_prefers_primary_battery_before_secondary_battery_when_no_solar_is_available(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -1458,7 +1476,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge.assert_not_awaited()
 
     async def test_two_system_demand_uses_primary_solar_before_any_secondary_contribution_when_only_primary_has_solar(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -1544,7 +1563,8 @@ class TestSmartMatchingPrimaryAware:
         assert secondary.power_discharge.await_args_list[-1] == call(200)
 
     async def test_two_system_demand_uses_primary_solar_then_secondary_solar_when_both_batteries_are_available(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -1589,7 +1609,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_primary_battery_only_when_secondary_battery_is_socempty_and_no_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1635,7 +1658,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_rolls_primary_solar_into_primary_battery_when_secondary_battery_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1681,7 +1707,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_secondary_solar_but_not_secondary_battery_when_only_primary_battery_is_available(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1727,7 +1756,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_keeps_secondary_battery_unavailable_even_when_both_systems_have_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1773,7 +1805,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_secondary_battery_only_when_primary_battery_is_socempty_and_no_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1819,7 +1854,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_primary_solar_before_secondary_battery_when_primary_battery_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1865,7 +1903,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_only_idle_secondary_solar_when_primary_battery_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1911,7 +1952,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_primary_solar_then_secondary_solar_before_secondary_battery_when_primary_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -1957,7 +2001,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_has_no_available_source_when_both_batteries_are_socempty_and_no_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -2004,7 +2051,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_only_primary_solar_when_both_batteries_are_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -2051,7 +2101,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_only_secondary_solar_when_both_batteries_are_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -2098,7 +2151,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_demand_uses_both_solar_sources_when_both_batteries_are_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -2144,7 +2200,8 @@ class TestSmartMatchingPrimaryAware:
         assert secondary.power_discharge.await_args_list[-1] == call(100)
 
     async def test_two_system_solar_charges_empty_secondary_when_on_discharge_path_and_all_solar_goes_to_home(
-        self, hass
+        self,
+        hass,
     ):
         """
         Secondary at low SoC that has all its solar passing to home should stop home output for recovery.
@@ -2298,7 +2355,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_not_awaited()
 
     async def test_two_system_active_demand_prefers_primary_battery_before_secondary_battery_when_no_solar_is_available(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -2346,7 +2404,8 @@ class TestSmartMatchingPrimaryAware:
         assert secondary.power_discharge.await_args_list[-1] == call(0)
 
     async def test_two_system_active_demand_uses_primary_solar_before_any_secondary_contribution_when_only_primary_has_solar(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -2440,7 +2499,8 @@ class TestSmartMatchingPrimaryAware:
         assert secondary.power_discharge.await_args_list[-1] == call(200)
 
     async def test_two_system_active_demand_uses_primary_solar_then_secondary_solar_when_both_batteries_are_available(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -2488,7 +2548,8 @@ class TestSmartMatchingPrimaryAware:
         assert secondary.power_discharge.await_args_list[-1] == call(100)
 
     async def test_two_system_active_demand_keeps_current_secondary_solar_pass_through_before_extra_primary_pv(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -2578,7 +2639,7 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         intent = _manager_power_routing_intent(manager)
-        assert intent.home_output_budget == 200  # noqa: PLR2004
+        assert intent.home_output_budget == 200
         assert not intent.route_input
 
     async def test_active_asymmetric_solar_follow_on_zero_p1_cycle_does_not_zero_both_and_start_charging(self, hass):
@@ -2674,7 +2735,7 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         intent = _manager_power_routing_intent(manager)
-        assert intent.home_output_budget == 250  # noqa: PLR2004
+        assert intent.home_output_budget == 250
         assert not intent.route_input
 
     async def test_primary_only_follow_on_false_negative_p1_cycle_stays_on_discharge_path(self, hass):
@@ -2720,7 +2781,7 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, -250, datetime.now())
 
         intent = _manager_power_routing_intent(manager)
-        assert intent.home_output_budget == 250  # noqa: PLR2004
+        assert intent.home_output_budget == 250
         assert not intent.route_input
 
     async def test_primary_only_follow_on_false_negative_p1_cycle_enters_charge_only_after_debounce_window(self, hass):
@@ -2782,7 +2843,8 @@ class TestSmartMatchingPrimaryAware:
         ]
 
     async def test_two_system_follow_on_cycle_keeps_primary_solar_serving_home_when_primary_alone_covers_demand(
-        self, hass
+        self,
+        hass,
     ):
         initial_primary = make_device(
             hass,
@@ -2875,7 +2937,8 @@ class TestSmartMatchingPrimaryAware:
         assert follow_on_secondary.power_discharge.await_args_list[-1] == call(0)
 
     async def test_two_system_false_negative_follow_on_cycle_keeps_primary_solar_serving_home_when_primary_alone_covers_demand(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -3018,7 +3081,8 @@ class TestSmartMatchingPrimaryAware:
         assert follow_on_secondary.power_discharge.await_args_list[-1] == call(50)
 
     async def test_two_system_false_negative_follow_on_cycle_keeps_both_systems_serving_home_when_both_pv_are_needed(
-        self, hass
+        self,
+        hass,
     ):
         primary = make_device(
             hass,
@@ -3071,7 +3135,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_uses_primary_battery_only_when_secondary_battery_is_socempty_and_no_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3121,7 +3188,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_rolls_primary_solar_into_primary_battery_when_secondary_battery_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3171,7 +3241,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_two_system_active_demand_uses_secondary_solar_but_not_secondary_battery_when_only_primary_battery_is_available(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3221,7 +3294,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_keeps_secondary_battery_unavailable_even_when_both_systems_have_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3271,7 +3347,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_uses_secondary_battery_only_when_primary_battery_is_socempty_and_no_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3321,7 +3400,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_two_system_active_demand_uses_primary_solar_before_secondary_battery_when_primary_battery_is_in_reserve(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3371,7 +3453,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_uses_only_active_secondary_solar_when_primary_battery_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3421,7 +3506,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_uses_primary_solar_then_secondary_solar_before_secondary_battery_when_primary_is_socempty(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3471,7 +3559,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), LOW_SOC_DEVICE_CASES)
     async def test_two_system_active_demand_has_no_available_source_when_both_batteries_are_socempty_and_no_solar(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3522,7 +3613,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_two_system_active_demand_uses_only_primary_solar_when_both_batteries_are_in_reserve(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3573,7 +3667,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_two_system_active_demand_uses_only_secondary_solar_when_both_batteries_are_in_reserve(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -3624,7 +3721,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_two_system_active_demand_uses_both_solar_sources_when_both_batteries_are_in_reserve(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         primary = make_device(
             hass,
@@ -4030,7 +4130,7 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, 20, datetime.now())
 
         intent = _manager_power_routing_intent(manager)
-        assert intent.input_budget == -260  # noqa: PLR2004
+        assert intent.input_budget == -260
         assert intent.route_input
 
     async def test_charges_only_the_true_surplus_after_home_pass_through(self, hass):
@@ -4682,7 +4782,10 @@ class TestSmartMatchingPrimaryAware:
         ],
     )
     async def test_near_zero_surplus_keeps_primary_pv_on_home_while_secondary_charges_locally(
-        self, hass, primary_level, expected_primary_state
+        self,
+        hass,
+        primary_level,
+        expected_primary_state,
     ):
         """A small export trims primary output without moving home-serving primary PV into primary charging."""
         primary = make_device(
@@ -4737,7 +4840,11 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("p1", "expected_primary", "expected_secondary"), [(0, 100, 50), (-30, 100, 20)])
     async def test_zero_or_export_does_not_grow_selected_primary_output(
-        self, hass, p1, expected_primary, expected_secondary
+        self,
+        hass,
+        p1,
+        expected_primary,
+        expected_secondary,
     ):
         """At zero/export, selected-primary charging PV should not grow output to replace battery output."""
         primary = make_device(
@@ -4887,7 +4994,10 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize(("low_soc_level", "low_soc_state"), PV_HOME_PRIORITY_DEVICE_CASES)
     async def test_reserve_primary_keeps_solar_pass_through_while_the_secondary_covers_battery_remainder(
-        self, hass, low_soc_level, low_soc_state
+        self,
+        hass,
+        low_soc_level,
+        low_soc_state,
     ):
         """A reserve primary may still pass through current solar while the secondary covers the battery-backed remainder."""
         primary = make_device(
@@ -4983,7 +5093,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_not_awaited()
 
     async def test_socempty_primary_solar_does_not_charge_secondary_during_grid_import(self, hass):
-        """pv_charge_first must not fire while the house is still importing from the grid.
+        """
+        pv_charge_first must not fire while the house is still importing from the grid.
 
         When the primary hits SOCEMPTY its solar passthrough is small and the
         house is still drawing from the grid (p1 > 0).  The pv_charge_first
@@ -5010,7 +5121,7 @@ class TestSmartMatchingPrimaryAware:
             battery_input=0,
             battery_output=0,
         )
-        # Secondary: healthy level, 317 W solar – 106 W stored as surplus, 211 W
+        # Secondary: healthy level, 317 W solar - 106 W stored as surplus, 211 W
         # serving home.  Before the fix the pv_charge_first clamp would redirect
         # secondary into input mode and consume 52 W of AC to charge primary.
         secondary = make_device(
@@ -5042,7 +5153,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        # House is still importing 300 W from the grid – pv_charge_first must
+        # House is still importing 300 W from the grid - pv_charge_first must
         # not convert this into a charge setpoint.
         await _run_prepared_power_routing(manager, 300, datetime.now())
 
@@ -5062,7 +5173,10 @@ class TestSmartMatchingPrimaryAware:
         ],
     )
     async def test_below_threshold_export_does_not_target_a_blocked_secondary_without_source(
-        self, hass, secondary_level, expected_state
+        self,
+        hass,
+        secondary_level,
+        expected_state,
     ):
         """Without source evidence or enough unexplained export, a blocked secondary should not switch to grid input."""
         primary = make_device(
@@ -5536,7 +5650,9 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize("full_bypass_device_is_primary", [True, False])
     async def test_negative_p1_with_full_bypass_pv_increases_the_charging_device(
-        self, hass, full_bypass_device_is_primary
+        self,
+        hass,
+        full_bypass_device_is_primary,
     ):
         """A full bypassing peer should keep its PV on bypass while export is absorbed by the charging device."""
         full_bypass = make_device(
@@ -5880,7 +5996,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_bypass.assert_not_awaited()
 
     async def test_positive_p1_with_battery_backed_secondary_discharge_stops_secondary_and_reduces_primary_charge(
-        self, hass
+        self,
+        hass,
     ):
         """A battery-backed secondary discharge should stop before the stale primary charge target is reduced."""
         primary = make_device(
@@ -5937,7 +6054,9 @@ class TestSmartMatchingPrimaryAware:
 
     @pytest.mark.parametrize("selected_device", ["charging", "mixed"])
     async def test_positive_p1_with_mixed_secondary_output_preserves_pv_floor_when_charge_reaches_zero(
-        self, hass, selected_device
+        self,
+        hass,
+        selected_device,
     ):
         """A mixed PV and battery output should keep its PV floor when stale charging reaches zero."""
         charging = make_device(
@@ -6059,7 +6178,11 @@ class TestSmartMatchingPrimaryAware:
         ],
     )
     async def test_positive_p1_with_discharge_blocked_secondary_pv_still_reduces_primary_charge(
-        self, hass, secondary_level, recovery_margin, expected_state
+        self,
+        hass,
+        secondary_level,
+        recovery_margin,
+        expected_state,
     ):
         """A blocked secondary passing PV to the home should not make charge holdoff keep a stale primary target."""
         primary = make_device(
@@ -6222,7 +6345,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge.assert_not_awaited()
 
     async def test_positive_p1_with_selected_primary_pv_reduces_secondary_charge_floor_without_touching_primary(
-        self, hass
+        self,
+        hass,
     ):
         """A secondary's active charge floor should cover positive demand before the selected primary is touched."""
         primary = make_device(
@@ -6412,7 +6536,8 @@ class TestSmartMatchingPrimaryAware:
         blocked_secondary.power_bypass.assert_not_awaited()
 
     async def test_keeps_mixed_secondary_home_and_charge_pv_on_the_secondary_when_primary_pv_can_cover_demand(
-        self, hass
+        self,
+        hass,
     ):
         """A secondary that is both serving the home and charging must keep that PV locally when primary PV can cover demand."""
         primary = make_device(
@@ -6761,7 +6886,7 @@ class TestSmartMatchingPrimaryAware:
 
         intent = _manager_power_routing_intent(manager)
         assert not intent.route_input
-        assert intent.home_output_budget == 80  # noqa: PLR2004
+        assert intent.home_output_budget == 80
         assert not intent.selected_primary_input_allowed
 
     async def test_battery_backed_output_explains_meter_export_without_input_switch(self, hass):
@@ -6796,7 +6921,7 @@ class TestSmartMatchingPrimaryAware:
 
         intent = _manager_power_routing_intent(manager)
         assert not intent.route_input
-        assert intent.home_output_budget == 20  # noqa: PLR2004
+        assert intent.home_output_budget == 20
         assert not intent.selected_primary_input_allowed
 
     async def test_secondary_pv_cover_does_not_allow_primary_input_without_source_evidence(self, hass):
@@ -6898,7 +7023,7 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, 120, datetime.now())
 
         intent = _manager_power_routing_intent(manager)
-        assert intent.input_budget == -170  # noqa: PLR2004
+        assert intent.input_budget == -170
         assert intent.route_input
 
     async def test_reduces_primary_charge_before_secondary_when_positive_p1_appears_during_charge_lag(self, hass):
@@ -6957,7 +7082,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_discharge.assert_not_awaited()
 
     async def test_reduces_secondary_charge_only_after_the_primary_reaches_zero_when_positive_p1_exceeds_primary_pv(
-        self, hass
+        self,
+        hass,
     ):
         """If positive demand exceeds primary PV, the primary should be reduced to zero before the secondary is reduced."""
         primary = make_device(
@@ -7683,7 +7809,8 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_awaited_once_with(-300)
 
     async def test_empty_primary_output_self_trimming_under_export(self, hass):
-        """EMPTY_SOC_STATES primary trims its solar home output before charging at the residual setpoint.
+        """
+        EMPTY_SOC_STATES primary trims its solar home output before charging at the residual setpoint.
 
         When the primary is outputting solar to the home (100 W) and the house is
         exporting (setpoint = -180 W), the staged code should trim the primary's
@@ -7846,7 +7973,10 @@ class TestP1SpikeFilter:
 
     @staticmethod
     def _enable_spike_filter(
-        manager, *, threshold: int = DEFAULT_THRESHOLD, duration: float = DEFAULT_DURATION
+        manager,
+        *,
+        threshold: int = DEFAULT_THRESHOLD,
+        duration: float = DEFAULT_DURATION,
     ) -> None:
         manager.p1_history.clear()
         manager.p1_history.extend([0, 0])
@@ -8012,7 +8142,9 @@ class TestP1ChargeLagFastPath:
 
     @pytest.mark.parametrize("charging_device_is_primary", [True, False])
     async def test_charge_telemetry_bypasses_p1_debounce_without_previous_manager_bucket(
-        self, hass, charging_device_is_primary
+        self,
+        hass,
+        charging_device_is_primary,
     ):
         p1_value = 150
         charging = make_device(
@@ -8698,7 +8830,7 @@ class TestChargeHoldoffTimers:
 class TestLowSocImmediatePromotion:
     """Low-SoC devices avoid AC input unless there is a real external source."""
 
-    @pytest.mark.parametrize("level, state", LOW_SOC_DEVICE_CASES)
+    @pytest.mark.parametrize(("level", "state"), LOW_SOC_DEVICE_CASES)
     async def test_idle_low_soc_device_is_not_promoted_to_ac_input_for_small_meter_export(self, hass, level, state):
         """At-reserve devices should not switch to AC input for a small export alone."""
         primary = make_device(
@@ -9329,6 +9461,8 @@ class TestPrimaryNoLocalSolarDefers:
 
     async def test_secondary_local_solar_surplus_does_not_suppress_primary_battery_under_household_demand(self, hass):
         """
+        Test secondary local PV surplus must not suppress primary battery discharge.
+
         Regression: secondary local PV surplus must not suppress primary battery discharge when household
         demand is unmet.
 
@@ -9408,7 +9542,8 @@ class TestPrimaryNoLocalSolarDefers:
 
 
 class TestBypassModeChargeStability:
-    """Regression tests for charge oscillation when a battery is in SOCFULL bypass mode.
+    """
+    Regression tests for charge oscillation when a battery is in SOCFULL bypass mode.
 
     Root cause: devices in self.charge that have their own solar production were counted
     in extra_surplus inside _shape_primary_aware_setpoint. When p1 ≤ 0 the routing added
@@ -9423,7 +9558,7 @@ class TestBypassModeChargeStability:
     # ------------------------------------------------------------------ helpers
 
     @staticmethod
-    def _make_socfull_bypass_device(hass, *, device_id: str, solar_w: int = 400):
+    def _make_socfull_bypass_device(hass, *, device_id: str, solar_w: int = 400) -> Any:
         """SOCFULL device in bypass mode — solar passes straight through to the home."""
         device = make_device(
             hass,
@@ -9452,7 +9587,7 @@ class TestBypassModeChargeStability:
         ac_draw_w: int,
         solar_w: int,
         level: int = 50,
-    ):
+    ) -> Any:
         """Device in charge mode drawing from grid plus local solar."""
         device = make_device(
             hass,
@@ -9470,7 +9605,7 @@ class TestBypassModeChargeStability:
         return device
 
     @staticmethod
-    def _mock_all(primary, secondary):
+    def _mock_all(primary, secondary) -> None:
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
         primary.power_charge = AsyncMock(return_value=0)
@@ -9481,7 +9616,8 @@ class TestBypassModeChargeStability:
     # ------------------------------------------------------------------ tests
 
     async def test_primary_bypass_export_not_overcorrected_by_secondary_solar(self, hass):
-        """Core regression: export correction must not include secondary solar.
+        """
+        Core regression: export correction must not include secondary solar.
 
         Scenario from CSV 13:38: wz-balkon in SOCFULL bypass (solar=400 W) passes
         through to home; k-keller charges at 200 W AC + 225 W solar.
@@ -9507,10 +9643,11 @@ class TestBypassModeChargeStability:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once()
-        assert secondary.power_charge.await_args.args[0] == -372  # noqa: PLR2004
+        assert secondary.power_charge.await_args.args[0] == -372
 
     async def test_primary_bypass_small_export_no_solar_overcorrection(self, hass):
-        """Small export (below 100 W) must be corrected without including secondary solar.
+        """
+        Small export (below 100 W) must be corrected without including secondary solar.
 
         setpoint = -30 + 400 - 200 = 170 → net = -230 W
         Without fix: -230 - 225 = -455 W (overcorrects).
@@ -9531,10 +9668,11 @@ class TestBypassModeChargeStability:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once()
-        assert secondary.power_charge.await_args.args[0] == -230  # noqa: PLR2004
+        assert secondary.power_charge.await_args.args[0] == -230
 
     async def test_primary_bypass_p1_zero_no_solar_overcorrection(self, hass):
-        """At p1=0 (balanced), the charge command must not include secondary solar.
+        """
+        At p1=0 (balanced), the charge command must not include secondary solar.
 
         setpoint = 0 + 400 - 200 = 200 → net = -200 W
         Without fix: extra_surplus=225 → -200 - 225 = -425 W.
@@ -9555,10 +9693,11 @@ class TestBypassModeChargeStability:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once()
-        assert secondary.power_charge.await_args.args[0] == -200  # noqa: PLR2004
+        assert secondary.power_charge.await_args.args[0] == -200
 
     async def test_primary_bypass_import_reduces_secondary_charge(self, hass):
-        """Positive P1 (import) must reduce secondary charging proportionally.
+        """
+        Positive P1 (import) must reduce secondary charging proportionally.
 
         p1>0 never enters the extra_surplus path, so this case is the same before/after
         the fix. Included to guard against regressions in the positive branch.
@@ -9580,10 +9719,11 @@ class TestBypassModeChargeStability:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once()
-        assert secondary.power_charge.await_args.args[0] == -69  # noqa: PLR2004
+        assert secondary.power_charge.await_args.args[0] == -69
 
     async def test_secondary_bypass_primary_charging_not_overcorrected(self, hass):
-        """Symmetric case: secondary in SOCFULL bypass, primary charges with local solar.
+        """
+        Symmetric case: secondary in SOCFULL bypass, primary charges with local solar.
 
         The fix is symmetric — charge_device_produced covers whichever device is charging.
         setpoint = -172 + 400(k_out) - 200(wz_AC) = 28 → net = -372 W
@@ -9609,7 +9749,8 @@ class TestBypassModeChargeStability:
 
         secondary.power_charge.assert_not_awaited()
         primary.power_charge.assert_awaited_once()
-        assert primary.power_charge.await_args.args[0] == -372  # noqa: PLR2004
+        assert primary.power_charge.await_args is not None
+        assert primary.power_charge.await_args.args[0] == -372
 
     async def test_bypassed_battery_receives_no_charge_command_across_p1_range(self, hass):
         """A SOCFULL bypass device must never receive a charge command, regardless of P1."""
@@ -9632,7 +9773,8 @@ class TestBypassModeChargeStability:
             )
 
     async def test_charging_device_without_local_solar_fix_is_inert(self, hass):
-        """When the charging device has no solar, charge_device_produced=0, fix is no-op.
+        """
+        When the charging device has no solar, charge_device_produced=0, fix is no-op.
 
         setpoint = -80 + 400 - 100 = 220 → net = -180 W (same before and after fix).
         """
@@ -9651,10 +9793,11 @@ class TestBypassModeChargeStability:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_awaited_once()
-        assert secondary.power_charge.await_args.args[0] == -180  # noqa: PLR2004
+        assert secondary.power_charge.await_args.args[0] == -180
 
     async def test_charge_setpoint_equals_export_plus_current_ac_draw(self, hass):
-        """Charge target must equal -(export + current_AC_draw) after bypass correction.
+        """
+        Charge target must equal -(export + current_AC_draw) after bypass correction.
 
         General identity: net_setpoint = p1 + bypass_out - ac_draw - discharge_bypass
                                        = p1 + bypass_out - ac_draw - bypass_out
@@ -9681,7 +9824,8 @@ class TestBypassModeChargeStability:
         assert secondary.power_charge.await_args.args[0] == expected
 
     async def test_two_cycles_stable_no_oscillation(self, hass):
-        """Two consecutive routing cycles must not produce a growing charge oscillation.
+        """
+        Two consecutive routing cycles must not produce a growing charge oscillation.
 
         Cycle 1 (p1=-172): command = -372 W  (with fix).
         Cycle 2 (device responds, p1≈0): command must stay near -372 W, not swing to ≈0 W
@@ -9701,7 +9845,7 @@ class TestBypassModeChargeStability:
         # Cycle 1: exporting 172 W.
         await _run_prepared_power_routing(manager, -172, datetime.now())
         cycle1 = secondary.power_charge.await_args.args[0]
-        assert cycle1 == -372  # noqa: PLR2004
+        assert cycle1 == -372
 
         # Simulate device response: secondary AC draw rises from 200 W to 372 W.
         secondary.homeInput.update_value(372)
@@ -9714,12 +9858,11 @@ class TestBypassModeChargeStability:
         secondary.power_charge.assert_awaited_once()
         cycle2 = secondary.power_charge.await_args.args[0]
         # Must stay near -372 W — not oscillate toward 0 W (undershoot) or -597 W (overshoot).
-        assert -400 <= cycle2 <= -344, (  # noqa: PLR2004
-            f"Oscillation detected: cycle1={cycle1} W, cycle2={cycle2} W; expected ~-372 W"
-        )
+        assert -400 <= cycle2 <= -344, f"Oscillation detected: cycle1={cycle1} W, cycle2={cycle2} W; expected ~-372 W"
 
     async def test_normal_two_battery_discharge_not_regressed(self, hass):
-        """Normal two-battery discharge operation (no bypass) must be unaffected by the fix.
+        """
+        Normal two-battery discharge operation (no bypass) must be unaffected by the fix.
 
         Both devices in self.discharge; self.charge is empty, so charge_device_produced=0
         and the extra_surplus subtraction is a no-op.
@@ -9766,7 +9909,8 @@ class TestBypassModeChargeStability:
 
 
 class TestPrimaryOutputOscillation:
-    """Regression tests for oscillation when a discharging primary has local solar surplus.
+    """
+    Regression tests for oscillation when a discharging primary has local solar surplus.
 
     Root cause: inside _shape_primary_aware_setpoint when discharge_bypass > 0:
 
@@ -9777,12 +9921,12 @@ class TestPrimaryOutputOscillation:
     Bug 2 — selected_primary_local_surplus remains non-zero even when the primary is
     already in routing.discharge_devices (output mode), treating its battery-absorbed
     solar as free capacity for new grid-side charging.  Both bugs together cause the
-    shaped setpoint to target −34 W, switching the primary from OUTPUT to INPUT mode.
+    shaped setpoint to target -34 W, switching the primary from OUTPUT to INPUT mode.
 
     Both bugs are required to reproduce the oscillation observed in the 2026-06-11
-    export (16:30–17:24): primary (k_balkon) in OUTPUT mode, homeOutput=229 W, solar=263 W
+    export (16:30-17:24): primary (k_balkon) in OUTPUT mode, homeOutput=229 W, solar=263 W
     (battery absorbs 34 W); secondary (wz_balkon) in SOCFULL bypass, homeOutput=135 W.
-    With P1=−65 W the logic incorrectly shaped a −34 W setpoint, switching k_balkon to
+    With P1=-65 W the logic incorrectly shaped a -34 W setpoint, switching k_balkon to
     INPUT.  That immediately dropped 229 W of home coverage, the meter jumped to ≈ +200 W,
     the fast-change detector fired at once, and the cycle repeated continuously.
 
@@ -9800,12 +9944,13 @@ class TestPrimaryOutputOscillation:
         home_output_w: int,
         solar_w: int,
         level: int = 60,
-    ):
-        """Primary in output mode: solar charges battery, battery serves home.
+    ) -> Any:
+        """
+        Primary in output mode: solar charges battery, battery serves home.
 
         pwr_produced = min(0, battery_output + home_input - battery_input - home_output)
-                     = min(0, home_output_w + 0 - solar_w - home_output_w) = −solar_w
-        charge_surplus = min(1000, max(0, solar_w − home_output_w))
+                     = min(0, home_output_w + 0 - solar_w - home_output_w) = -solar_w
+        charge_surplus = min(1000, max(0, solar_w - home_output_w))
         """
         device = make_device(
             hass,
@@ -9832,10 +9977,11 @@ class TestPrimaryOutputOscillation:
         device_id: str,
         solar_w: int,
         home_output_w: int,
-    ):
-        """Secondary in SOCFULL bypass mode: solar passes through to home.
+    ) -> Any:
+        """
+        Secondary in SOCFULL bypass mode: solar passes through to home.
 
-        pwr_produced = min(0, 0 + 0 − 0 − home_output_w) = −home_output_w
+        pwr_produced = min(0, 0 + 0 - 0 - home_output_w) = -home_output_w
         discharge_bypass contribution = +home_output_w (SOCFULL device)
         """
         device = make_device(
@@ -9857,7 +10003,7 @@ class TestPrimaryOutputOscillation:
         return device
 
     @staticmethod
-    def _mock_both(primary, secondary):
+    def _mock_both(primary, secondary) -> None:
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
         primary.power_charge = AsyncMock(return_value=0)
@@ -9870,15 +10016,16 @@ class TestPrimaryOutputOscillation:
     # ------------------------------------------------------------------ tests
 
     async def test_primary_not_switched_to_input_with_small_export(self, hass):
-        """Primary in output mode must stay in output mode when P1 shows a small export.
+        """
+        Primary in output mode must stay in output mode when P1 shows a small export.
 
         Exact scenario from export-2026-06-11_1615.csv at ~16:31:09:
           k_balkon (primary): OUTPUT, homeOutput=229 W, solar=263 W, battery absorbs 34 W.
           wz_balkon (secondary): SOCFULL bypass, homeOutput=135 W, solar=166 W.
-          P1 = −65 W (small export).
+          P1 = -65 W (small export).
 
         Before fix: extra_surplus=263 W; selected_primary_local_surplus=34 W.
-          Together they target setpoint=−34 W → primary switches to INPUT.
+          Together they target setpoint=-34 W -> primary switches to INPUT.
         After fix: extra_surplus=229 W; selected_primary_local_surplus=0.
           setpoint=+229 W (primary output floor) → primary stays in OUTPUT.
         """
@@ -9898,7 +10045,8 @@ class TestPrimaryOutputOscillation:
         primary.power_charge.assert_not_awaited()
 
     async def test_two_consecutive_cycles_stable_with_small_export(self, hass):
-        """Two consecutive routing cycles with small export must not oscillate.
+        """
+        Two consecutive routing cycles with small export must not oscillate.
 
         The oscillation pattern: cycle 1 shapes a negative setpoint → primary switches
         to INPUT → household meter jumps → cycle 2 routes back to OUTPUT.  After the fix
@@ -9923,9 +10071,10 @@ class TestPrimaryOutputOscillation:
         primary.power_charge.assert_not_awaited()
 
     async def test_genuine_large_export_exceeding_primary_floor_still_triggers_input(self, hass):
-        """When P1 export exceeds the primary produced floor, input mode must still be allowed.
+        """
+        When P1 export exceeds the primary produced floor, input mode must still be allowed.
 
-        With P1=−300 W the primary's 229 W floor is exceeded (−300 < −229), so
+        With P1=-300 W the primary's 229 W floor is exceeded (-300 < -229), so
         protects_selected_primary_floor is False and the shaping code routes directly to
         surplus_setpoint without entering the fix path.  The primary must switch to INPUT.
         This verifies the fix does not suppress legitimate large-surplus routing.
@@ -9946,10 +10095,11 @@ class TestPrimaryOutputOscillation:
         primary.power_charge.assert_awaited()
 
     async def test_primary_battery_charge_surplus_is_34w_in_csv_scenario(self, hass):
-        """Confirm device fixture: primary absorbs exactly 34 W in its battery in the CSV scenario.
+        """
+        Confirm device fixture: primary absorbs exactly 34 W in its battery in the CSV scenario.
 
-        current_charge_surplus_limit() = min(−effective_charge_limit, max(0, solar−home_output))
-                                       = min(1000, max(0, 263−229)) = 34 W.
+        current_charge_surplus_limit() = min(-effective_charge_limit, max(0, solar-home_output))
+                                       = min(1000, max(0, 263-229)) = 34 W.
         This is the exact value Fix 1 subtracts from extra_surplus.
         """
         primary = self._make_primary_discharging_with_solar(hass, device_id="k-primary", home_output_w=229, solar_w=263)
@@ -9961,11 +10111,12 @@ class TestPrimaryOutputOscillation:
             - primary.batteryInput.asInt
             - primary.homeOutput.asInt,
         )
-        assert primary.pwr_produced == -263  # noqa: PLR2004
-        assert primary.current_charge_surplus_limit() == 34  # noqa: PLR2004
+        assert primary.pwr_produced == -263
+        assert primary.current_charge_surplus_limit() == 34
 
     async def test_no_regression_on_pure_discharge_without_bypass(self, hass):
-        """Pure battery-discharge (no solar, no SOCFULL bypass) must be unaffected by the fix.
+        """
+        Pure battery-discharge (no solar, no SOCFULL bypass) must be unaffected by the fix.
 
         Without a SOCFULL bypass device, discharge_bypass stays at 0 and the
         extra_surplus fix branch is never entered; behaviour must be identical to before.

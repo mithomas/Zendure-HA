@@ -30,7 +30,7 @@ class Hub2000(ZendureLegacy):
             {
                 "arguments": [{"autoModelProgram": 2, "autoModelValue": power, "msgType": 1, "autoModel": 8}],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -40,7 +40,7 @@ class Hub2000(ZendureLegacy):
             {
                 "arguments": [{"autoModelProgram": 2, "autoModelValue": power, "msgType": 1, "autoModel": 8}],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -50,5 +50,5 @@ class Hub2000(ZendureLegacy):
             {
                 "arguments": [{"autoModelProgram": 0, "autoModelValue": 0, "msgType": 1, "autoModel": 0}],
                 "function": "deviceAutomation",
-            }
+            },
         )

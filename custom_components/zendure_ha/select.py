@@ -17,14 +17,17 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    _hass: HomeAssistant,
+    _config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Zendure select."""
     ZendureSelect.add = async_add_entities
 
 
 class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
-    EntityZendure, SelectEntity
+    EntityZendure,
+    SelectEntity,
 ):
     """Representation of a Zendure select entity."""
 
@@ -123,7 +126,8 @@ class ZendureSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverride]
-    ZendureSelect, RestoreEntity
+    ZendureSelect,
+    RestoreEntity,
 ):
     """Representation of a Zendure select entity with restore."""
 
@@ -145,7 +149,9 @@ class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverrid
             selected_key = state.attributes.get("selected_key")
             if selected_key is not None:
                 self._selected_key = selected_key
-                self._attr_current_option = self._options.get(selected_key, state.state) if self._options else state.state
+                self._attr_current_option = (
+                    self._options.get(selected_key, state.state) if self._options else state.state
+                )
             else:
                 self._selected_key = None
                 self._attr_current_option = state.state

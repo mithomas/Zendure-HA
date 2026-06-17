@@ -143,7 +143,7 @@ class ZendureDevice(EntityDevice):
         self.topic_write = f"iot/{self.prodkey}/{self.deviceId}/properties/write"
         self.topic_function = f"iot/{self.prodkey}/{self.deviceId}/function/invoke"
 
-        self.batteries: dict[str, ZendureBattery | None] = {}
+        self.batteries: dict[str, ZendureBattery] = {}
         self.lastseen = datetime.min
         self._messageid = 0
         self.kWh = 0.0
@@ -184,20 +184,62 @@ class ZendureDevice(EntityDevice):
     def create_entities(self) -> None:
         """Create the device entities."""
         self.limitOutput = ZendureNumber(
-            self, "outputLimit", self.entityWrite, None, "W", "power", self.discharge_limit, 0, NumberMode.SLIDER
+            self,
+            "outputLimit",
+            self.entityWrite,
+            None,
+            "W",
+            "power",
+            self.discharge_limit,
+            0,
+            NumberMode.SLIDER,
         )
         self.limitInput = ZendureNumber(
-            self, "inputLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER
+            self,
+            "inputLimit",
+            self.entityWrite,
+            None,
+            "W",
+            "power",
+            self.charge_limit,
+            0,
+            NumberMode.SLIDER,
         )
         self.chargeMaxLimit = ZendureNumber(
-            self, "chargeMaxLimit", self.entityWrite, None, "W", "power", self.charge_limit, 0, NumberMode.SLIDER
+            self,
+            "chargeMaxLimit",
+            self.entityWrite,
+            None,
+            "W",
+            "power",
+            self.charge_limit,
+            0,
+            NumberMode.SLIDER,
         )
         self.minSoc = ZendureNumber(
-            self, "minSoc", self._write_min_soc, None, "%", "soc", 100, 5, NumberMode.SLIDER, 10
+            self,
+            "minSoc",
+            self._write_min_soc,
+            None,
+            "%",
+            "soc",
+            100,
+            5,
+            NumberMode.SLIDER,
+            10,
         )
         self.socSet = ZendureNumber(self, "socSet", self.entityWrite, None, "%", "soc", 100, 70, NumberMode.SLIDER, 10)
         self.socReserve = ZendureRestoreNumber(
-            self, "socReserve", self.refresh_recovery_state, None, "%", "soc", 100, 5, NumberMode.SLIDER, True
+            self,
+            "socReserve",
+            self.refresh_recovery_state,
+            None,
+            "%",
+            "soc",
+            100,
+            5,
+            NumberMode.SLIDER,
+            True,
         )
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
         self.socLimit = ZendureSensor(self, "socLimit", state=SocLimitState.NORMAL.value)
@@ -219,7 +261,13 @@ class ZendureDevice(EntityDevice):
         self.electricLevel = ZendureSensor(self, "electricLevel", None, "%", "battery", "measurement")
         self.homeInput = ZendureSensor(self, "gridInputPower", None, "W", "power", "measurement")
         self.solarInput = ZendureSensor(
-            self, "solarInputPower", None, "W", "power", "measurement", icon="mdi:solar-panel"
+            self,
+            "solarInputPower",
+            None,
+            "W",
+            "power",
+            "measurement",
+            icon="mdi:solar-panel",
         )
         self.batteryInput = ZendureSensor(self, "outputPackPower", None, "W", "power", "measurement")
         self.batteryOutput = ZendureSensor(self, "packInputPower", None, "W", "power", "measurement")
@@ -241,11 +289,18 @@ class ZendureDevice(EntityDevice):
         self.aggrCharge = ZendureRestoreSensor(self, "aggrCharge", None, "kWh", "energy", "total_increasing", 2)
         self.aggrDischarge = ZendureRestoreSensor(self, "aggrDischarge", None, "kWh", "energy", "total_increasing", 2)
         self.aggrHomeInput = ZendureRestoreSensor(
-            self, "aggrGridInputPower", None, "kWh", "energy", "total_increasing", 2
+            self,
+            "aggrGridInputPower",
+            None,
+            "kWh",
+            "energy",
+            "total_increasing",
+            2,
         )
         self.aggrHomeOut = ZendureRestoreSensor(self, "aggrOutputHome", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
+        self.aggrOffGrid: ZendureRestoreSensor | None = None
 
     def setLimits(self, charge: int, discharge: int) -> None:
         """Set the device limits."""
@@ -329,7 +384,8 @@ class ZendureDevice(EntityDevice):
                     case "outputHomePower":
                         self.aggrHomeOut.aggregate(dt_util.now(), value)
                     case "gridOffPower":
-                        self.aggrOffGrid.aggregate(dt_util.now(), value)
+                        if self.aggrOffGrid is not None:
+                            self.aggrOffGrid.aggregate(dt_util.now(), value)
                     case "inverseMaxPower":
                         self.setLimits(self.charge_limit, value)
                     case "chargeLimit" | "chargeMaxLimit":
@@ -625,7 +681,7 @@ class ZendureDevice(EntityDevice):
         if self.mqtt is not None:
             self.mqtt.publish(self.topic_write, payload)
 
-    async def button_press(self, _key: str) -> None:
+    async def button_press(self, _button: ZendureButton) -> None:
         return
 
     def mqttPublish(self, topic: str, command: Any, client: mqtt_client.Client | None = None) -> None:
@@ -675,7 +731,7 @@ class ZendureDevice(EntityDevice):
 
             # Recalculate total capacity after every packData update
             # (covers both new batteries and potential pack changes)
-            self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
+            self.kWh = sum(b.kWh for b in self.batteries.values())
             self.totalKwh.update_value(self.kWh)
             self.refresh_discharge_state()
 
@@ -1150,8 +1206,8 @@ class ZendureZenSdk(ZendureDevice):
                     "acMode": 1,
                     "outputLimit": 0,
                     "inputLimit": -power,
-                }
-            }
+                },
+            },
         )
         return power
 
@@ -1170,8 +1226,8 @@ class ZendureZenSdk(ZendureDevice):
                     "acMode": 2,
                     "outputLimit": power,
                     "inputLimit": 0,
-                }
-            }
+                },
+            },
         )
         return power
 
@@ -1184,8 +1240,8 @@ class ZendureZenSdk(ZendureDevice):
                     "acMode": 2,
                     "outputLimit": 0,
                     "inputLimit": 0,
-                }
-            }
+                },
+            },
         )
 
     async def doCommand(self, command: Any) -> None:
@@ -1322,7 +1378,7 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
                 ConnectionMode.CLOUD: "cloud",
                 ConnectionMode.ZENSDK: "zenSDK",
                 ConnectionMode.ZENSDK_WITH_LOCAL_MQTT: "localMqtt+zenSDK",
-            }
+            },
         )
 
     async def mqttSelect(self, select: Any, value: Any) -> None:
@@ -1435,7 +1491,7 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
 
             if (battery := self.batteries.get(battery_id, None)) is None:
                 self.batteries[battery_id] = ZendureBattery(self.hass, battery_id, self)
-                self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
+                self.kWh = sum(b.kWh for b in self.batteries.values())
                 self.refresh_discharge_state()
                 battery = self.batteries[battery_id]
 
@@ -1524,7 +1580,7 @@ class ZendureZenSDKWithLocalMQTT(ZendureZenSdk):
             if entity_type == "select":
                 mapping = self._mqtt_select_mappings.get(prop_name)
                 if mapping and prop_value in mapping:
-                    prop_value = mapping[prop_value]
+                    prop_value = mapping[prop_value]  # noqa: PLW2901
 
             topic = f"Zendure/{entity_type}/{self.snNumber}/{prop_name}/set"
             mqtt_value = self._format_mqtt_value(entity_type, prop_value)

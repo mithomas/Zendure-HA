@@ -36,10 +36,10 @@ class Hyper2000(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 8,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -58,10 +58,10 @@ class Hyper2000(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 8,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -80,8 +80,8 @@ class Hyper2000(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 0,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )

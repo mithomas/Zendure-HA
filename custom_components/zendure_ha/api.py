@@ -8,10 +8,10 @@ import logging
 import secrets
 import traceback
 from base64 import b64decode
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from http import HTTPStatus
-from typing import Any, Mapping
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
@@ -120,7 +120,11 @@ class Api:
         if Api.localServer != "":
             clientId = Api.localUser + str(secrets.randbelow(10000))
             self.mqttLocal.__init__(
-                mqtt_enums.CallbackAPIVersion.VERSION2, clientId, True, "local", mqtt_enums.MQTTProtocolVersion.MQTTv31
+                mqtt_enums.CallbackAPIVersion.VERSION2,
+                clientId,
+                True,
+                "local",
+                mqtt_enums.MQTTProtocolVersion.MQTTv31,
             )
             self.mqttInit(self.mqttLocal, Api.localServer, Api.localPort, Api.localUser, Api.localPassword)
 
@@ -194,7 +198,7 @@ class Api:
 
             # Calculate signature
             sign_str = f"{CONF_HAKEY}{body_str}{CONF_HAKEY}"
-            sha1 = hashlib.sha1()
+            sha1 = hashlib.sha1()  # noqa: S324
             sha1.update(sign_str.encode("utf-8"))
             sign = sha1.hexdigest().upper()
 
@@ -286,7 +290,7 @@ class Api:
             topics = msg.topic.split("/", 3)
 
             # Validate topic format before accessing indices
-            if len(topics) < 4:
+            if len(topics) < 4:  # noqa: PLR2004
                 _LOGGER.warning("Invalid MQTT topic format: %s (expected 4 segments)", msg.topic)
                 return
 
@@ -324,14 +328,14 @@ class Api:
             return
         try:
             topics = msg.topic.split("/")
-            if topics[0] == "Zendure" and len(topics) >= 4:
+            if topics[0] == "Zendure" and len(topics) >= 4:  # noqa: PLR2004
                 self._handleLocalMqttMessage(client, msg, topics)
                 return
 
             topics = msg.topic.split("/", 3)
 
             # Validate topic format before accessing indices
-            if len(topics) < 4:
+            if len(topics) < 4:  # noqa: PLR2004
                 _LOGGER.warning("Invalid local MQTT topic format: %s (expected 4 segments)", msg.topic)
                 return
 

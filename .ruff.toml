@@ -2,6 +2,9 @@
 
 target-version = "py312"
 line-length = 120
+exclude = [
+    "analysis",
+]
 
 [lint]
 select = [
@@ -33,7 +36,6 @@ ignore = [
     "TC002", # typing-only-third-party-import
     "RUF012", # mutable-class-default
     "TC003", #typing-only-standard-library-import
-    "UP035", #deprecated-import
     "DTZ901", #datetime-min-max
     "PLC0415", #import-outside-top-level
 ]
@@ -49,6 +51,8 @@ fixture-parentheses = false
     "E501",
     "S101",
     "SLF001",
+    "PLR2004",
+    "ERA001",
 ]
 
 [lint.pyupgrade]

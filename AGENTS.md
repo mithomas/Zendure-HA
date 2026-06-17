@@ -20,6 +20,8 @@ Use the local venv when present:
 - Do not change user-visible entity names or semantics as part of test-only work.
 - Leave `examples/` alone unless the task is explicitly about examples or docs.
 - Do not create analysis scripts for each specific day; instead, re-use and potentially adjust the existing ones.
+- **ASCII Typographic Characters**: Always write comments, documentation, and docstrings using standard ASCII hyphen-minus characters (`-`) instead of non-ASCII typographic symbols (like the en-dash `–` or Unicode minus sign `−`). This prevents linter warnings (such as `RUF002`/`RUF003`) and terminal rendering issues.
+- **Arrows**: Always construct arrows using standard hyphens and the greater-than symbol (e.g., `->`) instead of Unicode characters (like `→`).
 
 ## Analysis Scripts
 The `analysis/` directory contains tools to process and interpret telemetry exports.

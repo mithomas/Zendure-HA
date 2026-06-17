@@ -3,6 +3,7 @@
 import logging
 from functools import partial
 from pathlib import Path
+from typing import cast
 
 from homeassistant.components.persistent_notification import async_create
 from homeassistant.core import HomeAssistant
@@ -20,6 +21,9 @@ _LOGGER = logging.getLogger(__name__)
 
 class Migration:
     """Handles device/entity rename migrations."""
+
+    _changes: list = []
+    _update: bool | None = None
 
     repairs = {
         "i_o_t_state": "iotstate",
@@ -76,14 +80,11 @@ class Migration:
                 if old_id != new_id:
                     changes_recorder.append((old_id, new_id))
             if changes_recorder:
-                async_call_later(
-                    hass, 5, partial(Migration._reconcile_recorder, hass, changes_recorder)
-                )
+                async_call_later(hass, 5, partial(Migration._reconcile_recorder, hass, changes_recorder))
 
         if name != existing.name:
             _LOGGER.warning("Migrating device '%s' -> name='%s' id='%s'", existing.name, name, device_id)
             device_registry.async_update_device(existing.id, name=name, name_by_user=None)
-
 
     @staticmethod
     def _update_files(hass: HomeAssistant, changes: list[tuple[str, str]]) -> bool:
@@ -146,7 +147,7 @@ class Migration:
 
                 if device.via_device_id:
                     # is a battery device, change name to the new format
-                    name, _, _ = ZendureBattery.get_battery_type(device.serial_number)
+                    name, _, _ = ZendureBattery.get_battery_type(cast("str", device.serial_number))
                 if name != device.name:
                     _LOGGER.info("Promoting device name '%s' -> '%s'", device.name, name)
                     device_registry.async_update_device(device.id, name=name, name_by_user=None)
@@ -200,7 +201,7 @@ class Migration:
                     except Exception as e:
                         _LOGGER.error("Failed to migrate entity %s: %s", entity.entity_id, e)
             except Exception as e:
-                _LOGGER.error("Failed to migrate entity %s: %s", entity.entity_id, e)
+                _LOGGER.error("Failed to migrate device %s: %s", device.name, e)
 
         # update template config entries
         modified = 0
@@ -250,63 +251,66 @@ class Migration:
 
     @staticmethod
     async def _reconcile_recorder(
-        hass: HomeAssistant, changes: list[tuple[str, str]], _now: object | None = None
+        hass: HomeAssistant,
+        changes: list[tuple[str, str]],
+        _now: object | None = None,
     ) -> None:
         """Merge orphaned states_meta rows into current entity IDs."""
 
         def _do_reconcile() -> None:
             try:
-                from homeassistant.components.recorder import get_instance
+                from homeassistant.helpers.recorder import get_instance
                 from sqlalchemy import text
 
                 recorder = get_instance(hass)
-                with recorder.engine.connect() as conn:
-                    for old_id, new_id in changes:
-                        old_row = conn.execute(
-                            text("SELECT metadata_id FROM states_meta WHERE entity_id = :eid"),
-                            {"eid": old_id},
-                        ).fetchone()
-                        if not old_row:
-                            continue
+                if recorder is not None and recorder.engine is not None:
+                    with recorder.engine.connect() as conn:
+                        for old_id, new_id in changes:
+                            old_row = conn.execute(
+                                text("SELECT metadata_id FROM states_meta WHERE entity_id = :eid"),
+                                {"eid": old_id},
+                            ).fetchone()
+                            if not old_row:
+                                continue
 
-                        new_row = conn.execute(
-                            text("SELECT metadata_id FROM states_meta WHERE entity_id = :eid"),
-                            {"eid": new_id},
-                        ).fetchone()
-                        if new_row:
+                            new_row = conn.execute(
+                                text("SELECT metadata_id FROM states_meta WHERE entity_id = :eid"),
+                                {"eid": new_id},
+                            ).fetchone()
+                            if new_row:
+                                conn.execute(
+                                    text("UPDATE states_meta SET entity_id = :back WHERE metadata_id = :mid"),
+                                    {"back": new_id + "_back", "mid": new_row[0]},
+                                )
                             conn.execute(
-                                text("UPDATE states_meta SET entity_id = :back WHERE metadata_id = :mid"),
-                                {"back": new_id + "_back", "mid": new_row[0]},
+                                text("UPDATE states_meta SET entity_id = :new WHERE metadata_id = :mid"),
+                                {"new": new_id, "mid": old_row[0]},
                             )
-                        conn.execute(
-                            text("UPDATE states_meta SET entity_id = :new WHERE metadata_id = :mid"),
-                            {"new": new_id, "mid": old_row[0]},
-                        )
-                        _LOGGER.info("Reconciled states_meta '%s' -> '%s'", old_id, new_id)
+                            _LOGGER.info("Reconciled states_meta '%s' -> '%s'", old_id, new_id)
 
-                        old_stat = conn.execute(
-                            text("SELECT id FROM statistics_meta WHERE statistic_id = :sid"),
-                            {"sid": old_id},
-                        ).fetchone()
-                        if not old_stat:
-                            continue
+                            old_stat = conn.execute(
+                                text("SELECT id FROM statistics_meta WHERE statistic_id = :sid"),
+                                {"sid": old_id},
+                            ).fetchone()
+                            if not old_stat:
+                                continue
 
-                        new_stat = conn.execute(
-                            text("SELECT id FROM statistics_meta WHERE statistic_id = :sid"),
-                            {"sid": new_id},
-                        ).fetchone()
-                        if new_stat:
+                            new_stat = conn.execute(
+                                text("SELECT id FROM statistics_meta WHERE statistic_id = :sid"),
+                                {"sid": new_id},
+                            ).fetchone()
+                            if new_stat:
+                                conn.execute(
+                                    text("UPDATE statistics_meta SET statistic_id = :back WHERE id = :mid"),
+                                    {"back": new_id + "_back", "mid": new_stat[0]},
+                                )
                             conn.execute(
-                                text("UPDATE statistics_meta SET statistic_id = :back WHERE id = :mid"),
-                                {"back": new_id + "_back", "mid": new_stat[0]},
+                                text("UPDATE statistics_meta SET statistic_id = :new WHERE id = :mid"),
+                                {"new": new_id, "mid": old_stat[0]},
                             )
-                        conn.execute(
-                            text("UPDATE statistics_meta SET statistic_id = :new WHERE id = :mid"),
-                            {"new": new_id, "mid": old_stat[0]},
-                        )
-                        _LOGGER.info("Reconciled statistics_meta '%s' -> '%s'", old_id, new_id)
+                            _LOGGER.info("Reconciled statistics_meta '%s' -> '%s'", old_id, new_id)
 
-                    conn.commit()
+                        conn.commit()
             except Exception as e:
                 _LOGGER.error("Error reconciling recorder metadata: %s", e)
 

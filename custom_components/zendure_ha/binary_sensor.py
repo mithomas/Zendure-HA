@@ -15,14 +15,17 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    _hass: HomeAssistant,
+    _config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Zendure binary_sensor."""
     ZendureBinarySensor.add = async_add_entities
 
 
 class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride]
-    EntityZendure, BinarySensorEntity
+    EntityZendure,
+    BinarySensorEntity,
 ):
     add: AddEntitiesCallback
 

@@ -215,7 +215,10 @@ def test_check_entities_does_not_rename_model_serial_entity_ids_when_device_name
     assert entity_entry.entity_id == "sensor.sf800pro_767_bat_in_out"
 
     with (
-        patch("custom_components.zendure_ha.device.async_get_clientsession", return_value=__import__("unittest.mock", fromlist=["Mock"]).Mock()),
+        patch(
+            "custom_components.zendure_ha.device.async_get_clientsession",
+            return_value=__import__("unittest.mock", fromlist=["Mock"]).Mock(),
+        ),
         patch("custom_components.zendure_ha.migration.Migration.check_device"),
     ):
         definition = {
@@ -279,7 +282,10 @@ def test_check_entities_finds_device_by_device_id_when_sn_identifier_stripped(ha
     assert entity_entry.entity_id == "sensor.sf_800_pro_wz_balkon_bat_in_out"
 
     with (
-        patch("custom_components.zendure_ha.device.async_get_clientsession", return_value=__import__("unittest.mock", fromlist=["Mock"]).Mock()),
+        patch(
+            "custom_components.zendure_ha.device.async_get_clientsession",
+            return_value=__import__("unittest.mock", fromlist=["Mock"]).Mock(),
+        ),
         patch("custom_components.zendure_ha.migration.Migration.check_device"),
     ):
         definition = {

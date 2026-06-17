@@ -711,7 +711,7 @@ async def test_sf800_pro_power_charge_sets_ac_input_mode_and_charge_limits(hass)
         await device.power_charge(-300)
 
     mock_do_command.assert_awaited_once_with(
-        {"properties": {"smartMode": 1, "acMode": 1, "outputLimit": 0, "inputLimit": 300}}
+        {"properties": {"smartMode": 1, "acMode": 1, "outputLimit": 0, "inputLimit": 300}},
     )
 
 
@@ -731,7 +731,7 @@ async def test_sf800_pro_power_bypass_sets_ac_input_mode(hass):
         await device.power_bypass()
 
     mock_do_command.assert_awaited_once_with(
-        {"properties": {"smartMode": 0, "acMode": 1, "outputLimit": 0, "inputLimit": 0}}
+        {"properties": {"smartMode": 0, "acMode": 1, "outputLimit": 0, "inputLimit": 0}},
     )
 
 
@@ -747,7 +747,7 @@ async def test_http_report_updates_last_http_report_only(hass):
 
     assert device.lastHttpReport._attr_native_value is not None
     assert getattr(device.lastMqttReport, "_attr_native_value", None) is None
-    assert float(cast("ZendureSensor", device.entities["hyperTmp"])._attr_native_value) == pytest.approx(7.0)
+    assert float(device.entities["hyperTmp"]._attr_native_value) == pytest.approx(7.0)
 
 
 async def test_empty_http_report_does_not_update_report_timestamps(hass):
@@ -770,7 +770,7 @@ async def test_mqtt_report_updates_last_mqtt_report_only(hass):
 
     assert getattr(device.lastHttpReport, "_attr_native_value", None) is None
     assert device.lastMqttReport._attr_native_value is not None
-    assert float(cast("ZendureSensor", device.entities["hyperTmp"])._attr_native_value) == pytest.approx(7.0)
+    assert float(device.entities["hyperTmp"]._attr_native_value) == pytest.approx(7.0)
 
 
 async def test_http_pack_data_updates_last_http_report(hass):
@@ -820,7 +820,7 @@ def test_local_mqtt_device_message_updates_last_mqtt_report(hass):
         device.handleLocalMqttMessage(Mock(), "sensor", "hyperTmp", "7")
 
     assert device.lastMqttReport._attr_native_value is not None
-    assert float(cast("ZendureSensor", device.entities["hyperTmp"])._attr_native_value) == pytest.approx(7.0)
+    assert float(device.entities["hyperTmp"]._attr_native_value) == pytest.approx(7.0)
 
 
 def test_local_mqtt_battery_message_updates_last_mqtt_report(hass):
@@ -1170,4 +1170,3 @@ def test_reports_battery_backed_home_output(
     device.pwr_produced = pwr_produced
 
     assert device.reports_battery_backed_home_output() is expected
-

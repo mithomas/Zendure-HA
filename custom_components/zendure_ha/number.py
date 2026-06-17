@@ -18,14 +18,17 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
-    _hass: HomeAssistant, _config_entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    _hass: HomeAssistant,
+    _config_entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Zendure number."""
     ZendureNumber.add = async_add_entities
 
 
 class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
-    EntityZendure, NumberEntity
+    EntityZendure,
+    NumberEntity,
 ):
     add: AddEntitiesCallback
 
@@ -131,7 +134,8 @@ class ZendureNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class ZendureRestoreNumber(  # pyright: ignore[reportIncompatibleVariableOverride]
-    ZendureNumber, RestoreNumber
+    ZendureNumber,
+    RestoreNumber,
 ):
     """Representation of a Zendure number entity with restore."""
 

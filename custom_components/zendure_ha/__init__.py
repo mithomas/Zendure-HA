@@ -26,7 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> bool:
     """Migrate config entry to new version."""
-    if entry.version == 1 and entry.minor_version < 5:
+    if entry.version == 1 and entry.minor_version < 5:  # noqa: PLR2004
         _LOGGER.info("Migrating Zendure config entry from version %s.%s", entry.version, entry.minor_version)
         await Migration.async_migrate(hass, entry.entry_id)
     hass.config_entries.async_update_entry(entry, version=1, minor_version=5)
@@ -74,7 +74,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> 
 
 
 async def async_remove_config_entry_device(
-    _hass: HomeAssistant, entry: ZendureConfigEntry, device_entry: dr.DeviceEntry
+    _hass: HomeAssistant,
+    entry: ZendureConfigEntry,
+    device_entry: dr.DeviceEntry,
 ) -> bool:
     """Remove a device from a config entry."""
     manager = entry.runtime_data
@@ -91,7 +93,7 @@ async def async_remove_config_entry_device(
             and (bat := next((b for b in d.batteries.values() if b.name == device_entry.name), None)) is not None
         ):
             d.batteries.pop(bat.deviceId)
-            d.kWh = sum(0 if b is None else b.kWh for b in d.batteries.values())
+            d.kWh = sum(b.kWh for b in d.batteries.values())
             d.totalKwh.update_value(d.kWh)
             d.refresh_discharge_state()
             return True

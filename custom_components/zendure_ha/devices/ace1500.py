@@ -14,13 +14,18 @@ _LOGGER = logging.getLogger(__name__)
 
 class ACE1500(ZendureLegacy):
     def __init__(
-        self, hass: HomeAssistant, deviceId: str, prodName: str, definition: Any, parent: str | None = None
+        self,
+        hass: HomeAssistant,
+        deviceId: str,
+        prodName: str,
+        definition: Any,
+        parent: str | None = None,
     ) -> None:
         """Initialise Ace1500."""
         super().__init__(hass, deviceId, prodName, definition["productModel"], definition, parent)
         self.setLimits(-900, 800)
         self.maxSolar = -900
-        self.acSwitch = ZendureSwitch(self, "acSwitch", self.entityWrite, None, "switch", 1)
+        self.acSwitch = ZendureSwitch(self, "acSwitch", self.entityWrite, None, "switch", True)
         self.dcSwitch = ZendureSelect(self, "dcSwitch", {0: "off", 1: "on"}, self.entityWrite, 1)
 
     async def charge(self, power: int) -> int:
@@ -38,10 +43,10 @@ class ACE1500(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 8,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -60,10 +65,10 @@ class ACE1500(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 8,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )
         return power
 
@@ -82,8 +87,8 @@ class ACE1500(ZendureLegacy):
                         },
                         "msgType": 1,
                         "autoModel": 0,
-                    }
+                    },
                 ],
                 "function": "deviceAutomation",
-            }
+            },
         )

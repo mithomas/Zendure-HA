@@ -42,11 +42,12 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
         {
             vol.Required(CONF_APPTOKEN): str,
             vol.Required(
-                CONF_P1METER, description={"suggested_value": "sensor.power_actual"}
+                CONF_P1METER,
+                description={"suggested_value": "sensor.power_actual"},
             ): selector.EntitySelector(),
             vol.Required(CONF_MQTTLOG): bool,
             vol.Required(CONF_MQTTLOCAL): bool,
-        }
+        },
     )
     mqtt_schema = vol.Schema(
         {
@@ -65,7 +66,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
                     type=selector.TextSelectorType.PASSWORD,
                 ),
             ),
-        }
+        },
     )
 
     def __init__(self) -> None:
@@ -146,7 +147,7 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(_config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:
+    def async_get_options_flow(config_entry: ZendureConfigEntry) -> ZendureOptionsFlowHandler:  # noqa: ARG004
         """Get the options flow for this handler."""
         return ZendureOptionsFlowHandler()
 
@@ -167,7 +168,7 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Required(CONF_MQTTLOG, default=self.config_entry.data[CONF_MQTTLOG]): bool,
                 vol.Optional(CONF_AUTO_MQTT_USER, default=self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)): bool,
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
-            }
+            },
         )
 
         return self.async_show_form(

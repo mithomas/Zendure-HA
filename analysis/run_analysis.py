@@ -2,7 +2,7 @@ import csv
 from datetime import datetime
 
 # Load CSV
-with open("export2026-05.27.csv", mode="r") as f:
+with open("export2026-05.27.csv") as f:
     reader = csv.DictReader(f)
     rows = list(reader)
 
@@ -11,7 +11,7 @@ parsed_rows = []
 for idx, r in enumerate(rows):
     if idx < 2:
         continue
-    
+
     try:
         t = datetime.strptime(r["time"], "%Y-%m-%d %H:%M:%S")
         sml = float(r["sml_power"]) if r["sml_power"] else 0.0
@@ -26,23 +26,25 @@ for idx, r in enumerate(rows):
         k_out_l = float(r["k_balkon_output_limit"]) if r["k_balkon_output_limit"] else 0.0
         wz_bat = float(r["wz_balkon_bat_flow"]) if r["wz_balkon_bat_flow"] else 0.0
         k_bat = float(r["k_balkon_bat_flow"]) if r["k_balkon_bat_flow"] else 0.0
-        
-        parsed_rows.append({
-            "idx": idx,
-            "time": t,
-            "sml": sml,
-            "wz_sol": wz_sol,
-            "k_sol": k_sol,
-            "wz_out": wz_out,
-            "wz_mode": wz_mode,
-            "k_mode": k_mode,
-            "wz_in_l": wz_in_l,
-            "k_in_l": k_in_l,
-            "wz_out_l": wz_out_l,
-            "k_out_l": k_out_l,
-            "wz_bat": wz_bat,
-            "k_bat": k_bat
-        })
+
+        parsed_rows.append(
+            {
+                "idx": idx,
+                "time": t,
+                "sml": sml,
+                "wz_sol": wz_sol,
+                "k_sol": k_sol,
+                "wz_out": wz_out,
+                "wz_mode": wz_mode,
+                "k_mode": k_mode,
+                "wz_in_l": wz_in_l,
+                "k_in_l": k_in_l,
+                "wz_out_l": wz_out_l,
+                "k_out_l": k_out_l,
+                "wz_bat": wz_bat,
+                "k_bat": k_bat,
+            }
+        )
     except Exception as e:
         print(f"Error parsing row {idx}: {e}")
 
@@ -55,8 +57,8 @@ for idx, pr in enumerate(parsed_rows):
     if idx == 0:
         pr["dt"] = 1.0  # assume 1s for the first parsed row
     else:
-        pr["dt"] = (pr["time"] - parsed_rows[idx-1]["time"]).total_seconds()
-    
+        pr["dt"] = (pr["time"] - parsed_rows[idx - 1]["time"]).total_seconds()
+
     if prev_mode is not None and pr["k_mode"] != prev_mode:
         mode_switches.append((idx, pr["time"], prev_mode, pr["k_mode"]))
     prev_mode = pr["k_mode"]
@@ -105,7 +107,7 @@ for idx, pr in enumerate(parsed_rows):
     wz_sol = pr["wz_sol"]
     wz_out = pr["wz_out"]
     wz_out_l = pr["wz_out_l"]
-    
+
     # Category 1: Grid import while charging k_balkon from AC
     # If sml > 0 and k_mode == 'input' and k_in_l > 0:
     # We are importing from grid, but also commanding k_balkon to charge from AC (input limit).
@@ -114,23 +116,25 @@ for idx, pr in enumerate(parsed_rows):
         avoidable_w = min(sml, k_in_l)
         avoidable_kwh = (avoidable_w * dt) / 3600.0 / 1000.0
         avoidable_import_ac_charge_k += avoidable_kwh
-        suspicious_intervals.append({
-            "idx": pr["idx"],
-            "time": pr["time"],
-            "dt": dt,
-            "sml": sml,
-            "wz_sol": wz_sol,
-            "k_sol": k_sol,
-            "wz_out": wz_out,
-            "k_mode": k_mode,
-            "k_in_l": k_in_l,
-            "k_out_l": pr["k_out_l"],
-            "wz_bat": pr["wz_bat"],
-            "k_bat": k_bat,
-            "reason": "Importing from grid while AC-charging secondary device",
-            "kwh": avoidable_kwh
-        })
-        
+        suspicious_intervals.append(
+            {
+                "idx": pr["idx"],
+                "time": pr["time"],
+                "dt": dt,
+                "sml": sml,
+                "wz_sol": wz_sol,
+                "k_sol": k_sol,
+                "wz_out": wz_out,
+                "k_mode": k_mode,
+                "k_in_l": k_in_l,
+                "k_out_l": pr["k_out_l"],
+                "wz_bat": pr["wz_bat"],
+                "k_bat": k_bat,
+                "reason": "Importing from grid while AC-charging secondary device",
+                "kwh": avoidable_kwh,
+            }
+        )
+
     # Category 2: Grid export while k_balkon is in output mode with 0 limit (so not charging from grid)
     # If sml < 0 (export) and k_mode == 'output':
     # Since sml < 0, we have surplus power on the grid. We should be charging.
@@ -144,22 +148,24 @@ for idx, pr in enumerate(parsed_rows):
         avoidable_w = -sml
         avoidable_kwh = (avoidable_w * dt) / 3600.0 / 1000.0
         avoidable_export_k_mode_output += avoidable_kwh
-        suspicious_intervals.append({
-            "idx": pr["idx"],
-            "time": pr["time"],
-            "dt": dt,
-            "sml": sml,
-            "wz_sol": wz_sol,
-            "k_sol": k_sol,
-            "wz_out": wz_out,
-            "k_mode": k_mode,
-            "k_in_l": k_in_l,
-            "k_out_l": pr["k_out_l"],
-            "wz_bat": pr["wz_bat"],
-            "k_bat": k_bat,
-            "reason": "Exporting to grid while secondary is in output mode (charging blocked)",
-            "kwh": avoidable_kwh
-        })
+        suspicious_intervals.append(
+            {
+                "idx": pr["idx"],
+                "time": pr["time"],
+                "dt": dt,
+                "sml": sml,
+                "wz_sol": wz_sol,
+                "k_sol": k_sol,
+                "wz_out": wz_out,
+                "k_mode": k_mode,
+                "k_in_l": k_in_l,
+                "k_out_l": pr["k_out_l"],
+                "wz_bat": pr["wz_bat"],
+                "k_bat": k_bat,
+                "reason": "Exporting to grid while secondary is in output mode (charging blocked)",
+                "kwh": avoidable_kwh,
+            }
+        )
 
 print(f"\nAvoidable Grid Import due to AC charging k_balkon: {avoidable_import_ac_charge_k:.6f} kWh")
 print(f"Avoidable Grid Export due to k_balkon being in output mode: {avoidable_export_k_mode_output:.6f} kWh")

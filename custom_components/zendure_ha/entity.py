@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import unicodedata
+from functools import cached_property
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,7 @@ class EntityZendure(Entity):
             device.checkEntity[self._attr_translation_key] = domain
         device.queue_entity_for_registration(self)
 
-    @property
+    @cached_property
     def device_info(self) -> DeviceInfo | None:
         """Return the device info."""
         return self.device.attr_device_info
@@ -243,7 +244,7 @@ class EntityDevice:
         self.deviceId = deviceId
         self.name = name or deviceId
         self.unique = "".join(self.name.split())
-        self.entities: dict[str, EntityZendure] = {}
+        self.entities: dict[str, Any] = {}
         self.sn = sn
         self._pending_entities: list[EntityZendure] = []
         short_model = model.replace(" ", "").replace("SolarFlow", "Sf") if model else ""
@@ -284,6 +285,8 @@ class EntityDevice:
         for entity in er.async_entries_for_device(entity_registry, di.id, True):
             if (
                 entity.platform == DOMAIN
+                and entity.translation_key is not None
+                and self.checkEntity is not None
                 and (dn := self.checkEntity.get(entity.translation_key)) is not None
                 and dn == entity.domain
             ):
@@ -336,7 +339,7 @@ class EntityDevice:
                 match info if isinstance(info, str) else info[0]:
                     case "W":
                         entity = ZendureSensor(self, key, None, "W", "power", "measurement", None)
-                        if len(info) >= 3:
+                        if len(info) >= 3:  # noqa: PLR2004
                             entity.icon = info[2]
                         if key.startswith("solarPower") and key[10:].isdigit():
                             aggr_key = f"aggrSolar{key[10:]}"
@@ -390,7 +393,7 @@ class EntityDevice:
                     case "select":
                         if isinstance(info[1], dict):
                             options: Any = info[1]
-                            default: Any = 0 if len(info) == 2 else info[2]
+                            default: Any = 0 if len(info) == 2 else info[2]  # noqa: PLR2004
                             entity = ZendureSelect(self, key, options, self.entityWrite, default)
                     case "template":
                         tmpl = Template(info[1], self.hass)
@@ -411,7 +414,7 @@ class EntityDevice:
 
         return False
 
-    def entityWrite(self, _entity: EntityZendure, _value: Any) -> None:
+    async def entityWrite(self, _entity: EntityZendure, _value: Any) -> None:
         return
 
     def updateVersion(self, version: str) -> None:

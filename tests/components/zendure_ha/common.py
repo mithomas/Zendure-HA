@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import Mock, patch
@@ -78,7 +79,7 @@ def make_device_definition(
 def make_device(
     hass: HomeAssistant,
     *,
-    device_cls: type[ZendureDevice] = SolarFlow800,
+    device_cls: Callable[..., ZendureDevice] = SolarFlow800,
     device_id: str = "device-1",
     device_name: str = "test device",
     product_model: str = "SolarFlow 800",
@@ -240,7 +241,7 @@ def attach_devices(manager: ZendureManager, *devices: ZendureDevice) -> None:
     """Attach devices to a manager and refresh its derived entities."""
     manager.devices = list(devices)
     manager.fuseGroups = list(
-        {id(device.fuseGrp): device.fuseGrp for device in devices if hasattr(device, "fuseGrp")}.values()
+        {id(device.fuseGrp): device.fuseGrp for device in devices if hasattr(device, "fuseGrp")}.values(),
     )
     for device in devices:
         device.on_available_kwh_changed = manager.refresh_energy_kwh
