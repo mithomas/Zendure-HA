@@ -143,9 +143,9 @@ class ZendureRestoreSelect(  # pyright: ignore[reportIncompatibleVariableOverrid
         await super().async_added_to_hass()
         if state := await self.async_get_last_state():
             selected_key = state.attributes.get("selected_key")
-            if self._options is not None and selected_key in self._options:
+            if selected_key is not None:
                 self._selected_key = selected_key
-                self._attr_current_option = self._options[selected_key]
+                self._attr_current_option = self._options.get(selected_key, state.state) if self._options else state.state
             else:
                 self._selected_key = None
                 self._attr_current_option = state.state
