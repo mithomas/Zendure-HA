@@ -361,6 +361,33 @@ class _PowerRoutingSnapshot:
         available_output = min(pv_evidence, route.available_discharge_with_produced)
         return max(0, available_output - route.produced_home)
 
+    def non_primary_output_replacements(
+        self,
+        targets: dict[ZendureDevice, int],
+        candidate_devices: list[ZendureDevice],
+    ) -> dict[ZendureDevice, int]:
+        """Return secondary output targets that selected-primary PV can replace."""
+        if not self.primary_aware or self.selected_primary is None:
+            return {}
+
+        remaining = self.selected_primary_output_replacement_capacity
+        replacements: dict[ZendureDevice, int] = {}
+        for device in sorted(candidate_devices, key=lambda dev: dev.electricLevel.asInt):
+            if device is self.selected_primary or remaining <= 0:
+                continue
+            if device.acMode.value == AcMode.INPUT:
+                continue
+
+            target = max(0, targets.get(device, 0))
+            replacement = min(target, self.chargeable_produced_home(device), remaining)
+            if replacement <= 0:
+                continue
+
+            replacements[device] = replacement
+            remaining -= replacement
+
+        return replacements
+
     def pv_floor_summary(self) -> _PvFloorSummary:
         """Return floor and replacement facts for one routing cycle."""
         active_primary = (
@@ -2408,6 +2435,26 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 0,
                 active_discharge_targets[selected_primary] - secondary_ac_input_to_stop,
             )
+        secondary_output_replacements = (
+            routing.non_primary_output_replacements(active_discharge_targets, list(self.discharge))
+            if (
+                self.operation == ManagerMode.MATCHING
+                and selected_primary is not None
+                and active_discharge_targets.get(selected_primary, 0) > 0
+            )
+            else {}
+        )
+        replaced_secondary_output = sum(secondary_output_replacements.values())
+        if (
+            replaced_secondary_output > 0
+            and selected_primary is not None
+            and selected_primary in active_discharge_targets
+        ):
+            for device, replacement in secondary_output_replacements.items():
+                active_discharge_targets[device] -= replacement
+            active_discharge_targets[selected_primary] += replaced_secondary_output
+            if setpoint < 0:
+                setpoint = min(0, setpoint + replaced_secondary_output)
         charge_surplus_devices = [device for device in charge_devices if device not in secondary_local_pv_only_devices]
         idle_secondary_charge_devices = [
             device for device in idle_secondary_surplus_devices if device not in secondary_local_pv_only_devices
@@ -2761,6 +2808,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             },
             direction=1,
         )
+        primary_output_replacements = (
+            routing.non_primary_output_replacements(active_produced_floor, remaining_active)
+            if self.operation == ManagerMode.MATCHING
+            else {}
+        )
+        for device, replacement in primary_output_replacements.items():
+            active_produced_floor[device] -= replacement
+        primary_replacement_target = sum(primary_output_replacements.values())
+        setpoint += primary_replacement_target
 
         primary_target = 0
         if primary is not None and primary_produced_cap > 0 and setpoint > 0:
