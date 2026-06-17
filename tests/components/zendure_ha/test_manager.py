@@ -2147,11 +2147,11 @@ class TestSmartMatchingPrimaryAware:
         self, hass
     ):
         """
-        Secondary at low SoC that has all its solar passing to home should be redirected to charge its battery.
+        Secondary at low SoC that has all its solar passing to home should stop home output for recovery.
 
         This covers the case where the secondary was previously on a discharge path
         (homeOutput > 0) and its solar exactly matches homeOutput (charge_surplus == 0).
-        The manager must enter charge mode and redirect that solar into the secondary battery.
+        The manager must redirect that solar into the secondary battery without requesting AC input.
         """
         primary = make_device(
             hass,
@@ -2197,8 +2197,62 @@ class TestSmartMatchingPrimaryAware:
         # p1 = -200: secondary is exporting 300 W to home, home only needs 100 W
         await _run_prepared_power_routing(manager, -200, datetime.now())
 
-        secondary.power_charge.assert_awaited_once_with(-300)
-        secondary.power_discharge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()
+        secondary.power_discharge.assert_awaited_once_with(0)
+
+    async def test_socempty_secondary_local_pv_only_uses_zero_output_not_ac_input(self, hass):
+        """SOCEMPTY local PV recovery must not be translated into active AC input."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-1000-primary",
+            device_name="sf800 pro 1000 primary",
+            product_model="SolarFlow 800 Pro",
+            level=13,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=194,
+            battery_input=3,
+            output_limit=195,
+        )
+        primary.solarInput.update_value(197)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-1000-secondary",
+            device_name="sf800 pro 1000 secondary",
+            product_model="SolarFlow 800 Pro",
+            level=5,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=107,
+            battery_input=47,
+            output_limit=108,
+        )
+        secondary.solarInput.update_value(154)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda p: p)
+        secondary.power_charge = AsyncMock(side_effect=lambda p: p)
+        primary.power_discharge = AsyncMock(side_effect=lambda p: p)
+        secondary.power_discharge = AsyncMock(side_effect=lambda p: p)
+
+        await _run_prepared_power_routing(manager, -7, datetime.now())
+
+        assert secondary.state is DeviceState.SOCEMPTY
+        secondary.power_charge.assert_not_awaited()
+        secondary.power_discharge.assert_awaited_once_with(0)
 
     async def test_two_system_solar_at_reserve_keeps_secondary_pv_on_home_when_household_uses_it(self, hass):
         """A secondary in reserve should keep normal household-load-first PV routing."""
@@ -8581,9 +8635,11 @@ class TestLowSocImmediatePromotion:
         await _run_prepared_power_routing(manager, -49, datetime.now())
 
         if state == DeviceState.SOCEMPTY:
-            idle_low.power_charge.assert_awaited_once_with(-800)
+            idle_low.power_charge.assert_not_awaited()
+            idle_low.power_discharge.assert_awaited_once_with(0)
         else:
             idle_low.power_charge.assert_not_awaited()
+            idle_low.power_discharge.assert_not_awaited()
 
     async def test_recovery_primary_local_pv_does_not_start_input_without_external_source(self, hass):
         """The 13:45-style reserve-recovery primary should not switch to input for local PV only."""
@@ -9161,9 +9217,7 @@ class TestPrimaryNoLocalSolarDefers:
         secondary.power_charge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
-    async def test_secondary_local_solar_surplus_does_not_suppress_primary_battery_under_household_demand(
-        self, hass
-    ):
+    async def test_secondary_local_solar_surplus_does_not_suppress_primary_battery_under_household_demand(self, hass):
         """
         Regression: secondary local PV surplus must not suppress primary battery discharge when household
         demand is unmet.
@@ -9464,8 +9518,7 @@ class TestBypassModeChargeStability:
             primary.power_charge.reset_mock()
             await _run_prepared_power_routing(manager, p1, datetime.now())
             assert not primary.power_charge.called, (
-                f"Bypassed primary must not be charged at p1={p1}; "
-                f"was called with {primary.power_charge.call_args}"
+                f"Bypassed primary must not be charged at p1={p1}; was called with {primary.power_charge.call_args}"
             )
 
     async def test_charging_device_without_local_solar_fix_is_inert(self, hass):
@@ -9719,12 +9772,8 @@ class TestPrimaryOutputOscillation:
         After fix: extra_surplus=229 W; selected_primary_local_surplus=0.
           setpoint=+229 W (primary output floor) → primary stays in OUTPUT.
         """
-        primary = self._make_primary_discharging_with_solar(
-            hass, device_id="k-primary", home_output_w=229, solar_w=263
-        )
-        secondary = self._make_socfull_bypass_secondary(
-            hass, device_id="wz-secondary", solar_w=166, home_output_w=135
-        )
+        primary = self._make_primary_discharging_with_solar(hass, device_id="k-primary", home_output_w=229, solar_w=263)
+        secondary = self._make_socfull_bypass_secondary(hass, device_id="wz-secondary", solar_w=166, home_output_w=135)
         manager = make_manager(
             hass,
             devices=(primary, secondary),
@@ -9745,12 +9794,8 @@ class TestPrimaryOutputOscillation:
         to INPUT → household meter jumps → cycle 2 routes back to OUTPUT.  After the fix
         both cycles must keep the primary in OUTPUT mode.
         """
-        primary = self._make_primary_discharging_with_solar(
-            hass, device_id="k-primary", home_output_w=229, solar_w=263
-        )
-        secondary = self._make_socfull_bypass_secondary(
-            hass, device_id="wz-secondary", solar_w=166, home_output_w=135
-        )
+        primary = self._make_primary_discharging_with_solar(hass, device_id="k-primary", home_output_w=229, solar_w=263)
+        secondary = self._make_socfull_bypass_secondary(hass, device_id="wz-secondary", solar_w=166, home_output_w=135)
         manager = make_manager(
             hass,
             devices=(primary, secondary),
@@ -9775,12 +9820,8 @@ class TestPrimaryOutputOscillation:
         surplus_setpoint without entering the fix path.  The primary must switch to INPUT.
         This verifies the fix does not suppress legitimate large-surplus routing.
         """
-        primary = self._make_primary_discharging_with_solar(
-            hass, device_id="k-primary", home_output_w=229, solar_w=263
-        )
-        secondary = self._make_socfull_bypass_secondary(
-            hass, device_id="wz-secondary", solar_w=166, home_output_w=135
-        )
+        primary = self._make_primary_discharging_with_solar(hass, device_id="k-primary", home_output_w=229, solar_w=263)
+        secondary = self._make_socfull_bypass_secondary(hass, device_id="wz-secondary", solar_w=166, home_output_w=135)
         manager = make_manager(
             hass,
             devices=(primary, secondary),
@@ -9801,9 +9842,7 @@ class TestPrimaryOutputOscillation:
                                        = min(1000, max(0, 263−229)) = 34 W.
         This is the exact value Fix 1 subtracts from extra_surplus.
         """
-        primary = self._make_primary_discharging_with_solar(
-            hass, device_id="k-primary", home_output_w=229, solar_w=263
-        )
+        primary = self._make_primary_discharging_with_solar(hass, device_id="k-primary", home_output_w=229, solar_w=263)
         # Simulate pwr_produced as _poll_devices_and_prepare_routing_state does.
         primary.pwr_produced = min(
             0,

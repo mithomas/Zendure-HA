@@ -1840,7 +1840,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if self.discharge_bypass > 0:
             charge_device_produced = sum(-d.pwr_produced for d in self.charge)
             discharge_device_battery_charge = sum(routing.route(d).charge_surplus for d in self.discharge)
-            extra_surplus = max(0, self.produced - self.discharge_bypass - charge_device_produced - discharge_device_battery_charge)
+            extra_surplus = max(
+                0, self.produced - self.discharge_bypass - charge_device_produced - discharge_device_battery_charge
+            )
         else:
             extra_surplus = self.produced - self.discharge_bypass
         charge_transition_would_zero = self.charge_time > time
@@ -2217,7 +2219,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 return True
             if positive_demand_charge_lag:
                 return True
-            return input_switch_allowed or device.state in PV_CHARGE_FIRST_STATES
+            return input_switch_allowed
 
         charge_devices, idle_devices = self._collect_charge_candidates(
             [device for device in self.charge if not primary_input_excluded(device)],
@@ -2319,6 +2321,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 capacity += routing.chargeable_produced_home(device)
             return capacity
 
+        def split_pv_charge_first_target(device: ZendureDevice, target: int) -> tuple[int, int]:
+            if target >= 0 or device.state not in PV_CHARGE_FIRST_STATES or not allow_home_pv_charge:
+                return 0, target
+
+            local_target = -min(-target, local_charge_capacity(device))
+            return local_target, target - local_target
+
         output_secondary_input_candidates = {
             device
             for device in [*charge_devices, *active_secondary_charge_devices, *idle_secondary_surplus_devices]
@@ -2414,6 +2423,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             {device: local_charge_capacity(device) for device in surplus_floor_devices},
             direction=-1,
         )
+        pv_charge_first_local_targets: dict[ZendureDevice, int] = {}
+        for device, target in list(charge_targets.items()):
+            local_target, ac_target = split_pv_charge_first_target(device, target)
+            if local_target != 0:
+                pv_charge_first_local_targets[device] = local_target
+                charge_targets[device] = ac_target
         if not input_source_available and not positive_demand_charge_lag:
             setpoint = 0
         selected_primary_output_replacement_target = 0
@@ -2436,6 +2451,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             setpoint = 0
 
         for d in self.discharge:
+            if pv_charge_first_local_targets.get(d, 0) != 0 and charge_targets.get(d, 0) == 0:
+                await d.power_discharge(0)
+                continue
             if charge_targets.get(d, 0) != 0:
                 continue
             if not strict_output_stop and active_discharge_targets.get(d, 0) > 0:
@@ -2504,6 +2522,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 await d.power_charge(target)
             elif not strict_output_stop and active_discharge_targets.get(d, 0) > 0:
                 await self._command_home_output(d, active_discharge_targets[d], allow_bypass_zero=True)
+
+        for d in pv_charge_first_local_targets:
+            if d in self.discharge or charge_targets.get(d, 0) != 0:
+                continue
+            await d.power_discharge(0)
 
         if not strict_output_stop:
             for d, target in active_discharge_targets.items():
