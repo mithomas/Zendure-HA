@@ -321,7 +321,7 @@ class _PowerRoutingSnapshot:
 
     def active_taper_output_floor(self, devices: list[ZendureDevice]) -> int:
         """Return the total taper-driven output floor for active output devices."""
-        return sum(self.route(device).taper_output_floor for device in devices if device in self.discharge_devices)
+        return sum(self.route(device).taper_output_floor for device in devices)
 
     def chargeable_produced_home(self, device: ZendureDevice) -> int:
         """Return produced home output that can move into local charging."""
@@ -2126,6 +2126,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # stop discharging devices
         for d in self.discharge:
+            if d.taper_charge_limit is not None and max(0, -d.pwr_produced) - d.taper_charge_limit > 0:
+                continue
             # full devices have nowhere to store PV; keep their pass-through running
             if strict_output_stop and d.state == DeviceState.SOCFULL:
                 continue
@@ -2143,6 +2145,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.idle,
             promote_idle_devices=setpoint < -SmartMode.POWER_START and not self.charge,
         )
+
+        for candidates in (charge_devices, idle_devices):
+            for d in list(candidates):
+                if d.taper_charge_limit is not None and (floor := max(0, -d.pwr_produced) - d.taper_charge_limit) > 0:
+                    candidates.remove(d)
+                    await self._command_home_output(d, floor, allow_bypass_zero=False)
+
         dev_start = await self._apply_weighted_charge_allocation(setpoint, charge_devices, idle_devices)
         await self._start_idle_charge_devices(idle_devices, dev_start)
 
@@ -2171,8 +2180,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         selected_primary = routing.selected_primary
         active_discharge_targets = routing.active_produced_targets(self.discharge)
+        for d_route in routing.devices.values():
+            if d_route.taper_output_floor > 0:
+                active_discharge_targets[d_route.device] = max(
+                    active_discharge_targets.get(d_route.device, 0),
+                    d_route.taper_output_floor,
+                )
+
         if strict_output_stop:
-            active_discharge_targets = dict.fromkeys(self.discharge, 0)
+            active_discharge_targets = {d: t for d, t in active_discharge_targets.items() if t > 0}
+            for d in self.discharge:
+                if d not in active_discharge_targets:
+                    active_discharge_targets[d] = 0
         requested_setpoint = setpoint
         positive_demand_charge_lag = routing.positive_demand_charge_lag(requested_setpoint)
         adjusts_active_charge = requested_setpoint < 0 and any(
@@ -2282,10 +2301,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and setpoint <= -SmartMode.POWER_START
             and not any(not primary_input_excluded(device) for device in self.charge),
         )
+
+        for candidates in (charge_devices, idle_devices):
+            for d in list(candidates):
+                if routing.route(d).taper_output_floor > 0:
+                    candidates.remove(d)
+
         active_secondary_charge_devices = [
             device
             for device in self.discharge
             if device is not selected_primary
+            and routing.route(device).taper_output_floor == 0
             and device_may_use_input(device)
             and (
                 (

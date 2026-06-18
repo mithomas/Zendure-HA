@@ -10163,3 +10163,128 @@ class TestPrimaryOutputOscillation:
 
         primary.power_charge.assert_not_awaited()
         secondary.power_charge.assert_not_awaited()
+
+
+class TestRegressionTaperOscillation:
+    """Regression tests for taper-related energy oscillation."""
+
+    @pytest.mark.parametrize(
+        ("level", "expected_taper_limit"),
+        [
+            (96, 200),
+            (97, 200),
+            (98, 150),
+            (99, 100),
+        ],
+    )
+    async def test_taper_handling_at_percentages(self, hass, level: int, expected_taper_limit: int):
+        """1, 2, 3, 4: Taper handling at 96%, 97%, 98%, 99%."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-taper-test",
+            level=level,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_input=300,
+        )
+        primary.solarInput.update_value(300)
+
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_discharge = AsyncMock(return_value=0)
+        primary.power_charge = AsyncMock(return_value=0)
+        primary.power_get = AsyncMock(return_value=True)
+
+        await _run_prepared_power_routing(manager, -50, datetime.now())
+
+        expected_floor = 300 - expected_taper_limit
+        primary.power_discharge.assert_awaited_once_with(expected_floor)
+
+    async def test_pv_covers_household_before_grid_import(self, hass):
+        """5: PV covers household before grid import."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-pv-covers",
+            level=50,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_input=300,
+        )
+        primary.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_discharge = AsyncMock(return_value=0)
+        primary.power_charge = AsyncMock(return_value=0)
+        primary.power_get = AsyncMock(return_value=True)
+
+        await _run_prepared_power_routing(manager, 200, datetime.now())
+
+        primary.power_discharge.assert_awaited_once_with(200)
+
+    async def test_no_short_cycle_with_unused_pv(self, hass):
+        """6: No short cycle with unused PV."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-no-short-cycle",
+            level=50,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=200,
+            battery_input=100,
+        )
+        primary.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_discharge = AsyncMock(return_value=0)
+        primary.power_charge = AsyncMock(return_value=0)
+        primary.power_get = AsyncMock(return_value=True)
+
+        await _run_prepared_power_routing(manager, 100, datetime.now())
+
+        primary.power_discharge.assert_awaited()
+        assert primary.power_discharge.call_args[0][0] > 0
+
+    async def test_energy_balance_consistency(self, hass):
+        """8: Energy balance consistency."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-energy-balance",
+            level=50,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=200,
+            battery_input=100,
+        )
+        primary.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_discharge = AsyncMock(return_value=0)
+        primary.power_get = AsyncMock(return_value=True)
+
+        await _run_prepared_power_routing(manager, 50, datetime.now())
+
+        primary.power_discharge.assert_awaited()
+        target = primary.power_discharge.call_args[0][0]
+        assert target == 250
