@@ -7681,6 +7681,195 @@ class TestSmartMatchingPrimaryAware:
         residual_export = actual_primary_output - actual_secondary_charge - household_demand
         assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
 
+    async def test_primary_overflow_exports_only_after_secondary_charge_limit(self, hass):
+        """Primary taper overflow may export only after the eligible secondary reaches its charge cap."""
+        sample_time = datetime(2026, 6, 18, 12, 32, 32, tzinfo=timezone(timedelta(hours=2)))
+        p1 = -302
+        secondary_charge_cap = 120
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-capped-primary",
+            device_name="wz balkon capped primary",
+            product_model="SolarFlow 800 Pro",
+            level=98,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=434,
+            home_output=434,
+            battery_input=202,
+        )
+        primary.solarInput.update_value(636)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-capped-secondary",
+            device_name="k balkon capped secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=72,
+            home_output=72,
+            battery_output=4,
+        )
+        secondary.solarInput.update_value(68)
+        secondary.charge_limit = -secondary_charge_cap
+        FuseGroup("group-capped-export-overflow", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_bypass = AsyncMock(return_value=0)
+
+        taper_limit = primary.taper_charge_limit
+        assert taper_limit is not None
+        household_demand = primary.homeOutput.asInt + secondary.homeOutput.asInt + p1
+        expected_primary_floor = primary.solarInput.asInt - taper_limit
+        overflow_before_secondary = expected_primary_floor - household_demand
+        assert overflow_before_secondary > secondary_charge_cap
+
+        await _run_prepared_power_routing(manager, p1, sample_time)
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        primary.power_charge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(expected_primary_floor)
+        secondary.power_charge.assert_awaited_once_with(-secondary_charge_cap)
+        secondary.power_bypass.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
+        primary_discharge_args = primary.power_discharge.await_args
+        secondary_charge_args = secondary.power_charge.await_args
+        assert primary_discharge_args is not None
+        assert secondary_charge_args is not None
+        actual_primary_output = primary_discharge_args.args[0]
+        actual_secondary_charge = -secondary_charge_args.args[0]
+        residual_export = actual_primary_output - actual_secondary_charge - household_demand
+        assert residual_export == pytest.approx(
+            overflow_before_secondary - secondary_charge_cap,
+            abs=SmartMode.POWER_TOLERANCE,
+        )
+
+    @pytest.mark.parametrize(
+        "secondary_mode",
+        [
+            pytest.param("output", id="secondary-output"),
+            pytest.param("input", id="secondary-input"),
+        ],
+    )
+    async def test_primary_overflow_reaches_already_active_secondary(self, hass, secondary_mode):
+        """Primary overflow must reach an already active secondary before export or output drop."""
+        sample_time = datetime(2026, 6, 18, 12, 32, 32, tzinfo=timezone(timedelta(hours=2)))
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id=f"wz-balkon-active-secondary-{secondary_mode}-primary",
+            device_name=f"wz balkon active secondary {secondary_mode} primary",
+            product_model="SolarFlow 800 Pro",
+            level=98 if secondary_mode == "output" else 99,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=434 if secondary_mode == "output" else 497,
+            home_output=434 if secondary_mode == "output" else 497,
+            battery_input=202 if secondary_mode == "output" else 100,
+        )
+        primary.solarInput.update_value(636 if secondary_mode == "output" else 597)
+        if secondary_mode == "output":
+            p1 = -302
+            expected_secondary_charge = 232
+            secondary = make_device(
+                hass,
+                device_cls=SolarFlow800Pro,
+                device_id="k-balkon-active-output-secondary",
+                device_name="k balkon active output secondary",
+                product_model="SolarFlow 800 Pro",
+                level=60,
+                min_soc=5,
+                reserve=10,
+                soc_set=100,
+                ac_mode=AcMode.OUTPUT,
+                input_limit=0,
+                output_limit=72,
+                home_output=72,
+                battery_output=4,
+            )
+            secondary.solarInput.update_value(68)
+        else:
+            p1 = 521
+            expected_secondary_charge = 479
+            secondary = make_device(
+                hass,
+                device_cls=SolarFlow800Pro,
+                device_id="k-balkon-active-input-secondary",
+                device_name="k balkon active input secondary",
+                product_model="SolarFlow 800 Pro",
+                level=60,
+                min_soc=5,
+                reserve=10,
+                soc_set=100,
+                ac_mode=AcMode.INPUT,
+                input_limit=1000,
+                output_limit=0,
+                home_input=1000,
+                battery_input=1177,
+            )
+            secondary.solarInput.update_value(177)
+        primary.fuseGrp.devices = [primary, secondary]
+        secondary.fuseGrp = primary.fuseGrp
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, p1, sample_time)
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        assert secondary.state is DeviceState.INACTIVE
+        primary.power_charge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        if secondary_mode == "output":
+            taper_limit = primary.taper_charge_limit
+            assert taper_limit is not None
+            expected_primary_floor = primary.solarInput.asInt - taper_limit
+            household_demand = primary.homeOutput.asInt + secondary.homeOutput.asInt + p1
+            primary.power_discharge.assert_awaited_once_with(expected_primary_floor)
+            residual_export = expected_primary_floor - expected_secondary_charge - household_demand
+            assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
+        else:
+            primary.power_discharge.assert_awaited_once_with(primary.homeOutput.asInt)
+        secondary.power_charge.assert_awaited_once_with(-expected_secondary_charge)
+        secondary.power_discharge.assert_not_awaited()
+
     async def test_1517_bypass_peer_lets_primary_keep_surplus_solar_local(self, hass):
         """
         A 15:17-style full bypass peer should not make the selected primary export its own PV surplus.
@@ -8099,6 +8288,81 @@ class TestP1RoutingPipeline:
 
         assert routed is False
         _prepare_mock(manager).assert_not_called()
+
+    async def test_secondary_surplus_pickup_routes_after_debounce_window(self, hass):
+        """Persistent surplus should reach an eligible secondary after the normal debounce window."""
+        sample_time = datetime(2026, 6, 18, 15, 17, 0, tzinfo=timezone(timedelta(hours=2)))
+        p1 = -200
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-debounce-primary",
+            device_name="wz balkon debounce primary",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-debounce-secondary",
+            device_name="k balkon debounce secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        FuseGroup("group-debounce-secondary-pickup", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_bypass = AsyncMock(return_value=0)
+
+        manager.zero_fast = sample_time + timedelta(seconds=SmartMode.TIMEFAST)
+        manager.zero_next = sample_time + timedelta(seconds=SmartMode.TIMEZERO)
+        manager.p1_charge_lag_last_update = sample_time - SmartMode.P1_MIN_UPDATE
+        manager.p1_export_trim_last_update = sample_time - SmartMode.P1_MIN_UPDATE
+        manager.p1_history.clear()
+        manager.p1_history.extend([p1, p1])
+
+        assert await manager._route_p1_update(p1, sample_time) is False
+        assert await manager._route_p1_update(p1, sample_time + timedelta(seconds=1.2)) is False
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_charge.assert_not_awaited()
+
+        routed = await manager._route_p1_update(p1, sample_time + timedelta(seconds=2.1))
+
+        assert routed is True
+        assert primary.state is DeviceState.SOCFULL
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(p1)
+        secondary.power_discharge.assert_not_awaited()
+        secondary_charge_args = secondary.power_charge.await_args
+        assert secondary_charge_args is not None
+        residual_export = abs(p1) + secondary_charge_args.args[0]
+        assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
 
     async def test_route_p1_update_writes_simulation_before_forced_route(self, hass):
         manager = make_manager(hass, operation=ManagerMode.MATCHING)
