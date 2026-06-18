@@ -1904,6 +1904,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and pv_floors.active_primary_produced_floor > 0
             and p1 > -pv_floors.active_primary_produced_floor
         )
+        selected_primary_taper_overflow = 0
+        if protects_selected_primary_floor and selected_primary is not None:
+            primary_floor = routing.route(selected_primary).taper_output_floor
+            active_home_output = sum(max(0, device.homeOutput.asInt) for device in routing.discharge_devices)
+            household_demand = max(0, active_home_output + p1)
+            selected_primary_taper_overflow = max(0, primary_floor - household_demand)
         primary_keeps_local_surplus = (
             local_charge.selected_primary_local_surplus > 0
             and selected_primary is not None
@@ -1954,6 +1960,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         local_chargeable_surplus,
                         requested_charge - uncovered_primary_floor - blocked_primary_local_surplus,
                     )
+                    if uncovered_primary_floor == 0:
+                        charge_without_primary_floor = max(
+                            charge_without_primary_floor,
+                            selected_primary_taper_overflow,
+                        )
                     setpoint = (
                         -charge_without_primary_floor
                         if charge_without_primary_floor > 0 and surplus_setpoint <= 0
@@ -1967,6 +1978,25 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 setpoint,
                 -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
             )
+
+        if matching_primary_aware and p1 <= 0 and protects_selected_primary_floor:
+            active_secondary_taper_overflow_capacity = sum(
+                -device.effective_charge_limit
+                for device in routing.discharge_devices
+                if (
+                    device is not selected_primary
+                    and routing.route(device).taper_output_floor == 0
+                    and device.online
+                    and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}
+                    and device.effective_charge_limit < 0
+                )
+            )
+            selected_primary_taper_overflow = min(
+                selected_primary_taper_overflow,
+                active_secondary_taper_overflow_capacity,
+            )
+            if selected_primary_taper_overflow > 0:
+                setpoint = min(setpoint, -selected_primary_taper_overflow)
 
         if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
             setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
@@ -2293,6 +2323,21 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 return True
             return input_switch_allowed
 
+        def can_absorb_selected_primary_taper_overflow(device: ZendureDevice) -> bool:
+            return (
+                setpoint < 0
+                and input_source_available
+                and selected_primary is not None
+                and selected_primary in routing.discharge_devices
+                and routing.route(selected_primary).taper_output_floor > 0
+                and device is not selected_primary
+                and device in self.discharge
+                and device.online
+                and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}
+                and device.effective_charge_limit < 0
+                and device_may_use_input(device)
+            )
+
         charge_devices, idle_devices = self._collect_charge_candidates(
             [device for device in self.charge if not primary_input_excluded(device)],
             [device for device in self.idle if not primary_input_excluded(device) and device_may_use_input(device)],
@@ -2327,6 +2372,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         or device.state in PV_CHARGE_FIRST_STATES
                     )
                 )
+                or can_absorb_selected_primary_taper_overflow(device)
             )
         ]
         pure_secondary_charge_devices = [
@@ -2398,6 +2444,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             capacity = max(routing.charge_surplus(device), active_charge_lag_capacity(device))
             if allow_home_pv_charge:
                 capacity += routing.chargeable_produced_home(device)
+            if can_absorb_selected_primary_taper_overflow(device):
+                capacity = max(capacity, -device.effective_charge_limit)
             return capacity
 
         def split_pv_charge_first_target(device: ZendureDevice, target: int) -> tuple[int, int]:

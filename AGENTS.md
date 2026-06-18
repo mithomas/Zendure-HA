@@ -23,6 +23,13 @@ Use the local venv when present:
 - **ASCII Typographic Characters**: Always write comments, documentation, and docstrings using standard ASCII hyphen-minus characters (`-`) instead of non-ASCII typographic symbols (like the en-dash `–` or Unicode minus sign `−`). This prevents linter warnings (such as `RUF002`/`RUF003`) and terminal rendering issues.
 - **Arrows**: Always construct arrows using standard hyphens and the greater-than symbol (e.g., `->`) instead of Unicode characters (like `→`).
 
+### Manager Routing Fixes
+- For manager routing fixes, identify the specific source of surplus, deficit, blocking, or eligibility before changing allocation behavior. Do not generalize a taper, SoC, priority, or availability fix beyond the observed source unless tests cover the broader behavior.
+- Prefer local routing facts and local variables inside the existing pipeline phase over new manager-level helpers when the calculation is used only for one narrow fix. Add a helper only when the logic is reused, meaningfully named as a domain concept, or needed to keep the phase readable.
+- Keep shaping decisions in the setpoint-shaping phase and execution eligibility/capacity decisions in the execution phase. Do not move policy decisions across phases just to share code.
+- When a fix admits a new allocation target, use the same eligibility predicate for target selection and capacity calculation, or precompute a named eligible set, so selection and capacity cannot drift.
+- State the root cause narrowly in tests and commit messages: distinguish the observed source, such as selected-primary taper overflow, from the broader class, such as secondary eligibility.
+
 ## Analysis Scripts
 The `analysis/` directory contains tools to process and interpret telemetry exports.
 - `analyze_all_days.py`: The primary, comprehensive script for identifying patterns (e.g., unexpected secondary AC charging, primary output blockages, mode switches) across one or multiple CSV exports. By default, it scans for `export*.csv` in the current directory or a provided path.

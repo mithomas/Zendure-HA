@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -7591,6 +7591,95 @@ class TestSmartMatchingPrimaryAware:
         secondary.power_charge.assert_awaited_once_with(-150)
         primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
+
+    async def test_1232_near_full_primary_routes_export_overflow_to_secondary(self, hass):
+        """
+        A 12:32-style near-full primary must not export while an eligible secondary can absorb surplus.
+
+        Synthetic fixture derived from export-2026-06-18_1232.csv at 12:32:32 Europe/Berlin:
+        - wz_balkon selected primary: 636 W PV, 434 W home output, 202 W battery input, near-full.
+        - k_balkon secondary: 68 W PV, 72 W home output, 4 W battery output, normal and charge-capable.
+        - P1 is -302 W; household demand is derived from the normalized entity outputs.
+        """
+        sample_time = datetime(2026, 6, 18, 12, 32, 32, tzinfo=timezone(timedelta(hours=2)))
+        p1 = -302
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-1232-primary",
+            device_name="wz balkon 1232 primary",
+            product_model="SolarFlow 800 Pro",
+            level=98,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=434,
+            home_output=434,
+            battery_input=202,
+        )
+        primary.solarInput.update_value(636)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-1232-secondary",
+            device_name="k balkon 1232 secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=72,
+            home_output=72,
+            battery_output=4,
+        )
+        secondary.solarInput.update_value(68)
+        FuseGroup("group-1232-export-overflow", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_bypass = AsyncMock(return_value=0)
+
+        taper_limit = primary.taper_charge_limit
+        assert taper_limit is not None
+        household_demand = primary.homeOutput.asInt + secondary.homeOutput.asInt + p1
+        expected_primary_floor = primary.solarInput.asInt - taper_limit
+        expected_secondary_charge = expected_primary_floor - household_demand
+        assert expected_secondary_charge > SmartMode.POWER_START
+        assert expected_secondary_charge < -secondary.effective_charge_limit
+
+        await _run_prepared_power_routing(manager, p1, sample_time)
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        primary.power_charge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(expected_primary_floor)
+        secondary.power_charge.assert_awaited_once_with(-expected_secondary_charge)
+        secondary.power_bypass.assert_not_awaited()
+        secondary.power_discharge.assert_not_awaited()
+
+        primary_discharge_args = primary.power_discharge.await_args
+        secondary_charge_args = secondary.power_charge.await_args
+        assert primary_discharge_args is not None
+        assert secondary_charge_args is not None
+        actual_primary_output = primary_discharge_args.args[0]
+        actual_secondary_charge = -secondary_charge_args.args[0]
+        residual_export = actual_primary_output - actual_secondary_charge - household_demand
+        assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
 
     @pytest.mark.parametrize("charge_time", [datetime.min, datetime.now() + timedelta(seconds=30)])
     async def test_output_mode_near_full_primary_export_overflow_charges_secondary(self, hass, charge_time):
