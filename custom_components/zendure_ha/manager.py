@@ -1904,6 +1904,24 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and pv_floors.active_primary_produced_floor > 0
             and p1 > -pv_floors.active_primary_produced_floor
         )
+        full_bypass_peer_passthrough = (
+            sum(
+                routing.route(device).bypass_passthrough
+                for device in routing.discharge_devices
+                if device is not selected_primary and device.state == DeviceState.SOCFULL
+            )
+            if matching_primary_aware and selected_primary is not None
+            else 0
+        )
+        selected_primary_output_surplus_after_bypass = (
+            max(
+                0,
+                pv_floors.active_primary_produced_floor
+                - max(0, gross_discharge_setpoint - full_bypass_peer_passthrough),
+            )
+            if full_bypass_peer_passthrough > 0
+            else 0
+        )
         selected_primary_taper_overflow = 0
         if protects_selected_primary_floor and selected_primary is not None:
             primary_floor = routing.route(selected_primary).taper_output_floor
@@ -1919,7 +1937,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         if p1 <= 0 and extra_surplus > 0:
             surplus_setpoint = setpoint - extra_surplus
-            if (
+            if protects_selected_primary_floor and selected_primary_output_surplus_after_bypass > 0:
+                setpoint = max(0, discharge_candidate_setpoint)
+            elif (
                 setpoint <= 0
                 or local_charge.active_charge_local_surplus > 0
                 or local_charge.active_non_primary_local_surplus > 0

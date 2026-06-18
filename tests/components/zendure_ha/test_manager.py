@@ -7681,6 +7681,103 @@ class TestSmartMatchingPrimaryAware:
         residual_export = actual_primary_output - actual_secondary_charge - household_demand
         assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
 
+    async def test_1517_bypass_peer_lets_primary_keep_surplus_solar_local(self, hass):
+        """
+        A 15:17-style full bypass peer should not make the selected primary export its own PV surplus.
+
+        Synthetic fixture derived from export-2026-06-18_1517.csv around 15:17:05 Europe/Berlin:
+        - k_balkon selected primary: normal, 454 W PV, 456 W current home output, charge-capable.
+        - wz_balkon peer: full, bypass on, 54 W pass-through from current PV.
+        - P1 export persists around 335 W while k_balkon keeps outputting nearly all PV.
+        """
+        sample_time = datetime(2026, 6, 18, 15, 17, 5, tzinfo=timezone(timedelta(hours=2)))
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-1517-primary",
+            device_name="k balkon 1517 primary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=457,
+            home_output=456,
+            battery_output=2,
+        )
+        primary.solarInput.update_value(454)
+        bypass_peer = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-1517-bypass-peer",
+            device_name="wz balkon 1517 bypass peer",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=85,
+            home_output=54,
+        )
+        bypass_peer.solarInput.update_value(87)
+        bypass_peer.byPass.update_value(1)
+        FuseGroup("group-1517-bypass-peer", 800, -1000, [primary, bypass_peer])
+        manager = make_manager(
+            hass,
+            devices=(primary, bypass_peer),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        bypass_peer.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        bypass_peer.power_charge = AsyncMock(side_effect=lambda power: power)
+        bypass_peer.power_discharge = AsyncMock(side_effect=lambda power: power)
+        bypass_peer.power_bypass = AsyncMock(return_value=0)
+
+        cycles = [(-335, 0), (-336, 1), (-338, 2)]
+        primary_targets = []
+
+        for p1, seconds_after_sample in cycles:
+            primary.power_charge.reset_mock()
+            primary.power_discharge.reset_mock()
+            primary.power_bypass.reset_mock()
+            bypass_peer.power_charge.reset_mock()
+            bypass_peer.power_discharge.reset_mock()
+            bypass_peer.power_bypass.reset_mock()
+
+            manager.charge_time = datetime.min.replace(tzinfo=UTC)
+            await _run_prepared_power_routing(manager, p1, sample_time + timedelta(seconds=seconds_after_sample))
+
+            household_demand = primary.homeOutput.asInt + bypass_peer.homeOutput.asInt + p1
+            expected_primary_output = household_demand - bypass_peer.homeOutput.asInt
+            assert expected_primary_output > SmartMode.POWER_START
+            assert primary.solarInput.asInt - expected_primary_output > SmartMode.POWER_START
+
+            assert bypass_peer.state is DeviceState.SOCFULL
+            primary.power_charge.assert_not_awaited()
+            primary.power_bypass.assert_not_awaited()
+            primary.power_discharge.assert_awaited_once_with(expected_primary_output)
+            bypass_peer.power_charge.assert_not_awaited()
+            bypass_peer.power_discharge.assert_not_awaited()
+            bypass_peer.power_bypass.assert_not_awaited()
+
+            primary_discharge_args = primary.power_discharge.await_args
+            assert primary_discharge_args is not None
+            primary_output = primary_discharge_args.args[0]
+            residual_export = primary_output + bypass_peer.homeOutput.asInt - household_demand
+            assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
+            primary_targets.append(primary_output)
+
+        assert all(target > 0 for target in primary_targets)
+
     @pytest.mark.parametrize("charge_time", [datetime.min, datetime.now() + timedelta(seconds=30)])
     async def test_output_mode_near_full_primary_export_overflow_charges_secondary(self, hass, charge_time):
         """
