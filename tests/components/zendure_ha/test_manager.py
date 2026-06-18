@@ -7419,8 +7419,8 @@ class TestSmartMatchingPrimaryAware:
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_discharge.assert_not_awaited()
-        primary.power_charge.assert_awaited_once_with(-100)
-        secondary.power_charge.assert_awaited_once_with(-200)
+        primary.power_charge.assert_awaited_once_with(-150)
+        secondary.power_charge.assert_awaited_once_with(-150)
 
     async def test_primary_absorbs_unexplained_surplus_before_secondary_switches_to_input(self, hass):
         """An output-mode secondary should not switch to input when the selected primary can absorb all surplus."""
@@ -7587,8 +7587,8 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
-        primary.power_charge.assert_awaited_once_with(-100)
-        secondary.power_charge.assert_awaited_once_with(-200)
+        primary.power_charge.assert_awaited_once_with(-150)
+        secondary.power_charge.assert_awaited_once_with(-150)
         primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
@@ -7656,11 +7656,17 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, -413, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
-        primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(497)
         primary.power_bypass.assert_not_awaited()
-        secondary.power_charge.assert_awaited_once_with(-456)
-        secondary.power_discharge.assert_not_awaited()
+        if charge_time == datetime.min:
+            secondary.power_discharge.assert_not_awaited()
+            primary.power_charge.assert_awaited_once_with(-100)
+            primary.power_discharge.assert_not_awaited()
+            secondary.power_charge.assert_awaited_once_with(-43)
+        else:
+            secondary.power_discharge.assert_awaited_once_with(0)
+            primary.power_charge.assert_not_awaited()
+            primary.power_discharge.assert_awaited_once_with(497)
+            secondary.power_charge.assert_not_awaited()
 
     async def test_1638_near_full_primary_keeps_output_while_trimming_secondary_input_lag(self, hass):
         """The 16:38-style input lag should trim the secondary without dropping near-full primary output."""
@@ -8748,7 +8754,7 @@ class TestNearFullChargeTaper:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         assert device.state is DeviceState.SOCNEARLYFULL
-        device.power_discharge.assert_awaited_once_with(422)
+        device.power_discharge.assert_awaited_once_with(372)
 
     async def test_near_full_sf800_pro_is_not_bypassed_when_reduced_to_zero(self, hass):
         """A near-full SF800 Pro should NOT switch to bypass; bypass is reserved for SOCFULL."""
@@ -10171,10 +10177,10 @@ class TestRegressionTaperOscillation:
     @pytest.mark.parametrize(
         ("level", "expected_taper_limit"),
         [
-            (96, 200),
-            (97, 200),
-            (98, 150),
-            (99, 100),
+            (96, 250),
+            (97, 250),
+            (98, 200),
+            (99, 150),
         ],
     )
     async def test_taper_handling_at_percentages(self, hass, level: int, expected_taper_limit: int):
