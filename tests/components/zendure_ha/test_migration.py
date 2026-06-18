@@ -171,6 +171,35 @@ async def test_async_migrate_uses_three_digit_battery_entity_ids(hass):
     assert updated_entity.unique_id == "ab2000x_513_max_temp"
 
 
+async def test_check_entities_does_not_read_translations_on_event_loop(hass):
+    """check_entities must not perform blocking translation file I/O on the event loop."""
+    from importlib import import_module
+
+    from custom_components.zendure_ha.entity import EntityDevice
+
+    entry = make_config_entry()
+    entry.add_to_hass(hass)
+
+    device_registry_module = import_module("homeassistant.helpers.device_registry")
+    device_registry = device_registry_module.async_get(hass)
+    device_entry = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, "device-1")},
+        name="SolarFlow 800 Pro",
+        model="SolarFlow 800 Pro",
+        serial_number="TESTSER894",
+    )
+
+    previous_check_entity = EntityDevice.checkEntity
+    EntityDevice.checkEntity = None
+    try:
+        device = EntityDevice(hass, "empty", "empty")
+        with patch("custom_components.zendure_ha.entity.Path.read_text", side_effect=AssertionError):
+            device.check_entities(device_entry, "sf800pro_894")
+    finally:
+        EntityDevice.checkEntity = previous_check_entity
+
+
 def test_check_entities_does_not_rename_model_serial_entity_ids_when_device_name_differs(hass):
     """
     EntityDevice.check_entities must not rename entities to device-name-based IDs.

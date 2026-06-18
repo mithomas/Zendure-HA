@@ -37,6 +37,13 @@ def snakecase(value: str) -> str:
 _LOGGER = logging.getLogger(__name__)
 
 CONST_FACTOR = 2
+TRANSLATIONS_PATH = Path(__file__).parent / "translations" / "en.json"
+
+
+def _load_check_entity_domains() -> dict[str, str]:
+    """Load translation keys grouped by entity domain."""
+    translations = json.loads(TRANSLATIONS_PATH.read_text(encoding="utf-8"))
+    return {key: domain for domain, keys in translations.get("entity", {}).items() for key in keys}
 
 
 class EntityZendure(Entity):
@@ -227,6 +234,12 @@ class EntityDevice:
 
     empty = EntityZendure(None, "empty")
 
+    @classmethod
+    async def async_prepare_check_entities(cls, hass: HomeAssistant) -> None:
+        """Prepare the entity-domain cache without blocking the event loop."""
+        if cls.checkEntity is None:
+            cls.checkEntity = await hass.async_add_executor_job(_load_check_entity_domains)
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -275,8 +288,13 @@ class EntityDevice:
 
     def check_entities(self, di: DeviceEntry, name: str) -> None:
         if EntityDevice.checkEntity is None:
-            _t = json.loads((Path(__file__).parent / "translations" / "en.json").read_text())
-            EntityDevice.checkEntity = {key: domain for domain, keys in _t.get("entity", {}).items() for key in keys}
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                EntityDevice.checkEntity = _load_check_entity_domains()
+            else:
+                _LOGGER.warning("Skipping entity registry cleanup because translation keys were not preloaded")
+                return
 
         # Get all entities for this device and group them by translation_key
         # if they match the current device and platform.

@@ -8,6 +8,7 @@ from custom_components.zendure_ha import (
     async_unload_entry,
 )
 from custom_components.zendure_ha.const import DOMAIN
+from custom_components.zendure_ha.entity import EntityDevice
 
 from .common import make_config_entry
 
@@ -28,6 +29,7 @@ async def test_async_setup_entry_smoke(hass):
             "custom_components.zendure_ha.ZendureManager.async_config_entry_first_refresh",
             AsyncMock(),
         ) as mock_first_refresh,
+        patch.object(EntityDevice, "async_prepare_check_entities", AsyncMock()) as mock_prepare,
         patch("custom_components.zendure_ha.Api.mqttCloud", mqtt_cloud),
         patch("custom_components.zendure_ha.Api.mqttLocal", mqtt_local),
     ):
@@ -36,6 +38,7 @@ async def test_async_setup_entry_smoke(hass):
         assert entry.domain == DOMAIN
         assert entry.runtime_data is not None
         mock_forward.assert_awaited_once_with(entry, PLATFORMS)
+        mock_prepare.assert_awaited_once_with(hass)
         mock_load.assert_awaited_once()
         mock_first_refresh.assert_awaited_once()
 
