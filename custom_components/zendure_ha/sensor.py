@@ -66,6 +66,10 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
             self._attr_native_value = state
         self.factor = factor
 
+    def _filter_value(self, _new_value: Any) -> bool:
+        """Filter value before applying it. Return True to accept, False to drop."""
+        return True
+
     def update_value(self, value: Any) -> bool:
         try:
             new_value = (
@@ -78,6 +82,9 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
                     new_value = float(new_value) / self.factor
                 except ValueError:
                     new_value = 0
+
+            if not self._filter_value(new_value):
+                return False
 
             if new_value != self._attr_native_value:
                 self._attr_native_value = new_value
@@ -104,6 +111,64 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
         if self._attr_native_value is None:
             return 0
         return int(self._attr_native_value / self.factor) if isinstance(self._attr_native_value, (int, float)) else 0
+
+
+class ZendureTemperatureSensor(ZendureSensor):
+    """Sensor specifically for temperature readings with filtering."""
+
+    def __init__(
+        self,
+        device: EntityDevice,
+        uniqueid: str,
+        template: Template | None = None,
+        precision: int | None = None,
+        state: Any = None,
+        icon: str | None = None,
+        translation_key: str | None = None,
+    ) -> None:
+        """Initialize the temperature sensor."""
+        super().__init__(
+            device=device,
+            uniqueid=uniqueid,
+            template=template,
+            uom="°C",
+            deviceclass="temperature",
+            stateclass="measurement",
+            precision=precision,
+            factor=1,
+            state=state,
+            icon=icon,
+            translation_key=translation_key,
+        )
+        self._last_drop_time: datetime | None = None
+
+    def _filter_value(self, new_value: Any) -> bool:
+        """Filter physically impossible or rapidly dropping temperatures."""
+        try:
+            val = float(new_value)
+        except (ValueError, TypeError):
+            return True
+
+        # Ignore physically impossible low temperatures
+        if val < -30.0:  # noqa: PLR2004
+            return False
+
+        try:
+            prev_val = float(str(self._attr_native_value))
+        except (ValueError, TypeError):
+            prev_val = None
+
+        if prev_val is not None and val < prev_val - 15:
+            now = dt_util.utcnow()
+            if self._last_drop_time is None:
+                self._last_drop_time = now
+                return False
+
+            if (now - self._last_drop_time).total_seconds() <= 120:  # noqa: PLR2004
+                return False
+
+        self._last_drop_time = None
+        return True
 
 
 class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverride]

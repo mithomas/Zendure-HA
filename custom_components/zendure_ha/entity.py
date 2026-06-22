@@ -348,7 +348,7 @@ class EntityDevice:
     def entityUpdate(self, key: Any, value: Any) -> bool:
         from .binary_sensor import ZendureBinarySensor
         from .select import ZendureSelect
-        from .sensor import ZendureCalcSensor, ZendureRestoreSensor, ZendureSensor
+        from .sensor import ZendureCalcSensor, ZendureRestoreSensor, ZendureSensor, ZendureTemperatureSensor
         from .switch import ZendureSwitch
 
         # check if entity is already created
@@ -388,7 +388,7 @@ class EntityDevice:
                         entity = ZendureSensor(self, key, tmpl, "h", "duration", "measurement", None)
                     case "°C":
                         tmpl = Template("{{ (value | float - 2731) / 10 | round(1) }}", self.hass)
-                        entity = ZendureSensor(self, key, tmpl, "°C", "temperature", "measurement", None)
+                        entity = ZendureTemperatureSensor(self, key, tmpl)
                     case "dBm":
                         entity = ZendureSensor(
                             self,
