@@ -483,17 +483,23 @@ class _PowerRoutingSnapshot:
         """
         Return source evidence that is allowed to drive input mode.
 
-        Normal or reserve devices may have local PV, but that PV is not a
-        system surplus source for AC/input mode. Input source evidence is
-        limited to full-device bypass/pass-through and near-full taper overflow.
+        Normal, reserve, or near-full devices may have local PV, but that PV is
+        not a system surplus source for AC/input mode. Input source evidence is
+        limited to full-device bypass/pass-through.
         """
         source_budget = 0
         for route in self.devices.values():
             device = route.device
             if device.state == DeviceState.SOCFULL and device.online and device.reports_pv():
                 source_budget += max(route.bypass_passthrough, 0, -device.pwr_produced, device.solarInput.asInt)
-            elif device.state == DeviceState.SOCNEARLYFULL:
-                source_budget += route.taper_output_floor
+            elif (
+                device is self.selected_primary
+                and device in self.discharge_devices
+                and device.state == DeviceState.SOCNEARLYFULL
+            ):
+                active_home_output = sum(max(0, active.homeOutput.asInt) for active in self.discharge_devices)
+                household_demand = max(0, active_home_output + p1)
+                source_budget += min(max(0, -p1), max(0, route.taper_output_floor - household_demand))
 
         battery_trim_capacity = sum(
             max(0, device.homeOutput.asInt - self.route(device).produced_home)
@@ -1562,6 +1568,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or not routing.selected_primary.online
             or input_source.available
             or unexplained_input_export >= PRIMARY_INPUT_EXPORT_THRESHOLD
+            or (
+                routing.selected_primary.state == DeviceState.SOCNEARLYFULL
+                and routing.selected_primary.acMode.value == AcMode.INPUT
+                and routing.has_active_local_input_source()
+            )
             or routing.has_pv_charge_first_source()
         )
         non_empty_local_input_allowed = input_source.available or routing.has_active_local_input_source()
@@ -1897,6 +1908,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
         else:
             extra_surplus = self.produced - self.discharge_bypass
+        selected_primary_near_full_output = (
+            matching_primary_aware
+            and selected_primary is not None
+            and selected_primary in routing.discharge_devices
+            and selected_primary.state == DeviceState.SOCNEARLYFULL
+        )
+        selected_primary_near_full_device = selected_primary if selected_primary_near_full_output else None
+        if (
+            selected_primary_near_full_device is not None
+            and selected_primary_near_full_device.acMode.value == AcMode.OUTPUT
+        ):
+            extra_surplus = max(0, extra_surplus - routing.charge_surplus(selected_primary_near_full_device))
         charge_transition_would_zero = self.charge_time > time
         protects_selected_primary_floor = (
             matching_primary_aware
@@ -1923,11 +1946,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             else 0
         )
         selected_primary_taper_overflow = 0
-        if protects_selected_primary_floor and selected_primary is not None:
-            primary_floor = routing.route(selected_primary).taper_output_floor
+        if selected_primary_near_full_device is not None:
+            primary_floor = routing.route(selected_primary_near_full_device).taper_output_floor
             active_home_output = sum(max(0, device.homeOutput.asInt) for device in routing.discharge_devices)
             household_demand = max(0, active_home_output + p1)
-            selected_primary_taper_overflow = max(0, primary_floor - household_demand)
+            meter_export = max(0, -p1)
+            selected_primary_taper_overflow = min(
+                meter_export,
+                max(0, primary_floor - household_demand),
+            )
         primary_keeps_local_surplus = (
             local_charge.selected_primary_local_surplus > 0
             and selected_primary is not None
@@ -1953,7 +1980,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 selected_primary_local_surplus = (
                     local_charge.selected_primary_local_surplus
                     if selected_primary_input_allowed
-                    and (selected_primary is None or selected_primary not in routing.discharge_devices)
+                    and (
+                        selected_primary is None
+                        or selected_primary not in routing.discharge_devices
+                        or selected_primary_taper_overflow > 0
+                    )
                     else 0
                 )
                 local_chargeable_surplus = (
@@ -1999,7 +2030,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 -(local_charge.non_primary_local_chargeable_surplus + pv_floors.replaceable_non_primary_serving_pv),
             )
 
-        if matching_primary_aware and p1 <= 0 and protects_selected_primary_floor:
+        if matching_primary_aware and p1 <= 0 and selected_primary_taper_overflow > 0:
             active_secondary_taper_overflow_capacity = sum(
                 -device.effective_charge_limit
                 for device in routing.discharge_devices
@@ -2346,23 +2377,28 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         def can_absorb_selected_primary_taper_overflow(device: ZendureDevice) -> bool:
             return (
                 setpoint < 0
-                and input_source_available
+                and (input_source_available or allow_blocked_primary_taper_overflow_charge)
                 and selected_primary is not None
                 and selected_primary in routing.discharge_devices
                 and routing.route(selected_primary).taper_output_floor > 0
                 and device is not selected_primary
-                and device in self.discharge
+                and (device in self.discharge or device in self.idle)
                 and device.online
                 and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}
                 and device.effective_charge_limit < 0
-                and device_may_use_input(device)
+                and (device_may_use_input(device) or allow_blocked_primary_taper_overflow_charge)
             )
 
         charge_devices, idle_devices = self._collect_charge_candidates(
             [device for device in self.charge if not primary_input_excluded(device)],
-            [device for device in self.idle if not primary_input_excluded(device) and device_may_use_input(device)],
-            promote_idle_devices=input_source_available
-            and (input_switch_allowed or positive_demand_charge_lag)
+            [
+                device
+                for device in self.idle
+                if not primary_input_excluded(device)
+                and (device_may_use_input(device) or can_absorb_selected_primary_taper_overflow(device))
+            ],
+            promote_idle_devices=(input_source_available or allow_blocked_primary_taper_overflow_charge)
+            and (input_switch_allowed or positive_demand_charge_lag or allow_blocked_primary_taper_overflow_charge)
             and setpoint <= -SmartMode.POWER_START
             and not any(not primary_input_excluded(device) for device in self.charge),
         )
@@ -2377,7 +2413,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for device in self.discharge
             if device is not selected_primary
             and routing.route(device).taper_output_floor == 0
-            and device_may_use_input(device)
+            and (device_may_use_input(device) or can_absorb_selected_primary_taper_overflow(device))
             and (
                 (
                     (input_switch_allowed or positive_demand_charge_lag or device.acMode.value == AcMode.INPUT)
@@ -2482,18 +2518,28 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and device.acMode.value != AcMode.INPUT
             and device.state not in PV_CHARGE_FIRST_STATES
         }
+        selected_primary_taper_charge_source = (
+            primary is not None
+            and selected_primary is primary
+            and primary.state == DeviceState.SOCNEARLYFULL
+            and routing.route(primary).taper_output_floor > 0
+            and (input_source_available or allow_blocked_primary_taper_overflow_charge)
+        )
         primary_charge_target = 0
         if (
             self.operation == ManagerMode.MATCHING
             and primary is not None
             and selected_primary is primary
-            and primary.acMode.value != AcMode.INPUT
+            and (primary.acMode.value != AcMode.INPUT or selected_primary_taper_charge_source)
             and input_switch_allowed
-            and output_secondary_input_candidates
+            and (output_secondary_input_candidates or selected_primary_taper_charge_source)
             and setpoint < 0
             and not positive_demand_charge_lag
         ):
-            primary_charge_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
+            if selected_primary_taper_charge_source and local_charge.selected_primary_local_surplus > 0:
+                primary_charge_target = -min(-setpoint, local_charge.selected_primary_local_surplus)
+            else:
+                primary_charge_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
             setpoint -= primary_charge_target
 
         primary_input_blocked = blocked_primary_input is not None
@@ -2596,7 +2642,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if local_target != 0:
                 pv_charge_first_local_targets[device] = local_target
                 charge_targets[device] = ac_target
-        if not input_source_available and not positive_demand_charge_lag:
+        if (
+            not input_source_available
+            and not positive_demand_charge_lag
+            and not allow_blocked_primary_taper_overflow_charge
+        ):
             setpoint = 0
         selected_primary_output_replacement_target = 0
         if not strict_output_stop and selected_primary is not None and selected_primary in active_discharge_targets:

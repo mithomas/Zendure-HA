@@ -10662,6 +10662,51 @@ class TestRegressionTaperOscillation:
         expected_floor = 300 - expected_taper_limit
         primary.power_discharge.assert_awaited_once_with(expected_floor)
 
+    async def test_near_full_primary_keeps_taper_floor_with_residual_headroom(self, hass):
+        """A near-full selected primary must not count its own taper floor as input source."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="near-full-primary-stability",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=182,
+            battery_input=118,
+            input_limit=0,
+            output_limit=182,
+        )
+        primary.solarInput.update_value(300)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="near-full-secondary-available",
+            level=50,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            input_limit=0,
+            output_limit=0,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -30, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(152)
+        secondary.power_charge.assert_not_awaited()
+
     async def test_pv_covers_household_before_grid_import(self, hass):
         """5: PV covers household before grid import."""
         primary = make_device(
