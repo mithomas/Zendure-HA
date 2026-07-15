@@ -779,7 +779,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.manualpower = ZendureRestoreNumber(
             self,
             "manual_power",
-            None,
+            self.update_manual_power,
             None,
             "W",
             "power",
@@ -998,6 +998,27 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.fuseGroups.append(fg)
         self.refresh_primary_device_options()
 
+    async def _force_routing_update(self) -> None:
+        """Force an immediate routing update using the current P1 meter value."""
+        if self.config_entry is None or self.operation == ManagerMode.OFF:
+            return
+
+        p1meter = self.config_entry.data.get(CONF_P1METER, "sensor.power_actual")
+        if p1meter is None or (state := self.hass.states.get(p1meter)) is None:
+            return
+
+        try:
+            p1 = int(self.p1_factor * float(state.state))
+        except (TypeError, ValueError):
+            return
+
+        await self._route_p1_update(p1, datetime.now(), force=True, raise_on_error=True)
+
+    async def update_manual_power(self, _entity: ZendureRestoreNumber, _value: Any) -> None:
+        """Handle updates to the manual power setpoint."""
+        if self.operation == ManagerMode.MANUAL:
+            await self._force_routing_update()
+
     async def update_operation(self, entity: ZendureSelect, _operation: Any) -> None:
         operation = ManagerMode(entity.value)
         _LOGGER.info("Update operation: %s from: %s", operation, self.operation)
@@ -1012,25 +1033,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 case ManagerMode.OFF:
                     for d in self.devices:
                         await d.power_off()
+                case _:
+                    await self._force_routing_update()
 
     async def update_primary_device(self, entity: ZendureSelect, _device_id: Any) -> None:
         """Handle updates to the selected primary device."""
         if entity is not None:
             entity.update_value(_device_id)
         _LOGGER.info("Update primary device: %s", _device_id if _device_id is not None else None)
-        if not self._operation_supports_selected_primary() or self.config_entry is None:
+        if not self._operation_supports_selected_primary():
             return
 
-        p1meter = self.config_entry.data.get(CONF_P1METER, "sensor.power_actual")
-        if (state := self.hass.states.get(p1meter)) is None:
-            return
-
-        try:
-            p1 = int(self.p1_factor * float(state.state))
-        except (TypeError, ValueError):
-            return
-
-        await self._route_p1_update(p1, datetime.now(), force=True, raise_on_error=True)
+        await self._force_routing_update()
 
     def refresh_primary_device_options(self) -> None:
         """Refresh the selectable primary device list."""

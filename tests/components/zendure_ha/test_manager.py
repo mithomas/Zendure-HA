@@ -10789,3 +10789,101 @@ class TestRegressionTaperOscillation:
         primary.power_discharge.assert_awaited()
         target = primary.power_discharge.call_args[0][0]
         assert target == 250
+
+
+class TestImmediateForcedUpdates:
+    """Verify that mode and manual power changes immediately force a routing update."""
+
+    async def test_update_operation_forces_routing_update(self, hass):
+        """Switching operation mode should trigger a forced routing update."""
+        manager = make_manager(hass)
+        manager.p1meterEvent = Mock()
+        manager._route_p1_update = AsyncMock(return_value=True)
+
+        device = make_device(hass, device_id="test-device", level=50)
+        attach_devices(manager, device)
+        hass.states.async_set("sensor.power_actual", "150", {"unit_of_measurement": "W"})
+
+        operation_entity = Mock(value=ManagerMode.MANUAL.value)
+        await manager.update_operation(operation_entity, ManagerMode.MANUAL.value)
+
+        assert manager._route_p1_update.call_count == 1
+        args, kwargs = manager._route_p1_update.call_args
+        assert args[0] == 150
+        assert isinstance(args[1], datetime)
+        assert kwargs["force"] is True
+        assert kwargs["raise_on_error"] is True
+
+    async def test_update_operation_forces_routing_update_matching(self, hass):
+        """Switching to MATCHING mode should trigger a forced routing update."""
+        manager = make_manager(hass)
+        manager.p1meterEvent = Mock()
+        manager._route_p1_update = AsyncMock(return_value=True)
+
+        device = make_device(hass, device_id="test-device", level=50)
+        attach_devices(manager, device)
+        hass.states.async_set("sensor.power_actual", "180", {"unit_of_measurement": "W"})
+
+        operation_entity = Mock(value=ManagerMode.MATCHING.value)
+        await manager.update_operation(operation_entity, ManagerMode.MATCHING.value)
+
+        assert manager._route_p1_update.call_count == 1
+        args, kwargs = manager._route_p1_update.call_args
+        assert args[0] == 180
+        assert kwargs["force"] is True
+
+    async def test_update_operation_off_does_not_force_routing_update(self, hass):
+        """Switching to OFF mode should NOT trigger a forced routing update (instead calls power_off)."""
+        manager = make_manager(hass)
+        manager.p1meterEvent = Mock()
+        manager._route_p1_update = AsyncMock(return_value=True)
+
+        device = make_device(hass, device_id="test-device", level=50)
+        device.power_off = AsyncMock()
+        attach_devices(manager, device)
+        hass.states.async_set("sensor.power_actual", "150", {"unit_of_measurement": "W"})
+
+        operation_entity = Mock(value=ManagerMode.OFF.value)
+        await manager.update_operation(operation_entity, ManagerMode.OFF.value)
+
+        assert manager._route_p1_update.call_count == 0
+        device.power_off.assert_awaited_once()
+
+    async def test_update_manual_power_in_manual_mode_forces_routing_update(self, hass):
+        """Adjusting manual power setpoint in MANUAL mode should trigger a forced routing update."""
+        manager = make_manager(hass)
+        manager.p1meterEvent = Mock()
+        manager._route_p1_update = AsyncMock(return_value=True)
+
+        # Force the manager to MANUAL mode
+        manager.operation = ManagerMode.MANUAL
+
+        device = make_device(hass, device_id="test-device", level=50)
+        attach_devices(manager, device)
+        hass.states.async_set("sensor.power_actual", "220", {"unit_of_measurement": "W"})
+
+        # Update manual power through its number entity
+        await manager.manualpower.async_set_native_value(120.0)
+
+        assert manager._route_p1_update.call_count == 1
+        args, kwargs = manager._route_p1_update.call_args
+        assert args[0] == 220
+        assert kwargs["force"] is True
+
+    async def test_update_manual_power_in_matching_mode_does_not_force_routing_update(self, hass):
+        """Adjusting manual power setpoint in MATCHING mode should NOT trigger a forced routing update."""
+        manager = make_manager(hass)
+        manager.p1meterEvent = Mock()
+        manager._route_p1_update = AsyncMock(return_value=True)
+
+        # Manager is in MATCHING mode
+        manager.operation = ManagerMode.MATCHING
+
+        device = make_device(hass, device_id="test-device", level=50)
+        attach_devices(manager, device)
+        hass.states.async_set("sensor.power_actual", "220", {"unit_of_measurement": "W"})
+
+        # Update manual power through its number entity
+        await manager.manualpower.async_set_native_value(120.0)
+
+        assert manager._route_p1_update.call_count == 0

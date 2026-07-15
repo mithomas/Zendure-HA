@@ -165,7 +165,7 @@ def make_manager(
     manager.manualpower = ZendureRestoreNumber(
         manager,
         "manual_power",
-        None,
+        manager.update_manual_power,
         None,
         "W",
         "power",
