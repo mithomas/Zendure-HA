@@ -11,9 +11,9 @@ from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSen
 _LOGGER = logging.getLogger(__name__)
 
 SF800_PRO_TAPER_LIMITS = (
-    (1, 150),
-    (2, 200),
-    (4, 250),
+    (1, 200),
+    (2, 250),
+    (3, 300),
 )
 
 
