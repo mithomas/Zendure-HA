@@ -9997,6 +9997,109 @@ class TestPrimaryNoLocalSolarDefers:
         )
 
 
+class TestSelectedPrimaryChargeStability:
+    """Regression tests for selected-primary charge overcorrection without bypass."""
+
+    async def test_selected_primary_local_pv_is_not_added_to_its_ac_charge_target(self, hass):
+        """
+        A charging selected primary must not count its own locally absorbed PV twice.
+
+        Scenario from the 2026-09-06 18:12 telemetry:
+        - selected primary is the only managed device;
+        - current AC input is 68 W and local PV charge is 67 W;
+        - P1 is -254 W, so the correct absolute AC target is 68 + 254 = 322 W.
+
+        Before the fix, extra_surplus also included the 67 W local PV and the
+        resulting target was 389 W.
+        """
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-primary-charge",
+            device_name="wz primary charge",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            soc_set=80,
+            ac_mode=AcMode.INPUT,
+            home_input=68,
+            home_output=0,
+            battery_input=135,
+            battery_output=0,
+        )
+        primary.solarInput.update_value(67)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -254, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-322)
+
+        primary.homeInput.update_value(322)
+        primary.batteryInput.update_value(389)
+        primary.power_charge.reset_mock()
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-322)
+
+    async def test_non_primary_production_remains_available_for_redistribution(self, hass):
+        """The fix must remove only the selected primary's locally absorbed PV."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-charge-with-peer",
+            device_name="primary charge with peer",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            soc_set=80,
+            ac_mode=AcMode.INPUT,
+            home_input=68,
+            battery_input=135,
+        )
+        primary.solarInput.update_value(67)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-charge-with-pv",
+            device_name="secondary charge with PV",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            soc_set=80,
+            ac_mode=AcMode.INPUT,
+            home_input=100,
+            battery_input=150,
+        )
+        secondary.solarInput.update_value(50)
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+
+        manager._reset_power_distribution_state()
+        polled_setpoint = await manager._poll_devices_and_prepare_routing_state(-254)
+        _intent, _routing, shaped_setpoint = manager._prepare_power_routing(
+            -254,
+            datetime.now(),
+            polled_setpoint,
+        )
+
+        assert polled_setpoint == -422
+        assert shaped_setpoint == -472
+
+
 class TestBypassModeChargeStability:
     """
     Regression tests for charge oscillation when a battery is in SOCFULL bypass mode.

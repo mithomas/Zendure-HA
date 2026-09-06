@@ -1905,14 +1905,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 setpoint = max(setpoint, gross_discharge_setpoint)
         discharge_candidate_setpoint = setpoint
 
-        # When a SOCFULL bypass device is present (discharge_bypass > 0), any
-        # other charging device's solar is already captured by that device's own
-        # battery and must NOT be counted again in extra_surplus — doing so
-        # overcorrects the charge setpoint on every p1 ≤ 0 cycle and produces a
-        # self-sustaining oscillation.
-        # Without a bypass device the extra_surplus is kept as-is to allow the
-        # allocation layer to redistribute load from non-solar to solar-capable
-        # charge devices.
+        # Local PV already charging the selected primary must not be counted as
+        # additional meter surplus. Keep production from other devices available
+        # for the allocation layer to redistribute.
+        selected_primary_charge_surplus = (
+            routing.charge_surplus(selected_primary)
+            if matching_primary_aware and selected_primary is not None and selected_primary in routing.charge_devices
+            else 0
+        )
+
+        # When a SOCFULL bypass device is present, all charging-device solar is
+        # already captured by those devices and must also be excluded.
         if self.discharge_bypass > 0:
             charge_device_produced = sum(-d.pwr_produced for d in self.charge)
             discharge_device_battery_charge = sum(routing.route(d).charge_surplus for d in self.discharge)
@@ -1921,7 +1924,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.produced - self.discharge_bypass - charge_device_produced - discharge_device_battery_charge,
             )
         else:
-            extra_surplus = self.produced - self.discharge_bypass
+            extra_surplus = max(
+                0,
+                self.produced - self.discharge_bypass - selected_primary_charge_surplus,
+            )
         selected_primary_near_full_output = (
             matching_primary_aware
             and selected_primary is not None
