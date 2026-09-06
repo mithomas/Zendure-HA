@@ -1,97 +1,132 @@
-import csv
-from datetime import datetime
+"""Generate a Markdown summary from Zendure telemetry exports."""
 
-# Load CSV
-with open("export2026-05.27.csv") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
+from __future__ import annotations
 
-parsed_rows = []
-for idx, r in enumerate(rows):
-    if idx < 2:
-        continue
-    try:
-        t = datetime.strptime(r["time"], "%Y-%m-%d %H:%M:%S")
-        sml = float(r["sml_power"]) if r["sml_power"] else 0.0
-        wz_sol = float(r["wz_balkon_solar_power"]) if r["wz_balkon_solar_power"] else 0.0
-        k_sol = float(r["k_balkon_solar_power"]) if r["k_balkon_solar_power"] else 0.0
-        wz_out = float(r["wz_balkon_output_power"]) if r["wz_balkon_output_power"] else 0.0
-        wz_mode = r["wz_balkon_ac_mode"]
-        k_mode = r["k_balkon_ac_mode"]
-        wz_in_l = float(r["wz_balkon_input_limit"]) if r["wz_balkon_input_limit"] else 0.0
-        k_in_l = float(r["k_balkon_input_limit"]) if r["k_balkon_input_limit"] else 0.0
-        wz_out_l = float(r["wz_balkon_output_limit"]) if r["wz_balkon_output_limit"] else 0.0
-        k_out_l = float(r["k_balkon_output_limit"]) if r["k_balkon_output_limit"] else 0.0
-        wz_bat = float(r["wz_balkon_bat_flow"]) if r["wz_balkon_bat_flow"] else 0.0
-        k_bat = float(r["k_balkon_bat_flow"]) if r["k_balkon_bat_flow"] else 0.0
+import argparse
+from pathlib import Path
 
-        parsed_rows.append(
-            {
-                "idx": idx,
-                "time": t,
-                "sml": sml,
-                "wz_sol": wz_sol,
-                "k_sol": k_sol,
-                "wz_out": wz_out,
-                "wz_mode": wz_mode,
-                "k_mode": k_mode,
-                "wz_in_l": wz_in_l,
-                "k_in_l": k_in_l,
-                "wz_out_l": wz_out_l,
-                "k_out_l": k_out_l,
-                "wz_bat": wz_bat,
-                "k_bat": k_bat,
-            }
-        )
-    except Exception:
-        pass
+try:
+    from .run_analysis import (
+        DEVICE_IDS,
+        POWER_THRESHOLD_W,
+        analyze_rows,
+        find_sustained_periods,
+        read_export,
+        resolve_export_files,
+        select_management_rows,
+    )
+except ImportError:
+    from run_analysis import (
+        DEVICE_IDS,
+        POWER_THRESHOLD_W,
+        analyze_rows,
+        find_sustained_periods,
+        read_export,
+        resolve_export_files,
+        select_management_rows,
+    )
 
-for idx, pr in enumerate(parsed_rows):
-    if idx == 0:
-        pr["dt"] = 1.0
+
+def _period_count(rows: list[dict], *, importing: bool) -> int:
+    if importing:
+        condition = lambda row: row["sml"] is not None and row["sml"] >= POWER_THRESHOLD_W
     else:
-        pr["dt"] = (pr["time"] - parsed_rows[idx - 1]["time"]).total_seconds()
+        condition = lambda row: row["sml"] is not None and row["sml"] <= -POWER_THRESHOLD_W
+    periods = find_sustained_periods(rows, condition, gap_allowance_sec=5)
+    return sum(period["duration"] >= 60 for period in periods)
 
-# Analyze in detail
-import_ac_charge_w = []
-export_blocked_w = []
 
-for pr in parsed_rows:
-    sml = pr["sml"]
-    dt = pr["dt"]
-    k_mode = pr["k_mode"]
-    k_in_l = pr["k_in_l"]
+def generate_report(file_path: str | Path, *, only_unmanaged: tuple[str, ...] = ()) -> str:
+    """Build a routing-aware Markdown summary for one CSV export."""
+    raw_count, all_rows = read_export(file_path)
+    rows = select_management_rows(all_rows, unmanaged_devices=only_unmanaged)
+    if not rows:
+        return f"## {Path(file_path).name}\n\nNo matching rows."
 
-    # 1. Import while charging from AC
-    if sml > 0 and k_mode == "input" and k_in_l > 0:
-        avoidable_w = min(sml, k_in_l)
-        import_ac_charge_w.append(avoidable_w * dt)
+    result = analyze_rows(rows)
+    scope = ", ".join(f"{device_id}=unmanaged" for device_id in only_unmanaged) or "all rows"
+    lines = [
+        f"## {Path(file_path).name}",
+        "",
+        f"- Scope: {scope}",
+        f"- Window: {rows[0]['time']} to {rows[-1]['time']}",
+        f"- Rows: {len(rows)} of {raw_count}",
+        "",
+        "### Manager participation",
+        "",
+        "| Device | Managed | Unmanaged | Unknown | Managed mode switches |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for device_id in DEVICE_IDS:
+        samples = result["management_samples"][device_id]
+        lines.append(
+            f"| {device_id} | {samples['managed']} | {samples['unmanaged']} | "
+            f"{samples['unknown']} | {result['mode_switches'][device_id]} |"
+        )
 
-    # 2. Export while secondary is blocked (in output mode with 0 limit)
-    if sml < 0 and k_mode == "output":
-        avoidable_w = -sml
-        export_blocked_w.append(avoidable_w * dt)
+    lines.extend(
+        [
+            "",
+            "### Routing-aware findings",
+            "",
+            "| Metric | Value |",
+            "|---|---:|",
+            "| Grid import attributable to managed AC charging | "
+            f"{result['grid_import_while_charging_kwh']:.6f} kWh |",
+            f"| Battery-backed grid export | {result['battery_backed_export_kwh']:.6f} kWh |",
+            f"| Grid export while a managed battery was full | {result['full_export_kwh']:.6f} kWh |",
+            f"| Export -> import -> export cycles | {len(result['overcorrection_cycles'])} |",
+            f"| Sustained import periods | {_period_count(rows, importing=True)} |",
+            f"| Sustained export periods | {_period_count(rows, importing=False)} |",
+            "",
+            "AC intake is measured from an explicit input-power column when available. Otherwise it is "
+            "estimated as charging battery flow minus local DC solar. Unmanaged devices remain visible "
+            "as grid context but are excluded from routing metrics.",
+        ]
+    )
 
-total_import_ac_charge_kwh = sum(import_ac_charge_w) / 3600.0 / 1000.0
-total_export_blocked_kwh = sum(export_blocked_w) / 3600.0 / 1000.0
+    cycles = result["overcorrection_cycles"]
+    if cycles:
+        lines.extend(
+            [
+                "",
+                "### First overcorrection cycles",
+                "",
+                "| Export start | Import turn | Export return | Power sequence |",
+                "|---|---|---|---|",
+            ]
+        )
+        for cycle in cycles[:10]:
+            lines.append(
+                f"| {cycle['start']} | {cycle['turn']} | {cycle['end']} | "
+                f"-{cycle['export_before_w']:.0f} W -> +{cycle['import_w']:.0f} W "
+                f"-> -{cycle['export_after_w']:.0f} W |"
+            )
+    return "\n".join(lines)
 
-print("Summary:")
-print(
-    f"  Total Avoidable Grid Import (AC charging): {total_import_ac_charge_kwh:.6f} kWh ({sum(import_ac_charge_w):.1f} W-s)"
-)
-print(
-    f"  Total Avoidable Grid Export (Secondary blocked): {total_export_blocked_kwh:.6f} kWh ({sum(export_blocked_w):.1f} W-s)"
-)
-print(f"  Combined Avoidable energy: {total_import_ac_charge_kwh + total_export_blocked_kwh:.6f} kWh")
 
-# Let's count mode transitions
-transitions = []
-prev_mode = None
-for pr in parsed_rows:
-    if prev_mode is not None and pr["k_mode"] != prev_mode:
-        transitions.append((pr["time"], prev_mode, pr["k_mode"]))
-    prev_mode = pr["k_mode"]
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", nargs="?", default=".", help="CSV export or directory")
+    parser.add_argument(
+        "--only-unmanaged",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="only include rows where DEVICE is explicitly unmanaged; may be repeated",
+    )
+    return parser.parse_args()
 
-print(f"\nMode switches count: {len(transitions)}")
-for t, m1, m2 in transitions:
-    print(f"  {t.strftime('%H:%M:%S')}: {m1} -> {m2}")
+
+def main() -> None:
+    """Print one Markdown report per matching export."""
+    args = _parse_args()
+    files = resolve_export_files(args.path)
+    if not files:
+        raise SystemExit(f"No export CSV files found at {args.path!r}")
+    print("\n\n".join(generate_report(path, only_unmanaged=tuple(args.only_unmanaged)) for path in files))
+
+
+if __name__ == "__main__":
+    main()

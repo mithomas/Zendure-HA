@@ -1,92 +1,124 @@
-import csv
-from datetime import datetime
+"""Generate a Markdown event table from Zendure telemetry exports."""
 
-# Load CSV
-with open("export2026-05.27.csv") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
+from __future__ import annotations
 
-parsed_rows = []
-for idx, r in enumerate(rows):
-    if idx < 2:
-        continue
-    try:
-        t = datetime.strptime(r["time"], "%Y-%m-%d %H:%M:%S")
-        sml = float(r["sml_power"]) if r["sml_power"] else 0.0
-        wz_sol = float(r["wz_balkon_solar_power"]) if r["wz_balkon_solar_power"] else 0.0
-        k_sol = float(r["k_balkon_solar_power"]) if r["k_balkon_solar_power"] else 0.0
-        wz_out = float(r["wz_balkon_output_power"]) if r["wz_balkon_output_power"] else 0.0
-        wz_mode = r["wz_balkon_ac_mode"]
-        k_mode = r["k_balkon_ac_mode"]
-        wz_in_l = float(r["wz_balkon_input_limit"]) if r["wz_balkon_input_limit"] else 0.0
-        k_in_l = float(r["k_balkon_input_limit"]) if r["k_balkon_input_limit"] else 0.0
-        wz_out_l = float(r["wz_balkon_output_limit"]) if r["wz_balkon_output_limit"] else 0.0
-        k_out_l = float(r["k_balkon_output_limit"]) if r["k_balkon_output_limit"] else 0.0
-        wz_bat = float(r["wz_balkon_bat_flow"]) if r["wz_balkon_bat_flow"] else 0.0
-        k_bat = float(r["k_balkon_bat_flow"]) if r["k_balkon_bat_flow"] else 0.0
+import argparse
+from pathlib import Path
 
-        parsed_rows.append(
-            {
-                "idx": idx,
-                "time": t,
-                "sml": sml,
-                "wz_sol": wz_sol,
-                "k_sol": k_sol,
-                "wz_out": wz_out,
-                "wz_mode": wz_mode,
-                "k_mode": k_mode,
-                "wz_in_l": wz_in_l,
-                "k_in_l": k_in_l,
-                "wz_out_l": wz_out_l,
-                "k_out_l": k_out_l,
-                "wz_bat": wz_bat,
-                "k_bat": k_bat,
-            }
+try:
+    from .run_analysis import (
+        DEVICE_IDS,
+        analyze_rows,
+        estimate_ac_input,
+        group_episodes,
+        read_export,
+        resolve_export_files,
+        select_management_rows,
+    )
+except ImportError:
+    from run_analysis import (
+        DEVICE_IDS,
+        analyze_rows,
+        estimate_ac_input,
+        group_episodes,
+        read_export,
+        resolve_export_files,
+        select_management_rows,
+    )
+
+
+def _device_summary(row: dict, device_id: str) -> str:
+    device = row["devices"][device_id]
+    management = "M" if device["managed"] is True else "U" if device["managed"] is False else "?"
+    ac_input = estimate_ac_input(device)
+    ac_text = "?" if ac_input is None else f"{ac_input:.0f}"
+    solar_text = "?" if device["solar"] is None else f"{device['solar']:.0f}"
+    battery_text = "?" if device["battery_flow"] is None else f"{device['battery_flow']:.0f}"
+    return f"{management}, {device['mode']}, PV {solar_text}, bat {battery_text}, AC {ac_text}"
+
+
+def generate_table(
+    file_path: str | Path, *, only_unmanaged: tuple[str, ...] = (), limit: int = 100
+) -> str:
+    """Build a table of routing-relevant import and export samples."""
+    _, all_rows = read_export(file_path)
+    rows = select_management_rows(all_rows, unmanaged_devices=only_unmanaged)
+    result = analyze_rows(rows)
+
+    events = []
+    for episode in group_episodes(result["grid_import_while_charging_rows"], gap_allowance_sec=1.5):
+        events.append(
+            (
+                episode[0]["time"],
+                episode,
+                max(episode, key=lambda row: row["sml"]),
+                "managed AC charging contributes to import",
+            )
         )
-    except Exception:
-        pass
-
-for idx, pr in enumerate(parsed_rows):
-    if idx == 0:
-        pr["dt"] = 1.0
-    else:
-        pr["dt"] = (pr["time"] - parsed_rows[idx - 1]["time"]).total_seconds()
-
-print("| Timestamp | Duration | kWh Est | SoC (wz/k) | Solar (W) | Load (W) | Grid (W) | Battery Flow (W) | Reason |")
-print("|---|---|---|---|---|---|---|---|---|")
-
-# Let's collect rows that represent continuous intervals or show them as discrete events
-for pr in parsed_rows:
-    sml = pr["sml"]
-    dt = pr["dt"]
-    k_mode = pr["k_mode"]
-    k_in_l = pr["k_in_l"]
-    k_sol = pr["k_sol"]
-    wz_sol = pr["wz_sol"]
-    wz_out = pr["wz_out"]
-    wz_bat = pr["wz_bat"]
-    k_bat = pr["k_bat"]
-
-    # Calculate load: SML + total output (wz_out) - AC charge power (approx k_in_l if input else 0)
-    # Actually, SML + wz_out is the total load when k_balkon is not AC charging.
-    # When k_balkon is AC charging, SML + wz_out - k_in_l is the household load excluding charging.
-    # Let's represent household load = SML + wz_out - (k_in_l if k_mode == 'input' else 0).
-    ac_charge_k = k_in_l if k_mode == "input" else 0.0
-    load_w = sml + wz_out - ac_charge_k
-    solar_w = wz_sol + k_sol
-
-    reason = None
-    kwh = 0.0
-
-    if sml > 0 and k_mode == "input" and k_in_l > 0:
-        reason = "Grid Import while charging secondary AC"
-        kwh = (min(sml, k_in_l) * dt) / 3600.0 / 1000.0
-    elif sml < 0 and k_mode == "output":
-        reason = "Grid Export while secondary blocked"
-        kwh = (-sml * dt) / 3600.0 / 1000.0
-
-    if reason:
-        time_str = pr["time"].strftime("%H:%M:%S")
-        print(
-            f"| {time_str} | {int(dt)}s | {kwh:.7f} | Normal/Normal | {solar_w:.1f} | {load_w:.1f} | {sml:.1f} | wz: {wz_bat:.0f}, k: {k_bat:.0f} | {reason} |"
+    for episode in group_episodes(result["battery_backed_export_rows"], gap_allowance_sec=1.5):
+        events.append(
+            (
+                episode[0]["time"],
+                episode,
+                min(episode, key=lambda row: row["sml"]),
+                "managed battery discharges while grid exports",
+            )
         )
+    events.sort(key=lambda event: event[0])
+
+    lines = [
+        f"## {Path(file_path).name}",
+        "",
+        "M = managed, U = unmanaged, ? = unknown. AC is measured or estimated actual AC intake.",
+        "",
+        "| Period | Duration | Peak grid W | WZ-Balkon (scope, mode, PV, battery, AC) | "
+        "K-Balkon (scope, mode, PV, battery, AC) | Finding |",
+        "|---|---:|---:|---|---|---|",
+    ]
+    for _, episode, row, reason in events[:limit]:
+        start = episode[0]["time"]
+        end = episode[-1]["time"]
+        period = str(start) if start == end else f"{start} to {end.time()}"
+        duration = sum(event_row["dt"] for event_row in episode)
+        lines.append(
+            f"| {period} | {duration:.0f}s | {row['sml']:.0f} | {_device_summary(row, 'wz_balkon')} | "
+            f"{_device_summary(row, 'k_balkon')} | {reason} |"
+        )
+    if not events:
+        lines.append("| - | - | - | - | - | No routing-relevant events |")
+    elif len(events) > limit:
+        lines.extend(["", f"Showing {limit} of {len(events)} episodes."])
+    return "\n".join(lines)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", nargs="?", default=".", help="CSV export or directory")
+    parser.add_argument(
+        "--only-unmanaged",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="only include rows where DEVICE is explicitly unmanaged; may be repeated",
+    )
+    parser.add_argument("--limit", type=int, default=100, help="maximum event episodes per export")
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Print an event table for each matching export."""
+    args = _parse_args()
+    files = resolve_export_files(args.path)
+    if not files:
+        raise SystemExit(f"No export CSV files found at {args.path!r}")
+    print(
+        "\n\n".join(
+            generate_table(path, only_unmanaged=tuple(args.only_unmanaged), limit=args.limit)
+            for path in files
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

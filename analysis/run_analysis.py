@@ -1,171 +1,413 @@
+"""Shared parsing and telemetry analysis for Zendure CSV exports."""
+
+from __future__ import annotations
+
+import argparse
 import csv
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
-# Load CSV
-with open("export2026-05.27.csv") as f:
-    reader = csv.DictReader(f)
-    rows = list(reader)
 
-# Clean and parse rows starting from index 2 to avoid initial missing values
-parsed_rows = []
-for idx, r in enumerate(rows):
-    if idx < 2:
-        continue
+DEVICE_IDS = ("wz_balkon", "k_balkon")
+UNKNOWN_VALUES = {"", "none", "null", "unknown", "unavailable"}
+MAX_INTEGRATION_GAP_SECONDS = 5
+POWER_THRESHOLD_W = 100
 
+ParsedRow = dict[str, Any]
+AnalysisResult = dict[str, Any]
+
+
+def parse_float(value: object) -> float | None:
+    """Parse a telemetry number without turning missing data into zero."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in UNKNOWN_VALUES:
+        return None
     try:
-        t = datetime.strptime(r["time"], "%Y-%m-%d %H:%M:%S")
-        sml = float(r["sml_power"]) if r["sml_power"] else 0.0
-        wz_sol = float(r["wz_balkon_solar_power"]) if r["wz_balkon_solar_power"] else 0.0
-        k_sol = float(r["k_balkon_solar_power"]) if r["k_balkon_solar_power"] else 0.0
-        wz_out = float(r["wz_balkon_output_power"]) if r["wz_balkon_output_power"] else 0.0
-        wz_mode = r["wz_balkon_ac_mode"]
-        k_mode = r["k_balkon_ac_mode"]
-        wz_in_l = float(r["wz_balkon_input_limit"]) if r["wz_balkon_input_limit"] else 0.0
-        k_in_l = float(r["k_balkon_input_limit"]) if r["k_balkon_input_limit"] else 0.0
-        wz_out_l = float(r["wz_balkon_output_limit"]) if r["wz_balkon_output_limit"] else 0.0
-        k_out_l = float(r["k_balkon_output_limit"]) if r["k_balkon_output_limit"] else 0.0
-        wz_bat = float(r["wz_balkon_bat_flow"]) if r["wz_balkon_bat_flow"] else 0.0
-        k_bat = float(r["k_balkon_bat_flow"]) if r["k_balkon_bat_flow"] else 0.0
+        return float(text)
+    except ValueError:
+        return None
 
+
+def parse_managed(value: object) -> bool | None:
+    """Parse the per-row manager participation marker."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in UNKNOWN_VALUES:
+        return None
+    if text == "managed":
+        return True
+    if text == "unmanaged":
+        return False
+    return None
+
+
+def _parse_time(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.strptime(str(value).strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _device_from_row(row: Mapping[str, object], device_id: str) -> dict[str, Any]:
+    return {
+        "managed": parse_managed(row.get(f"{device_id}_fusegroup")),
+        "solar": parse_float(row.get(f"{device_id}_solar_power")),
+        "output": parse_float(row.get(f"{device_id}_output_power")),
+        "input_power": parse_float(row.get(f"{device_id}_input_power")),
+        "input_limit": parse_float(row.get(f"{device_id}_input_limit")),
+        "output_limit": parse_float(row.get(f"{device_id}_output_limit")),
+        "battery_flow": parse_float(row.get(f"{device_id}_bat_flow")),
+        "state": row.get(f"{device_id}_device_state") or None,
+        "mode": row.get(f"{device_id}_ac_mode") or None,
+    }
+
+
+def _set_intervals(rows: list[ParsedRow]) -> None:
+    previous_time: datetime | None = None
+    for row in rows:
+        timestamp = row["time"]
+        raw_dt = 0.0 if previous_time is None else (timestamp - previous_time).total_seconds()
+        row["raw_dt"] = raw_dt
+        row["dt"] = raw_dt if 0 < raw_dt <= MAX_INTEGRATION_GAP_SECONDS else 0.0
+        previous_time = timestamp
+
+
+def parse_rows(raw_rows: Iterable[Mapping[str, object]]) -> list[ParsedRow]:
+    """Parse and chronologically order export rows."""
+    parsed_rows: list[ParsedRow] = []
+    for index, raw_row in enumerate(raw_rows):
+        timestamp = _parse_time(raw_row.get("time"))
+        if timestamp is None:
+            continue
         parsed_rows.append(
             {
-                "idx": idx,
-                "time": t,
-                "sml": sml,
-                "wz_sol": wz_sol,
-                "k_sol": k_sol,
-                "wz_out": wz_out,
-                "wz_mode": wz_mode,
-                "k_mode": k_mode,
-                "wz_in_l": wz_in_l,
-                "k_in_l": k_in_l,
-                "wz_out_l": wz_out_l,
-                "k_out_l": k_out_l,
-                "wz_bat": wz_bat,
-                "k_bat": k_bat,
+                "idx": index,
+                "time": timestamp,
+                "sml": parse_float(raw_row.get("sml_power")),
+                "primary": raw_row.get("primary_device") or None,
+                "devices": {
+                    device_id: _device_from_row(raw_row, device_id) for device_id in DEVICE_IDS
+                },
             }
         )
-    except Exception as e:
-        print(f"Error parsing row {idx}: {e}")
 
-print(f"Parsed {len(parsed_rows)} rows out of {len(rows)} total.")
+    parsed_rows.sort(key=lambda row: row["time"])
+    _set_intervals(parsed_rows)
+    return parsed_rows
 
-# Compute intervals and analyze
-mode_switches = []
-prev_mode = None
-for idx, pr in enumerate(parsed_rows):
-    if idx == 0:
-        pr["dt"] = 1.0  # assume 1s for the first parsed row
-    else:
-        pr["dt"] = (pr["time"] - parsed_rows[idx - 1]["time"]).total_seconds()
 
-    if prev_mode is not None and pr["k_mode"] != prev_mode:
-        mode_switches.append((idx, pr["time"], prev_mode, pr["k_mode"]))
-    prev_mode = pr["k_mode"]
+def read_export(file_path: str | Path) -> tuple[int, list[ParsedRow]]:
+    """Read an export and return its raw and valid row counts."""
+    with Path(file_path).open(encoding="utf-8", newline="") as file_handle:
+        raw_rows = list(csv.DictReader(file_handle))
+    return len(raw_rows), parse_rows(raw_rows)
 
-print(f"Total k_balkon mode switches: {len(mode_switches)}")
-print("Switches:")
-for s in mode_switches:
-    print(f"  At idx {s[0]} ({s[1]}): {s[2]} -> {s[3]}")
 
-# 1. Total Avoidable Grid Import (kWh)
-# Grid import is positive sml. When we import from the grid while charging k_balkon from AC,
-# that grid import is avoidable if we reduced k_balkon's charge rate.
-# Avoidable import = min(sml, k_in_l) when sml > 0 and k_mode == 'input' and k_in_l > 0.
-# Wait! Let's check if wz_balkon is also charging. It's in output mode with wz_in_l = 0, so no.
-# What if sml > 0, and k_balkon is in output mode? In output mode, k_out_limit is 0, so it's not discharging.
-# Why is k_balkon in output mode with 0 limit when we are importing from the grid?
-# If we are importing from the grid and k_balkon has solar and battery capacity, why is its output limit 0?
-# Under the routing rules, secondary batteries can discharge to cover household load if primary cannot cover it.
-# Why is k_balkon's output limit 0?
-# In MATCHING mode:
-# "Secondary device battery: Primary unavailable, at discharge limit, or unable to cover the remainder."
-# Is the primary at its discharge limit?
-# Let's check! In Row 70: sml = 58 (import). wz_solar = 552, wz_out = 367. wz_out_limit = 368.
-# Wait! The primary output power (367 W) is at its limit (368 W).
-# Why is the primary's limit 368 W? Is that the maximum discharge limit of the primary, or did the manager set it there?
-# Let's check what the max limit is in other rows. In Row 115, wz_out_limit is 481 W. In Row 130 (let's check), it might be higher.
-# If the primary output limit was 368 W, and household demand was higher (367 + 58 = 425 W), why didn't the manager set the primary's output limit higher?
-# Let's check if the primary was limited by its own solar or battery discharge limits.
-# But also, why didn't the secondary (k_balkon) discharge?
-# Because the primary output was not yet at its absolute maximum (which is at least 481 W), or maybe there's a delay.
-# Let's write code to compute avoidable import and export and classify them.
+def resolve_export_files(path: str | Path) -> list[Path]:
+    """Resolve one CSV file or all export CSV files in a directory."""
+    export_path = Path(path)
+    if export_path.is_file():
+        return [export_path]
+    if export_path.is_dir():
+        return sorted(export_path.glob("export*.csv"))
+    return []
 
-avoidable_import_ac_charge_k = 0.0  # kWh
-avoidable_export_k_mode_output = 0.0  # kWh
-avoidable_export_general = 0.0  # kWh
 
-suspicious_intervals = []
+def select_management_rows(
+    rows: list[ParsedRow], *, unmanaged_devices: tuple[str, ...] = ()
+) -> list[ParsedRow]:
+    """Select rows by explicit manager participation and recalculate intervals."""
+    invalid_devices = set(unmanaged_devices) - set(DEVICE_IDS)
+    if invalid_devices:
+        invalid_list = ", ".join(sorted(invalid_devices))
+        raise ValueError(f"unknown device IDs: {invalid_list}")
 
-for idx, pr in enumerate(parsed_rows):
-    sml = pr["sml"]
-    dt = pr["dt"]
-    k_mode = pr["k_mode"]
-    k_in_l = pr["k_in_l"]
-    k_sol = pr["k_sol"]
-    k_bat = pr["k_bat"]
-    wz_sol = pr["wz_sol"]
-    wz_out = pr["wz_out"]
-    wz_out_l = pr["wz_out_l"]
+    selected = [
+        {**row}
+        for row in rows
+        if all(row["devices"][device_id]["managed"] is False for device_id in unmanaged_devices)
+    ]
+    _set_intervals(selected)
+    return selected
 
-    # Category 1: Grid import while charging k_balkon from AC
-    # If sml > 0 and k_mode == 'input' and k_in_l > 0:
-    # We are importing from grid, but also commanding k_balkon to charge from AC (input limit).
-    # If we reduced the AC charge limit, we would import less.
-    if sml > 0 and k_mode == "input" and k_in_l > 0:
-        avoidable_w = min(sml, k_in_l)
-        avoidable_kwh = (avoidable_w * dt) / 3600.0 / 1000.0
-        avoidable_import_ac_charge_k += avoidable_kwh
-        suspicious_intervals.append(
+
+def _period_stats(period_rows: list[ParsedRow]) -> dict[str, Any]:
+    durations = [0.0]
+    durations.extend(
+        min(
+            max((row["time"] - previous["time"]).total_seconds(), 0.0),
+            MAX_INTEGRATION_GAP_SECONDS,
+        )
+        for previous, row in zip(period_rows, period_rows[1:], strict=False)
+    )
+    sml_values = [row["sml"] for row in period_rows if row["sml"] is not None]
+    return {
+        "start": period_rows[0]["time"],
+        "end": period_rows[-1]["time"],
+        "duration": sum(durations),
+        "avg_sml": sum(sml_values) / len(sml_values),
+        "energy_kwh": sum(
+            row["sml"] * duration for row, duration in zip(period_rows, durations, strict=True)
+        )
+        / 3_600_000,
+        "rows": period_rows,
+    }
+
+
+def find_sustained_periods(
+    rows: list[ParsedRow],
+    condition_fn: Callable[[ParsedRow], bool],
+    gap_allowance_sec: float = 30,
+) -> list[dict[str, Any]]:
+    """Find continuous matching periods, allowing only gaps in sampling."""
+    periods: list[list[ParsedRow]] = []
+    current_period: list[ParsedRow] = []
+
+    for row in rows:
+        if not condition_fn(row):
+            if current_period:
+                periods.append(current_period)
+                current_period = []
+            continue
+
+        if current_period:
+            gap = (row["time"] - current_period[-1]["time"]).total_seconds()
+            if gap > gap_allowance_sec:
+                periods.append(current_period)
+                current_period = []
+        current_period.append(row)
+
+    if current_period:
+        periods.append(current_period)
+    return [_period_stats(period) for period in periods]
+
+
+def group_episodes(rows: list[ParsedRow], gap_allowance_sec: float = 30) -> list[list[ParsedRow]]:
+    """Group a prefiltered row list by timestamp proximity."""
+    if not rows:
+        return []
+    episodes = [[rows[0]]]
+    for row in rows[1:]:
+        gap = (row["time"] - episodes[-1][-1]["time"]).total_seconds()
+        if gap <= gap_allowance_sec:
+            episodes[-1].append(row)
+        else:
+            episodes.append([row])
+    return episodes
+
+
+def find_large_swings(
+    parsed_rows: list[ParsedRow], window_sec: float = 120, limit: int = 5
+) -> list[dict[str, Any]]:
+    """Return the largest distinct grid-power ranges in rolling windows."""
+    swings: list[dict[str, Any]] = []
+    for index, start_row in enumerate(parsed_rows):
+        window = []
+        for row in parsed_rows[index:]:
+            if (row["time"] - start_row["time"]).total_seconds() > window_sec:
+                break
+            if row["sml"] is not None:
+                window.append(row)
+        if len(window) < 2:
+            continue
+        sml_values = [row["sml"] for row in window]
+        min_sml = min(sml_values)
+        max_sml = max(sml_values)
+        swings.append(
             {
-                "idx": pr["idx"],
-                "time": pr["time"],
-                "dt": dt,
-                "sml": sml,
-                "wz_sol": wz_sol,
-                "k_sol": k_sol,
-                "wz_out": wz_out,
-                "k_mode": k_mode,
-                "k_in_l": k_in_l,
-                "k_out_l": pr["k_out_l"],
-                "wz_bat": pr["wz_bat"],
-                "k_bat": k_bat,
-                "reason": "Importing from grid while AC-charging secondary device",
-                "kwh": avoidable_kwh,
+                "start_time": start_row["time"],
+                "end_time": window[-1]["time"],
+                "swing": max_sml - min_sml,
+                "min_sml": min_sml,
+                "max_sml": max_sml,
+                "rows": window,
             }
         )
 
-    # Category 2: Grid export while k_balkon is in output mode with 0 limit (so not charging from grid)
-    # If sml < 0 (export) and k_mode == 'output':
-    # Since sml < 0, we have surplus power on the grid. We should be charging.
-    # But k_balkon is in output mode (with output limit 0). In output mode, it cannot charge from AC.
-    # If we put k_balkon in input mode, we could charge its battery with the surplus.
-    # The surplus is -sml. The potential charge power we could have used is min(-sml, max_charge_rate - current_charge_rate).
-    # Since k_bat is -80W (charging from its own solar), its AC input is 0.
-    # It can easily absorb up to its max charge rate. Let's assume it can absorb at least up to 500W.
-    # So the avoidable export is -sml.
-    if sml < 0 and k_mode == "output":
-        avoidable_w = -sml
-        avoidable_kwh = (avoidable_w * dt) / 3600.0 / 1000.0
-        avoidable_export_k_mode_output += avoidable_kwh
-        suspicious_intervals.append(
-            {
-                "idx": pr["idx"],
-                "time": pr["time"],
-                "dt": dt,
-                "sml": sml,
-                "wz_sol": wz_sol,
-                "k_sol": k_sol,
-                "wz_out": wz_out,
-                "k_mode": k_mode,
-                "k_in_l": k_in_l,
-                "k_out_l": pr["k_out_l"],
-                "wz_bat": pr["wz_bat"],
-                "k_bat": k_bat,
-                "reason": "Exporting to grid while secondary is in output mode (charging blocked)",
-                "kwh": avoidable_kwh,
-            }
-        )
+    swings.sort(key=lambda swing: swing["swing"], reverse=True)
+    distinct_swings: list[dict[str, Any]] = []
+    for swing in swings:
+        if all(
+            abs((swing["start_time"] - existing["start_time"]).total_seconds()) >= window_sec
+            for existing in distinct_swings
+        ):
+            distinct_swings.append(swing)
+            if len(distinct_swings) == limit:
+                break
+    return distinct_swings
 
-print(f"\nAvoidable Grid Import due to AC charging k_balkon: {avoidable_import_ac_charge_k:.6f} kWh")
-print(f"Avoidable Grid Export due to k_balkon being in output mode: {avoidable_export_k_mode_output:.6f} kWh")
+
+def estimate_ac_input(device: Mapping[str, Any]) -> float | None:
+    """Estimate actual AC intake, preferring an explicit measurement."""
+    if device["mode"] != "input":
+        return 0.0
+    input_power = device["input_power"]
+    if input_power is not None:
+        return max(float(input_power), 0.0)
+    battery_flow = device["battery_flow"]
+    solar = device["solar"]
+    if battery_flow is None or solar is None:
+        return None
+    return max(0.0, -float(battery_flow) - float(solar))
+
+
+def _has_managed_normal_input(row: ParsedRow) -> bool:
+    return any(
+        device["managed"] is True
+        and device["state"] == "normal"
+        and device["mode"] == "input"
+        for device in row["devices"].values()
+    )
+
+
+def find_overcorrection_cycles(
+    rows: list[ParsedRow], threshold_w: float = POWER_THRESHOLD_W, max_seconds: float = 60
+) -> list[dict[str, Any]]:
+    """Find export -> import -> export reversals while managed charging is active."""
+    cycles: list[dict[str, Any]] = []
+    start_row: ParsedRow | None = None
+    import_row: ParsedRow | None = None
+
+    for row in rows:
+        sml = row["sml"]
+        if sml is None or not _has_managed_normal_input(row):
+            start_row = None
+            import_row = None
+            continue
+
+        if start_row is not None and (row["time"] - start_row["time"]).total_seconds() > max_seconds:
+            start_row = None
+            import_row = None
+
+        if sml <= -threshold_w:
+            if start_row is not None and import_row is not None:
+                cycles.append(
+                    {
+                        "start": start_row["time"],
+                        "turn": import_row["time"],
+                        "end": row["time"],
+                        "export_before_w": -start_row["sml"],
+                        "import_w": import_row["sml"],
+                        "export_after_w": -sml,
+                    }
+                )
+            start_row = row
+            import_row = None
+        elif sml >= threshold_w and start_row is not None:
+            if import_row is None or sml > import_row["sml"]:
+                import_row = row
+
+    return cycles
+
+
+def analyze_rows(rows: list[ParsedRow]) -> AnalysisResult:
+    """Calculate routing-aware metrics from parsed rows."""
+    management_samples = {
+        device_id: {"managed": 0, "unmanaged": 0, "unknown": 0} for device_id in DEVICE_IDS
+    }
+    mode_switches = {device_id: 0 for device_id in DEVICE_IDS}
+    previous_managed_mode: dict[str, str | None] = {device_id: None for device_id in DEVICE_IDS}
+    import_ws = 0.0
+    battery_export_ws = 0.0
+    full_export_ws = 0.0
+    import_rows: list[ParsedRow] = []
+    battery_export_rows: list[ParsedRow] = []
+
+    for row in rows:
+        sml = row["sml"]
+        dt = row["dt"]
+        managed_devices: list[Mapping[str, Any]] = []
+
+        for device_id, device in row["devices"].items():
+            managed = device["managed"]
+            status = "managed" if managed is True else "unmanaged" if managed is False else "unknown"
+            management_samples[device_id][status] += 1
+
+            if managed is not True:
+                previous_managed_mode[device_id] = None
+                continue
+            managed_devices.append(device)
+            mode = device["mode"]
+            previous_mode = previous_managed_mode[device_id]
+            if previous_mode is not None and mode is not None and mode != previous_mode:
+                mode_switches[device_id] += 1
+            previous_managed_mode[device_id] = mode if isinstance(mode, str) else None
+
+        if sml is None or dt <= 0:
+            continue
+
+        ac_inputs = [
+            ac_input
+            for device in managed_devices
+            if device["state"] == "normal" and (ac_input := estimate_ac_input(device)) is not None
+        ]
+        total_ac_input = sum(ac_inputs)
+        if sml >= POWER_THRESHOLD_W and total_ac_input > 0:
+            import_ws += min(sml, total_ac_input) * dt
+            import_rows.append(row)
+
+        if sml <= -POWER_THRESHOLD_W and any(
+            device["state"] == "normal"
+            and device["battery_flow"] is not None
+            and device["battery_flow"] >= POWER_THRESHOLD_W
+            for device in managed_devices
+        ):
+            battery_export_ws += -sml * dt
+            battery_export_rows.append(row)
+
+        if sml <= -POWER_THRESHOLD_W and any(device["state"] == "full" for device in managed_devices):
+            full_export_ws += -sml * dt
+
+    return {
+        "management_samples": management_samples,
+        "mode_switches": mode_switches,
+        "grid_import_while_charging_kwh": import_ws / 3_600_000,
+        "battery_backed_export_kwh": battery_export_ws / 3_600_000,
+        "full_export_kwh": full_export_ws / 3_600_000,
+        "grid_import_while_charging_rows": import_rows,
+        "battery_backed_export_rows": battery_export_rows,
+        "overcorrection_cycles": find_overcorrection_cycles(rows),
+    }
+
+
+def _main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", nargs="?", default=".", help="CSV export or directory")
+    parser.add_argument(
+        "--only-unmanaged",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="only include rows where DEVICE is explicitly unmanaged; may be repeated",
+    )
+    args = parser.parse_args()
+    files = resolve_export_files(args.path)
+    if not files:
+        parser.error(f"no export CSV files found at {args.path!r}")
+
+    for file_path in files:
+        raw_count, all_rows = read_export(file_path)
+        rows = select_management_rows(all_rows, unmanaged_devices=tuple(args.only_unmanaged))
+        result = analyze_rows(rows)
+        print(file_path)
+        print(f"  rows: {len(rows)}/{raw_count}")
+        if args.only_unmanaged:
+            print(f"  scope: {', '.join(args.only_unmanaged)} unmanaged")
+        print(f"  management samples: {result['management_samples']}")
+        print(f"  managed mode switches: {result['mode_switches']}")
+        print(f"  grid import while managed AC charging: {result['grid_import_while_charging_kwh']:.6f} kWh")
+        print(f"  battery-backed export: {result['battery_backed_export_kwh']:.6f} kWh")
+        print(f"  export while full: {result['full_export_kwh']:.6f} kWh")
+        print(f"  overcorrection cycles: {len(result['overcorrection_cycles'])}")
+
+
+if __name__ == "__main__":
+    _main()
