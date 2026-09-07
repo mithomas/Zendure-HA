@@ -8419,6 +8419,175 @@ class TestP1RoutingPipeline:
         assert list(manager.p1_history) == [100]
 
 
+class TestP1RoutingSerialization:
+    """Verify that P1 routing uses one current device-and-meter snapshot."""
+
+    async def test_concurrent_fast_update_is_coalesced_into_active_poll(self, hass):
+        """A newer P1 value must replace, rather than overlap, an active route."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="serialized-primary",
+            device_name="serialized primary",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            soc_set=80,
+            ac_mode=AcMode.INPUT,
+            home_input=0,
+            battery_input=95,
+        )
+        primary.solarInput.update_value(95)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        poll_started = asyncio.Event()
+        release_poll = asyncio.Event()
+        poll_count = 0
+
+        async def delayed_power_get() -> bool:
+            nonlocal poll_count
+            poll_count += 1
+            poll_started.set()
+            await release_poll.wait()
+            primary.homeInput.update_value(363)
+            primary.batteryInput.update_value(458)
+            return True
+
+        primary.power_get = AsyncMock(side_effect=delayed_power_get)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        first_time = datetime.now()
+
+        first_route = asyncio.create_task(
+            manager._route_p1_update(-196, first_time, force=True),
+        )
+        await poll_started.wait()
+        middle_route = asyncio.create_task(
+            manager._route_p1_update(100, first_time + timedelta(milliseconds=500)),
+        )
+        latest_route = asyncio.create_task(
+            manager._route_p1_update(221, first_time + timedelta(seconds=1)),
+        )
+        await asyncio.sleep(0)
+        release_poll.set()
+        first_routed, middle_routed, latest_routed = await asyncio.gather(
+            first_route,
+            middle_route,
+            latest_route,
+        )
+
+        assert first_routed is True
+        assert middle_routed is False
+        assert latest_routed is False
+        assert poll_count == 1
+        primary.power_charge.assert_awaited_once_with(-142)
+
+    async def test_forced_update_waits_for_active_route(self, hass):
+        """A forced update must run after, rather than overlap, an active route."""
+        primary = make_device(hass, device_id="serialized-forced-primary", level=50)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        first_poll_started = asyncio.Event()
+        release_first_poll = asyncio.Event()
+        active_polls = 0
+        maximum_active_polls = 0
+        poll_count = 0
+
+        async def delayed_first_power_get() -> bool:
+            nonlocal active_polls, maximum_active_polls, poll_count
+            poll_count += 1
+            active_polls += 1
+            maximum_active_polls = max(maximum_active_polls, active_polls)
+            if poll_count == 1:
+                first_poll_started.set()
+                await release_first_poll.wait()
+            active_polls -= 1
+            return True
+
+        primary.power_get = AsyncMock(side_effect=delayed_first_power_get)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        first_time = datetime.now()
+
+        first_route = asyncio.create_task(
+            manager._route_p1_update(100, first_time, force=True),
+        )
+        await first_poll_started.wait()
+        forced_route = asyncio.create_task(
+            manager._route_p1_update(200, first_time + timedelta(seconds=1), force=True),
+        )
+        await asyncio.sleep(0)
+
+        assert poll_count == 1
+
+        release_first_poll.set()
+        assert await asyncio.gather(first_route, forced_route) == [True, True]
+        assert poll_count == 2
+        assert maximum_active_polls == 1
+
+    async def test_unused_device_is_not_polled_by_p1_routing(self, hass):
+        """An unmanaged device must not delay or participate in a routing cycle."""
+        primary = make_device(hass, device_id="managed-primary", level=50)
+        unused = make_device(hass, device_id="unused-peer", level=50)
+        unused.fuseGroup.update_value(0)
+        manager = make_manager(
+            hass,
+            devices=(primary, unused),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        unused.power_get = AsyncMock(return_value=True)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        unused.power_charge = AsyncMock(side_effect=lambda power: power)
+        unused.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await manager._route_p1_update(100, datetime.now(), force=True)
+
+        primary.power_get.assert_awaited_once()
+        unused.power_get.assert_not_awaited()
+        unused.power_charge.assert_not_awaited()
+        unused.power_discharge.assert_not_awaited()
+
+    async def test_unused_pv_does_not_enable_charge_lag_fast_path(self, hass):
+        """PV on an unmanaged device must not bypass the routing debounce."""
+        primary = make_device(hass, device_id="managed-fast-primary", level=50)
+        unused = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="unused-fast-peer",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            ac_mode=AcMode.INPUT,
+            battery_input=300,
+        )
+        unused.solarInput.update_value(300)
+        unused.fuseGroup.update_value(0)
+        manager = make_manager(
+            hass,
+            devices=(primary, unused),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        now = datetime.now()
+        manager.zero_fast = now + timedelta(seconds=SmartMode.TIMEFAST)
+        manager.zero_next = now + timedelta(seconds=SmartMode.TIMEZERO)
+        manager.p1_charge_lag_last_update = now - SmartMode.P1_MIN_UPDATE
+        _mock_prepared_power_routing(manager)
+
+        routed = await manager._route_p1_update(150, now)
+
+        assert routed is False
+        _prepare_mock(manager).assert_not_called()
+
+
 class TestP1SpikeFilter:
     """Verify optional short upward P1 spike suppression."""
 
@@ -9061,6 +9230,7 @@ class TestZeroFastRecovery:
 
         assert manager.zero_fast != datetime.max
         assert manager.zero_fast < datetime.now() + timedelta(seconds=10)
+        assert manager._p1_routing_lock.locked() is False
 
     async def test_p1_changed_resets_zero_fast_after_routing_stage_raises(self, hass):
         """zero_fast must be restored even when a routing pipeline stage raises an exception."""
@@ -9108,6 +9278,7 @@ class TestZeroFastRecovery:
 
         assert manager.zero_fast != datetime.max
         assert manager.zero_fast < datetime.now() + timedelta(seconds=10)
+        assert manager._p1_routing_lock.locked() is False
 
     async def test_update_primary_device_resets_zero_fast(self, hass):
         """zero_fast must not remain at datetime.max after update_primary_device runs."""
@@ -10098,6 +10269,36 @@ class TestSelectedPrimaryChargeStability:
 
         assert polled_setpoint == -422
         assert shaped_setpoint == -472
+
+    async def test_idle_primary_local_pv_is_not_added_during_input_transition(self, hass):
+        """The first AC target must exclude local PV before AC input becomes measurable."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="idle-primary-with-pv",
+            device_name="idle primary with PV",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            soc_set=80,
+            ac_mode=AcMode.INPUT,
+            home_input=0,
+            battery_input=95,
+        )
+        primary.solarInput.update_value(95)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -201, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-201)
 
 
 class TestBypassModeChargeStability:

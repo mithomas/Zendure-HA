@@ -608,6 +608,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_export_trim_last_update = datetime.min
         self.p1_spike_baseline = 0
         self.p1_spike_started: datetime | None = None
+        self._p1_routing_lock = asyncio.Lock()
+        self._latest_p1: tuple[int, datetime] | None = None
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -618,6 +620,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.discharge_bypass = 0
         self.idle: list[ZendureDevice] = []
         self.produced = 0
+
+    def _managed_routing_devices(self) -> list[ZendureDevice]:
+        """Return devices that currently participate in manager routing."""
+        return [device for device in self.devices if device.fuseGroup.value not in (None, 0)]
 
     def _reset_power_distribution_state(self) -> None:
         """Reset per-cycle distribution state before computing a new routing pass."""
@@ -715,14 +721,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or not self._selected_primary_routing_enabled()
         ):
             return False
-        if any(device.reports_active_pv_charge() for device in self.devices):
+        routing_devices = self._managed_routing_devices()
+        if any(device.reports_active_pv_charge() for device in routing_devices):
             return True
-        if any(device.reports_pv() for device in self.charge):
+        if any(device in routing_devices and device.reports_pv() for device in self.charge):
             return True
 
-        return any(device.reports_full_bypass_pv() for device in self.devices) and any(
+        return any(device.reports_full_bypass_pv() for device in routing_devices) and any(
             device.online and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL} and device.charge_limit < 0
-            for device in self.devices
+            for device in routing_devices
         )
 
     def _should_fast_track_export_trim_p1(self, p1: int, time: datetime) -> bool:
@@ -735,7 +742,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         ):
             return False
 
-        return any(device.reports_battery_backed_home_output() for device in self.devices)
+        return any(device.reports_battery_backed_home_output() for device in self._managed_routing_devices())
 
     async def loadDevices(self) -> None:
         if (
@@ -1025,7 +1032,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.operation = operation
         if self.p1meterEvent is not None:
-            if operation != ManagerMode.OFF and not any(d.online for d in self.devices):
+            if operation != ManagerMode.OFF and not any(d.online for d in self._managed_routing_devices()):
                 _LOGGER.warning("No devices online, not possible to start the operation")
                 return
 
@@ -1052,7 +1059,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return
 
         options = {PRIMARY_DEVICE_DISABLED: "none"}
-        for device in sorted(self.devices, key=lambda dev: dev.name):
+        for device in sorted(self._managed_routing_devices(), key=lambda dev: dev.name):
             options[device.deviceId] = device.name
         self.primarydevice.setDict(options)
 
@@ -1065,7 +1072,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if device_id in (None, PRIMARY_DEVICE_DISABLED):
             return None
 
-        device = next((candidate for candidate in self.devices if candidate.deviceId == device_id), None)
+        device = next(
+            (candidate for candidate in self._managed_routing_devices() if candidate.deviceId == device_id),
+            None,
+        )
         if charging is None or device is None:
             return device
 
@@ -1499,14 +1509,37 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if ZendureManager.simulation:
             self.writeSimulation(time, p1)
 
+        if not force and self._is_p1_spike_increase(p1, time):
+            return False
+
+        self._latest_p1 = (p1, time)
+        if self._p1_routing_lock.locked() and not force:
+            self._record_p1_history(p1)
+            _LOGGER.debug("P1 update coalesced while routing is active: p1=%sW", p1)
+            return False
+
+        async with self._p1_routing_lock:
+            return await self._run_p1_routing_update(
+                p1,
+                time,
+                force=force,
+                raise_on_error=raise_on_error,
+            )
+
+    async def _run_p1_routing_update(
+        self,
+        p1: int,
+        time: datetime,
+        *,
+        force: bool,
+        raise_on_error: bool,
+    ) -> bool:
+        """Run one serialized P1 routing cycle."""
         should_route = force
         charge_lag_fast = False
         export_trim_fast = False
 
         if not force:
-            if self._is_p1_spike_increase(p1, time):
-                return False
-
             charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
             export_trim_fast = self._should_fast_track_export_trim_p1(p1, time)
 
@@ -1527,6 +1560,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         try:
             self._reset_power_distribution_state()
             setpoint = await self._poll_devices_and_prepare_routing_state(p1)
+            latest_p1, latest_time = self._latest_p1 or (p1, time)
+            setpoint += latest_p1 - p1
+            p1 = latest_p1
+            time = latest_time
+            if not force:
+                charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
+                export_trim_fast = self._should_fast_track_export_trim_p1(p1, time)
             if export_trim_fast:
                 intent, routing, setpoint = self._prepare_power_routing(
                     p1,
@@ -1757,7 +1797,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         setpoint = p1
         power = 0
 
-        for d in self.devices:
+        for d in self._managed_routing_devices():
             if await d.power_get():
                 # get power production
                 d.pwr_produced = min(
@@ -1910,7 +1950,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # for the allocation layer to redistribute.
         selected_primary_charge_surplus = (
             routing.charge_surplus(selected_primary)
-            if matching_primary_aware and selected_primary is not None and selected_primary in routing.charge_devices
+            if matching_primary_aware
+            and selected_primary is not None
+            and selected_primary in (*routing.charge_devices, *routing.idle_devices)
             else 0
         )
 
@@ -2365,7 +2407,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             primary_target = active_discharge_targets[selected_primary]
             if primary_target > 0 and selected_primary.state in EMPTY_SOC_STATES:
                 secondary_local_surplus = sum(
-                    max(0, routing.charge_surplus(device)) for device in self.devices if device is not selected_primary
+                    max(0, routing.charge_surplus(device))
+                    for device in routing.devices
+                    if device is not selected_primary
                 )
                 leftover_export = max(0, -setpoint - secondary_local_surplus)
                 if leftover_export > 0:
@@ -2904,7 +2948,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_primary = routing.selected_primary
         input_exit_devices = {
             device
-            for device in self.devices
+            for device in routing.devices
             if not input_source_available
             and device.acMode.value == AcMode.INPUT
             and (device.limitInput.asInt > 0 or device.homeInput.asInt > 0)
