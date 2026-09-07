@@ -9,6 +9,7 @@ import logging
 import traceback
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -85,6 +86,16 @@ class _OutputClamp(Enum):
     NONE = "none"
     PRODUCED_ONLY = "produced_only"
     FULL = "full"
+
+
+@dataclass(frozen=True, slots=True)
+class _P1RoutingSample:
+    """Latest accepted P1 reading and its routing generation."""
+
+    power: int
+    observed_at: datetime
+    generation: int
+    fast_change: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,7 +620,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_spike_baseline = 0
         self.p1_spike_started: datetime | None = None
         self._p1_routing_lock = asyncio.Lock()
-        self._latest_p1: tuple[int, datetime] | None = None
+        self._latest_p1: _P1RoutingSample | None = None
+        self._p1_generation = 0
+        self._p1_consumed_generation = 0
+        self._p1_last_routed_power: int | None = None
+        self._p1_last_route_finished = datetime.min
+        self._p1_followup_task: asyncio.Task[None] | None = None
+        self._p1_followup_wakeup = asyncio.Event()
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -712,11 +729,28 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         return False
 
+    @staticmethod
+    def _p1_minimum_interval_elapsed(time: datetime, last_update: datetime) -> bool:
+        """Return whether the P1 minimum interval elapsed across datetime forms."""
+        if last_update == datetime.min:
+            return True
+        if (time.tzinfo is None) != (last_update.tzinfo is None):
+            time = time.replace(tzinfo=None)
+            last_update = last_update.replace(tzinfo=None)
+        return time - last_update >= SmartMode.P1_MIN_UPDATE
+
     def _should_fast_track_charge_lag_p1(self, p1: int, time: datetime) -> bool:
         """Return whether P1 should bypass the normal debounce for charge-lag correction."""
+        return (
+            self._charge_lag_fast_eligible(p1)
+            and self._p1_minimum_interval_elapsed(time, self.p1_charge_lag_last_update)
+            and self._p1_minimum_interval_elapsed(time, self._p1_last_route_finished)
+        )
+
+    def _charge_lag_fast_eligible(self, p1: int) -> bool:
+        """Return whether current routing state admits fast charge-lag correction."""
         if (
             abs(p1) <= P1_CHARGE_LAG_FAST_DEVIATION
-            or time - self.p1_charge_lag_last_update < SmartMode.P1_MIN_UPDATE
             or self.operation not in P1_CHARGE_LAG_FAST_OPERATIONS
             or not self._selected_primary_routing_enabled()
         ):
@@ -734,9 +768,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     def _should_fast_track_export_trim_p1(self, p1: int, time: datetime) -> bool:
         """Return whether strong export should bypass debounce to trim battery output."""
+        return (
+            self._export_trim_fast_eligible(p1)
+            and self._p1_minimum_interval_elapsed(time, self.p1_export_trim_last_update)
+            and self._p1_minimum_interval_elapsed(time, self._p1_last_route_finished)
+        )
+
+    def _export_trim_fast_eligible(self, p1: int) -> bool:
+        """Return whether current routing state admits fast export trimming."""
         if (
             p1 >= -P1_EXPORT_TRIM_FAST_DEVIATION
-            or time - self.p1_export_trim_last_update < SmartMode.P1_MIN_UPDATE
             or self.operation not in P1_EXPORT_TRIM_FAST_OPERATIONS
             or not self._selected_primary_routing_enabled()
         ):
@@ -1031,6 +1072,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Update operation: %s from: %s", operation, self.operation)
 
         self.operation = operation
+        if operation == ManagerMode.OFF:
+            self._cancel_p1_followup(clear_latest=True)
         if self.p1meterEvent is not None:
             if operation != ManagerMode.OFF and not any(d.online for d in self._managed_routing_devices()):
                 _LOGGER.warning("No devices online, not possible to start the operation")
@@ -1400,6 +1443,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
         _LOGGER.debug("Updating P1 meter to: %s", p1meter)
+        self._cancel_p1_followup(clear_latest=True)
         if self.p1meterEvent:
             self.p1meterEvent()
         if p1meter:
@@ -1484,6 +1528,135 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.p1_history.clear()
         self.p1_history.append(p1)
 
+    def _new_p1_sample(self, p1: int, time: datetime, *, fast_change: bool = False) -> _P1RoutingSample:
+        """Publish the newest accepted P1 reading."""
+        self._p1_generation += 1
+        sample = _P1RoutingSample(p1, time, self._p1_generation, fast_change)
+        self._latest_p1 = sample
+        self._p1_followup_wakeup.set()
+        return sample
+
+    def _p1_followup_active(self) -> bool:
+        """Return whether a trailing P1 worker is active."""
+        return self._p1_followup_task is not None and not self._p1_followup_task.done()
+
+    def _p1_followup_due(self, sample: _P1RoutingSample) -> datetime:
+        """Return the earliest existing routing deadline for a pending sample."""
+        route_floor = self._p1_last_route_finished + SmartMode.P1_MIN_UPDATE
+        fast_deadlines: list[datetime] = []
+        if self._charge_lag_fast_eligible(sample.power):
+            fast_deadlines.append(max(route_floor, self.p1_charge_lag_last_update + SmartMode.P1_MIN_UPDATE))
+        if self._export_trim_fast_eligible(sample.power):
+            fast_deadlines.append(max(route_floor, self.p1_export_trim_last_update + SmartMode.P1_MIN_UPDATE))
+        if fast_deadlines:
+            return min(fast_deadlines)
+        if sample.fast_change:
+            return max(route_floor, self.zero_fast)
+        return max(route_floor, self.zero_next)
+
+    def _consume_p1_sample(self, sample: _P1RoutingSample, *, routed: bool = False) -> None:
+        """Mark a P1 generation handled and optionally record its routed power."""
+        self._p1_consumed_generation = max(self._p1_consumed_generation, sample.generation)
+        if routed:
+            self._p1_last_routed_power = sample.power
+
+    def _p1_followup_needed(self, sample: _P1RoutingSample) -> bool:
+        """Return whether a pending generation needs another routing cycle."""
+        if sample.generation <= self._p1_consumed_generation:
+            return False
+        if (
+            self._p1_last_routed_power is not None
+            and abs(sample.power - self._p1_last_routed_power) <= SmartMode.POWER_TOLERANCE
+        ):
+            _LOGGER.debug(
+                "P1 follow-up consumed within tolerance: p1=%sW routed=%sW generation=%s",
+                sample.power,
+                self._p1_last_routed_power,
+                sample.generation,
+            )
+            self._consume_p1_sample(sample)
+            return False
+        return True
+
+    def _ensure_p1_followup(self) -> None:
+        """Ensure one worker will process the latest pending P1 sample."""
+        self._p1_followup_wakeup.set()
+        if self._p1_followup_active():
+            return
+        latest = self._latest_p1
+        if latest is None or latest.generation <= self._p1_consumed_generation:
+            return
+        self._p1_followup_task = self.hass.async_create_task(self._run_p1_followup())
+
+    def _cancel_p1_followup(self, *, clear_latest: bool = False) -> None:
+        """Cancel pending trailing P1 routing work."""
+        task = self._p1_followup_task
+        self._p1_followup_task = None
+        if task is not None and not task.done():
+            task.cancel()
+        self._p1_followup_wakeup.set()
+        if clear_latest:
+            self._latest_p1 = None
+            self._p1_consumed_generation = self._p1_generation
+
+    async def _wait_for_p1_followup(self, delay: float) -> None:
+        """Wait until a pending deadline or a newer sample asks for recalculation."""
+        self._p1_followup_wakeup.clear()
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._p1_followup_wakeup.wait(), timeout=delay)
+
+    async def _run_p1_followup(self) -> None:
+        """Route the latest pending P1 sample at its existing timing boundary."""
+        current_task = asyncio.current_task()
+        try:
+            while True:
+                if self._p1_routing_lock.locked():
+                    async with self._p1_routing_lock:
+                        pass
+                    continue
+
+                sample = self._latest_p1
+                if sample is None or not self._p1_followup_needed(sample):
+                    return
+
+                due = self._p1_followup_due(sample)
+                delay = (due - datetime.now()).total_seconds()
+                if delay > 0:
+                    _LOGGER.debug(
+                        "P1 follow-up waiting %.3fs: p1=%sW generation=%s",
+                        delay,
+                        sample.power,
+                        sample.generation,
+                    )
+                    await self._wait_for_p1_followup(delay)
+                    continue
+
+                async with self._p1_routing_lock:
+                    sample = self._latest_p1
+                    if sample is None or not self._p1_followup_needed(sample):
+                        continue
+                    if (self._p1_followup_due(sample) - datetime.now()).total_seconds() > 0:
+                        continue
+                    _LOGGER.debug(
+                        "P1 follow-up routing: p1=%sW generation=%s",
+                        sample.power,
+                        sample.generation,
+                    )
+                    await self._run_p1_routing_update(
+                        sample,
+                        force=False,
+                        raise_on_error=False,
+                        scheduled=True,
+                    )
+        except asyncio.CancelledError:
+            _LOGGER.debug("P1 follow-up cancelled")
+            raise
+        except Exception:
+            _LOGGER.exception("P1 follow-up failed")
+        finally:
+            if self._p1_followup_task is current_task:
+                self._p1_followup_task = None
+
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> bool:
         """Parse a P1 sensor update and return whether it triggered routing."""
         if (p1 := self._p1_value_from_event(event)) is None:
@@ -1512,61 +1685,84 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if not force and self._is_p1_spike_increase(p1, time):
             return False
 
-        self._latest_p1 = (p1, time)
-        if self._p1_routing_lock.locked() and not force:
+        coalesced = not force and (self._p1_routing_lock.locked() or self._p1_followup_active())
+        previous_sample = self._latest_p1
+        pending_fast_change = (
+            previous_sample is not None
+            and previous_sample.generation > self._p1_consumed_generation
+            and previous_sample.fast_change
+        )
+        fast_change = coalesced and (self._is_fast_p1_change(p1) or pending_fast_change)
+        sample = self._new_p1_sample(p1, time, fast_change=fast_change)
+        if coalesced:
             self._record_p1_history(p1)
-            _LOGGER.debug("P1 update coalesced while routing is active: p1=%sW", p1)
+            self._ensure_p1_followup()
+            _LOGGER.debug(
+                "P1 update coalesced for trailing route: p1=%sW generation=%s",
+                p1,
+                sample.generation,
+            )
             return False
 
         async with self._p1_routing_lock:
-            return await self._run_p1_routing_update(
-                p1,
-                time,
+            routed = await self._run_p1_routing_update(
+                sample,
                 force=force,
                 raise_on_error=raise_on_error,
             )
+        self._ensure_p1_followup()
+        return routed
 
     async def _run_p1_routing_update(
         self,
-        p1: int,
-        time: datetime,
+        sample: _P1RoutingSample,
         *,
         force: bool,
         raise_on_error: bool,
+        scheduled: bool = False,
     ) -> bool:
         """Run one serialized P1 routing cycle."""
-        should_route = force
+        p1 = sample.power
+        time = sample.observed_at
+        consumed_sample = sample
+        should_route = force or scheduled
         charge_lag_fast = False
         export_trim_fast = False
 
         if not force:
-            charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
-            export_trim_fast = self._should_fast_track_export_trim_p1(p1, time)
+            fast_time = datetime.now() if scheduled else time
+            charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, fast_time)
+            export_trim_fast = self._should_fast_track_export_trim_p1(p1, fast_time)
 
-            # Check for fast delay
-            if time < self.zero_fast and not charge_lag_fast and not export_trim_fast:
-                _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
-                self._record_p1_history(p1)
-                return False
+            if not scheduled:
+                # Check for fast delay
+                if time < self.zero_fast and not charge_lag_fast and not export_trim_fast:
+                    _LOGGER.debug("P1 update suppressed by fast-delay (zero_fast=%s)", self.zero_fast)
+                    self._record_p1_history(p1)
+                    self._consume_p1_sample(sample)
+                    return False
 
-            fast_change = self._is_fast_p1_change(p1)
-            self._record_p1_history(p1, reset=fast_change)
-            # Check minimal time between updates aka debounce.
-            should_route = fast_change or charge_lag_fast or export_trim_fast or time > self.zero_next
+                fast_change = self._is_fast_p1_change(p1)
+                self._record_p1_history(p1, reset=fast_change)
+                # Check minimal time between updates aka debounce.
+                should_route = fast_change or charge_lag_fast or export_trim_fast or time > self.zero_next
 
         if not should_route:
+            self._consume_p1_sample(sample)
             return False
 
+        routed = False
         try:
             self._reset_power_distribution_state()
             setpoint = await self._poll_devices_and_prepare_routing_state(p1)
-            latest_p1, latest_time = self._latest_p1 or (p1, time)
-            setpoint += latest_p1 - p1
-            p1 = latest_p1
-            time = latest_time
+            consumed_sample = self._latest_p1 or sample
+            setpoint += consumed_sample.power - p1
+            p1 = consumed_sample.power
+            time = consumed_sample.observed_at
             if not force:
-                charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, time)
-                export_trim_fast = self._should_fast_track_export_trim_p1(p1, time)
+                fast_time = datetime.now() if scheduled else time
+                charge_lag_fast = self._should_fast_track_charge_lag_p1(p1, fast_time)
+                export_trim_fast = self._should_fast_track_export_trim_p1(p1, fast_time)
             if export_trim_fast:
                 intent, routing, setpoint = self._prepare_power_routing(
                     p1,
@@ -1578,6 +1774,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 intent, routing, setpoint = self._prepare_power_routing(p1, time, setpoint)
             _LOGGER.info("P1 ======> p1:%s, setpoint:%sW stored:%sW", p1, setpoint, self.produced)
             await self._execute_power_routing(intent, time, routing)
+            routed = True
         except Exception as err:
             if raise_on_error:
                 raise
@@ -1586,6 +1783,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return False
         finally:
             time = datetime.now()
+            self._consume_p1_sample(consumed_sample, routed=routed)
+            self._p1_last_route_finished = time
             if charge_lag_fast:
                 self.p1_charge_lag_last_update = time
             if export_trim_fast:

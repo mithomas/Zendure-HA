@@ -8486,6 +8486,270 @@ class TestP1RoutingSerialization:
         assert poll_count == 1
         primary.power_charge.assert_awaited_once_with(-142)
 
+    async def test_concurrent_updates_during_execution_route_latest_after_send(self, hass):
+        """The latest P1 update during execution must receive a trailing route."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        manager.zero_fast = datetime.min
+        manager.zero_next = datetime.min
+        _mock_prepared_power_routing(manager, setpoint=100)
+        first_execute_started = asyncio.Event()
+        release_first_execute = asyncio.Event()
+        trailing_execute_finished = asyncio.Event()
+        execute_count = 0
+
+        async def delayed_execute(*_args: Any) -> None:
+            nonlocal execute_count
+            execute_count += 1
+            if execute_count == 1:
+                first_execute_started.set()
+                await release_first_execute.wait()
+            else:
+                trailing_execute_finished.set()
+
+        manager._execute_power_routing = AsyncMock(side_effect=delayed_execute)
+        first_time = datetime.now()
+
+        with (
+            patch.object(SmartMode, "TIMEFAST", 0),
+            patch.object(SmartMode, "TIMEZERO", 0),
+            patch.object(SmartMode, "P1_MIN_UPDATE", timedelta(0)),
+        ):
+            first_route = asyncio.create_task(
+                manager._route_p1_update(100, first_time, force=True),
+            )
+            await first_execute_started.wait()
+
+            assert await manager._route_p1_update(160, first_time + timedelta(milliseconds=100)) is False
+            assert await manager._route_p1_update(220, first_time + timedelta(milliseconds=200)) is False
+            assert execute_count == 1
+            assert manager._latest_p1 is not None
+            assert manager._latest_p1.fast_change is True
+
+            release_first_execute.set()
+            assert await first_route is True
+            await asyncio.wait_for(trailing_execute_finished.wait(), timeout=1)
+
+        assert execute_count == 2
+        assert _prepare_mock(manager).call_count == 2
+        assert _prepare_mock(manager).call_args_list[-1].args[0] == 220
+
+    async def test_execution_update_within_tolerance_needs_no_trailing_route(self, hass):
+        """A late reading within device tolerance must not trigger another poll."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        _mock_prepared_power_routing(manager, setpoint=100)
+        first_execute_started = asyncio.Event()
+        release_first_execute = asyncio.Event()
+
+        async def delayed_execute(*_args: Any) -> None:
+            first_execute_started.set()
+            await release_first_execute.wait()
+
+        manager._execute_power_routing = AsyncMock(side_effect=delayed_execute)
+        first_time = datetime.now()
+        first_route = asyncio.create_task(
+            manager._route_p1_update(100, first_time, force=True),
+        )
+        await first_execute_started.wait()
+
+        assert await manager._route_p1_update(105, first_time + timedelta(milliseconds=100)) is False
+        followup_task = manager._p1_followup_task
+        assert followup_task is not None
+
+        release_first_execute.set()
+        assert await first_route is True
+        await followup_task
+
+        assert _prepare_mock(manager).call_count == 1
+        assert manager._p1_consumed_generation == manager._p1_generation
+
+    async def test_trailing_route_waits_for_existing_timing_boundary(self, hass):
+        """Frequent readings must not start another poll before the routing deadline."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        _mock_prepared_power_routing(manager, setpoint=100)
+        first_execute_started = asyncio.Event()
+        release_first_execute = asyncio.Event()
+        followup_waiting = asyncio.Event()
+        release_followup = asyncio.Event()
+        trailing_execute_finished = asyncio.Event()
+        execute_count = 0
+
+        async def delayed_execute(*_args: Any) -> None:
+            nonlocal execute_count
+            execute_count += 1
+            if execute_count == 1:
+                first_execute_started.set()
+                await release_first_execute.wait()
+            else:
+                trailing_execute_finished.set()
+
+        async def controlled_followup_wait(delay: float) -> None:
+            assert delay > 0
+            followup_waiting.set()
+            await release_followup.wait()
+            manager._p1_last_route_finished = datetime.min
+            manager.zero_fast = datetime.min
+            manager.zero_next = datetime.min
+
+        manager._execute_power_routing = AsyncMock(side_effect=delayed_execute)
+        manager._wait_for_p1_followup = AsyncMock(side_effect=controlled_followup_wait)
+        first_time = datetime.now()
+
+        first_route = asyncio.create_task(
+            manager._route_p1_update(100, first_time, force=True),
+        )
+        await first_execute_started.wait()
+        for offset, p1 in enumerate((120, 140, 180), start=1):
+            assert (
+                await manager._route_p1_update(
+                    p1,
+                    first_time + timedelta(milliseconds=offset * 10),
+                )
+                is False
+            )
+
+        release_first_execute.set()
+        assert await first_route is True
+        await followup_waiting.wait()
+        assert execute_count == 1
+        release_followup.set()
+        await asyncio.wait_for(trailing_execute_finished.wait(), timeout=1)
+
+        assert execute_count == 2
+        assert _prepare_mock(manager).call_args_list[-1].args[0] == 180
+
+    async def test_update_during_trailing_execution_gets_next_rate_limited_pass(self, hass):
+        """A worker must send each pass before considering another pending value."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        _mock_prepared_power_routing(manager, setpoint=100)
+        first_execute_started = asyncio.Event()
+        second_execute_started = asyncio.Event()
+        release_first_execute = asyncio.Event()
+        release_second_execute = asyncio.Event()
+        third_execute_finished = asyncio.Event()
+        execute_count = 0
+
+        async def delayed_execute(*_args: Any) -> None:
+            nonlocal execute_count
+            execute_count += 1
+            if execute_count == 1:
+                first_execute_started.set()
+                await release_first_execute.wait()
+            elif execute_count == 2:
+                second_execute_started.set()
+                await release_second_execute.wait()
+            else:
+                third_execute_finished.set()
+
+        manager._execute_power_routing = AsyncMock(side_effect=delayed_execute)
+        first_time = datetime.now()
+
+        with (
+            patch.object(SmartMode, "TIMEFAST", 0),
+            patch.object(SmartMode, "TIMEZERO", 0),
+            patch.object(SmartMode, "P1_MIN_UPDATE", timedelta(0)),
+        ):
+            first_route = asyncio.create_task(
+                manager._route_p1_update(100, first_time, force=True),
+            )
+            await first_execute_started.wait()
+            assert await manager._route_p1_update(200, first_time + timedelta(milliseconds=100)) is False
+            followup_task = manager._p1_followup_task
+            assert followup_task is not None
+
+            release_first_execute.set()
+            assert await first_route is True
+            await second_execute_started.wait()
+            assert execute_count == 2
+
+            assert await manager._route_p1_update(300, first_time + timedelta(milliseconds=200)) is False
+            assert execute_count == 2
+            release_second_execute.set()
+            await asyncio.wait_for(third_execute_finished.wait(), timeout=1)
+            await followup_task
+
+        assert execute_count == 3
+        assert [args.args[0] for args in _prepare_mock(manager).call_args_list] == [100, 200, 300]
+
+    async def test_forced_route_consumes_sleeping_trailing_update(self, hass):
+        """A forced route must make a scheduled trailing route redundant."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        _mock_prepared_power_routing(manager, setpoint=100)
+        first_execute_started = asyncio.Event()
+        release_first_execute = asyncio.Event()
+        execute_count = 0
+
+        async def delayed_execute(*_args: Any) -> None:
+            nonlocal execute_count
+            execute_count += 1
+            if execute_count == 1:
+                first_execute_started.set()
+                await release_first_execute.wait()
+
+        manager._execute_power_routing = AsyncMock(side_effect=delayed_execute)
+        first_time = datetime.now()
+        first_route = asyncio.create_task(
+            manager._route_p1_update(100, first_time, force=True),
+        )
+        await first_execute_started.wait()
+        assert await manager._route_p1_update(200, first_time + timedelta(milliseconds=100)) is False
+        followup_task = manager._p1_followup_task
+        assert followup_task is not None
+
+        release_first_execute.set()
+        assert await first_route is True
+        assert await manager._route_p1_update(250, first_time + timedelta(milliseconds=200), force=True) is True
+        await followup_task
+
+        assert execute_count == 2
+        assert [args.args[0] for args in _prepare_mock(manager).call_args_list] == [100, 250]
+
+    async def test_removing_p1_meter_cancels_pending_trailing_route(self, hass):
+        """Removing the meter must discard a trailing reading and stop its worker."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        _mock_prepared_power_routing(manager, setpoint=100)
+        first_execute_started = asyncio.Event()
+        release_first_execute = asyncio.Event()
+
+        async def delayed_execute(*_args: Any) -> None:
+            first_execute_started.set()
+            await release_first_execute.wait()
+
+        manager._execute_power_routing = AsyncMock(side_effect=delayed_execute)
+        first_time = datetime.now()
+        first_route = asyncio.create_task(
+            manager._route_p1_update(100, first_time, force=True),
+        )
+        await first_execute_started.wait()
+        assert await manager._route_p1_update(200, first_time + timedelta(milliseconds=100)) is False
+        followup_task = manager._p1_followup_task
+        assert followup_task is not None
+
+        manager.update_p1meter(None)
+        with pytest.raises(asyncio.CancelledError):
+            await followup_task
+
+        release_first_execute.set()
+        assert await first_route is True
+        assert manager._p1_followup_task is None
+        assert manager._latest_p1 is None
+        assert _prepare_mock(manager).call_count == 1
+
+    async def test_turning_manager_off_cancels_pending_trailing_worker(self, hass):
+        """Manager off must cancel pending work even without a registered P1 meter."""
+        manager = make_manager(hass, operation=ManagerMode.MATCHING)
+        never_finished = asyncio.Event()
+        followup_task = hass.async_create_task(never_finished.wait())
+        manager._p1_followup_task = followup_task
+        operation = Mock()
+        operation.value = ManagerMode.OFF.value
+
+        await manager.update_operation(operation, ManagerMode.OFF.value)
+
+        with pytest.raises(asyncio.CancelledError):
+            await followup_task
+        assert manager.operation is ManagerMode.OFF
+        assert manager._p1_followup_task is None
+
     async def test_forced_update_waits_for_active_route(self, hass):
         """A forced update must run after, rather than overlap, an active route."""
         primary = make_device(hass, device_id="serialized-forced-primary", level=50)
@@ -8619,6 +8883,9 @@ class TestP1SpikeFilter:
         _prepare_mock(manager).assert_not_called()
         assert list(manager.p1_history) == [0, 0]
         assert manager.p1_spike_started is not None
+        assert manager._p1_generation == 0
+        assert manager._latest_p1 is None
+        assert manager._p1_followup_task is None
 
     async def test_fast_change_routes_sustained_spike_after_duration(self, hass):
         manager = make_manager(hass)
@@ -8974,6 +9241,38 @@ class TestP1ChargeLagFastPath:
         )
         self._block_normal_p1_debounce(manager)
         manager.p1_charge_lag_last_update = datetime.now()
+        _mock_prepared_power_routing(manager)
+
+        await manager._p1_changed(make_p1_event(150))
+
+        _prepare_mock(manager).assert_not_called()
+
+    async def test_charge_lag_fast_path_respects_last_route_interval(self, hass):
+        """A fast correction must not immediately follow another routed command."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-fast-charge-last-route",
+            device_name="sf800 pro fast charge last route",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            ac_mode=AcMode.INPUT,
+            input_limit=300,
+            output_limit=0,
+            home_input=300,
+            battery_input=300,
+        )
+        device.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
+            charge_devices=(device,),
+        )
+        self._block_normal_p1_debounce(manager)
+        manager.p1_charge_lag_last_update = datetime.min
+        manager._p1_last_route_finished = datetime.now()
         _mock_prepared_power_routing(manager)
 
         await manager._p1_changed(make_p1_event(150))
