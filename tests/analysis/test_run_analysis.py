@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from analysis.run_analysis import (
+    POWER_THRESHOLD_W,
     analyze_rows,
     find_sustained_periods,
     parse_float,
@@ -121,3 +122,34 @@ def test_overcorrection_cycle_uses_only_managed_normal_input_samples() -> None:
     assert len(result["overcorrection_cycles"]) == 1
     assert result["overcorrection_cycles"][0]["start"] == START
     assert result["overcorrection_cycles"][0]["end"] == START + timedelta(seconds=2)
+
+
+def test_default_analysis_threshold_includes_30_watt_reversals() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, sml_power=-30),
+            _raw_row(1, sml_power=30),
+            _raw_row(2, sml_power=-30),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert POWER_THRESHOLD_W == 30
+    assert len(result["overcorrection_cycles"]) == 1
+    assert result["grid_import_while_charging_kwh"] == pytest.approx(30 / 3_600_000)
+
+
+def test_default_analysis_threshold_excludes_29_watt_reversals() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, sml_power=-29),
+            _raw_row(1, sml_power=29),
+            _raw_row(2, sml_power=-29),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["overcorrection_cycles"] == []
+    assert result["grid_import_while_charging_kwh"] == 0

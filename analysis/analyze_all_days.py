@@ -119,8 +119,14 @@ def analyze_file(
         key=lambda period: period["duration"],
         reverse=True,
     )
-    _print_periods("Top sustained high import periods (>= 100 W for >= 1m):", import_periods)
-    _print_periods("Top sustained high export periods (<= -100 W for >= 1m):", export_periods)
+    _print_periods(
+        f"Top sustained high import periods (>= {POWER_THRESHOLD_W} W for >= 1m):",
+        import_periods,
+    )
+    _print_periods(
+        f"Top sustained high export periods (<= -{POWER_THRESHOLD_W} W for >= 1m):",
+        export_periods,
+    )
 
     print("\nTop grid-power swings within a 2-minute window:")
     swings = find_large_swings(rows, limit=3)

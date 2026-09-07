@@ -13,7 +13,7 @@ from typing import Any
 DEVICE_IDS = ("wz_balkon", "k_balkon")
 UNKNOWN_VALUES = {"", "none", "null", "unknown", "unavailable"}
 MAX_INTEGRATION_GAP_SECONDS = 5
-POWER_THRESHOLD_W = 100
+POWER_THRESHOLD_W = 30
 
 ParsedRow = dict[str, Any]
 AnalysisResult = dict[str, Any]
