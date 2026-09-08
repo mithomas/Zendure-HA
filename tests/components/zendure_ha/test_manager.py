@@ -9660,6 +9660,218 @@ class TestZeroFastRecovery:
 class TestNearFullChargeTaper:
     """Manager routing tests for near-full (SOCNEARLYFULL) charge taper behavior."""
 
+    async def test_tapered_secondary_deducts_own_pv_from_primary_overflow_capacity(self, hass):
+        """A secondary may absorb primary taper overflow only within its remaining AC headroom."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="primary-taper-overflow-source",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=300,
+            max_cell_voltage=3.54,
+        )
+        primary.solarInput.update_value(300)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="secondary-taper-overflow-target",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=100,
+            max_cell_voltage=3.54,
+        )
+        secondary.solarInput.update_value(100)
+        FuseGroup("group-tapered-secondary-overflow", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -400, datetime.now())
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        assert secondary.state is DeviceState.SOCNEARLYFULL
+        primary.power_discharge.assert_awaited_once_with(150)
+        secondary.power_charge.assert_awaited_once_with(-50)
+
+    async def test_standard_weighted_input_respects_taper_headroom_after_local_pv(self, hass):
+        """Weighted input without a selected primary must honor the combined PV and AC taper."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="standard-tapered-input",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=200,
+            max_cell_voltage=3.54,
+        )
+        device.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            charge_time=datetime.min,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -200, datetime.now())
+
+        assert device.state is DeviceState.SOCNEARLYFULL
+        device.power_charge.assert_awaited_once_with(-50)
+
+    async def test_weighted_input_routes_taper_remainder_to_an_eligible_device(self, hass):
+        """Power rejected by a taper cap should remain available to another charge device."""
+        tapered = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="weighted-tapered-input",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=50,
+            home_input=50,
+            battery_input=150,
+            max_cell_voltage=3.54,
+        )
+        tapered.solarInput.update_value(100)
+        available = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="weighted-available-input",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=100,
+        )
+        FuseGroup("group-weighted-taper-remainder", 800, -1200, [tapered, available])
+        manager = make_manager(
+            hass,
+            devices=(tapered, available),
+            operation=ManagerMode.MATCHING,
+            charge_time=datetime.min,
+        )
+        tapered.power_get = AsyncMock(return_value=True)
+        available.power_get = AsyncMock(return_value=True)
+        tapered.power_charge = AsyncMock(side_effect=lambda power: power)
+        available.power_charge = AsyncMock(side_effect=lambda power: power)
+        tapered.power_discharge = AsyncMock(side_effect=lambda power: power)
+        available.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -350, datetime.now())
+
+        tapered.power_charge.assert_awaited_once_with(-50)
+        available.power_charge.assert_awaited_once_with(-550)
+
+    async def test_standard_weighted_input_stops_at_zero_taper_headroom(self, hass):
+        """Local PV filling the taper allowance must leave no capacity for AC input."""
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="standard-zero-taper-headroom",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=250,
+            max_cell_voltage=3.54,
+        )
+        device.solarInput.update_value(150)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            charge_time=datetime.min,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -100, datetime.now())
+
+        assert device.state is DeviceState.SOCNEARLYFULL
+        device.power_charge.assert_awaited_once_with(0)
+
+    async def test_idle_tapered_device_is_not_started_beyond_small_headroom(self, hass):
+        """Idle startup must skip a tapering device whose AC headroom is below startup power."""
+        active = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="active-normal-input",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=100,
+        )
+        tapered_idle = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="idle-small-taper-headroom",
+            product_model="SolarFlow 800 Pro",
+            level=40,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            max_cell_voltage=3.60,
+        )
+        available_idle = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="idle-available-headroom",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+        )
+        manager = make_manager(
+            hass,
+            devices=(active, tapered_idle, available_idle),
+            operation=ManagerMode.MATCHING,
+            charge_time=datetime.min,
+        )
+        active.power_get = AsyncMock(return_value=True)
+        tapered_idle.power_get = AsyncMock(return_value=True)
+        available_idle.power_get = AsyncMock(return_value=True)
+        active.power_charge = AsyncMock(side_effect=lambda power: power)
+        tapered_idle.power_charge = AsyncMock(side_effect=lambda power: power)
+        available_idle.power_charge = AsyncMock(side_effect=lambda power: power)
+        active.power_discharge = AsyncMock(side_effect=lambda power: power)
+        tapered_idle.power_discharge = AsyncMock(side_effect=lambda power: power)
+        available_idle.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -1000, datetime.now())
+
+        assert tapered_idle.state is DeviceState.SOCNEARLYFULL
+        tapered_idle.power_charge.assert_not_awaited()
+        available_idle.power_charge.assert_awaited_once_with(-SmartMode.POWER_START)
+
     async def test_near_full_input_accounts_for_local_pv_before_applying_taper(self, hass):
         """A tapered input target should cover only the battery headroom left after local PV."""
         primary = make_device(
