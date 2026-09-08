@@ -7365,10 +7365,10 @@ class TestSmartMatchingPrimaryAware:
 
     async def test_charges_a_99_percent_primary_in_output_mode_before_the_secondary(self, hass):
         """
-        A selected primary at 99% should still receive charge priority even if it was previously in AC output mode.
+        A selected primary at 99% should absorb local PV up to its taper before the secondary.
 
-        At 99% the taper cap is 200W, so the primary absorbs up to 200W and the remaining surplus
-        overflows to the secondary via normal routing.
+        At 99% the taper cap is 200W. With 300W local PV and no household demand, the primary must
+        keep a 100W output limit so its battery receives 200W, while the secondary absorbs that 100W.
         """
         primary = make_device(
             hass,
@@ -7418,8 +7418,8 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, -300, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
-        primary.power_discharge.assert_not_awaited()
-        primary.power_charge.assert_awaited_once_with(-200)
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(100)
         secondary.power_charge.assert_awaited_once_with(-100)
 
     async def test_primary_absorbs_unexplained_surplus_before_secondary_switches_to_input(self, hass):
@@ -7587,9 +7587,9 @@ class TestSmartMatchingPrimaryAware:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
-        primary.power_charge.assert_awaited_once_with(-200)
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(300)
         secondary.power_charge.assert_awaited_once_with(-100)
-        primary.power_discharge.assert_not_awaited()
         secondary.power_discharge.assert_not_awaited()
 
     async def test_1232_near_full_primary_routes_export_overflow_to_secondary(self, hass):
@@ -8034,8 +8034,8 @@ class TestSmartMatchingPrimaryAware:
         primary.power_bypass.assert_not_awaited()
         if charge_time == datetime.min:
             secondary.power_discharge.assert_not_awaited()
-            primary.power_charge.assert_awaited_once_with(-100)
-            primary.power_discharge.assert_not_awaited()
+            primary.power_charge.assert_not_awaited()
+            primary.power_discharge.assert_awaited_once_with(397)
             secondary.power_charge.assert_awaited_once_with(-43)
         else:
             secondary.power_discharge.assert_awaited_once_with(0)
@@ -9647,6 +9647,195 @@ class TestZeroFastRecovery:
 
 class TestNearFullChargeTaper:
     """Manager routing tests for near-full (SOCNEARLYFULL) charge taper behavior."""
+
+    async def test_near_full_input_accounts_for_local_pv_before_applying_taper(self, hass):
+        """A tapered input target should cover only the battery headroom left after local PV."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-nearlyfull-local-pv-input",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=200,
+            home_input=200,
+            battery_input=257,
+        )
+        primary.solarInput.update_value(57)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-active-input",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=100,
+        )
+        FuseGroup("group-nearlyfull-local-pv-input", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        primary.power_charge.assert_awaited_once_with(-143)
+        primary.power_discharge.assert_not_awaited()
+        secondary.power_charge.assert_awaited_once_with(-157)
+
+    async def test_near_full_input_stays_below_available_taper_headroom(self, hass):
+        """A small charge allocation should not be raised to the available taper headroom."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-nearlyfull-limited-input",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=60,
+            home_input=60,
+            battery_input=117,
+        )
+        primary.solarInput.update_value(57)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 30, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(-30)
+        primary.power_discharge.assert_not_awaited()
+
+    async def test_near_full_input_stops_when_local_pv_fills_taper(self, hass):
+        """AC input should stop when local PV alone fills the battery taper allowance."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-nearlyfull-zero-input-headroom",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=300,
+        )
+        primary.solarInput.update_value(200)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_awaited_once_with(0)
+        primary.power_discharge.assert_not_awaited()
+
+    async def test_near_full_input_switches_to_output_when_local_pv_exceeds_taper(self, hass):
+        """PV above the taper should become home output rather than additional battery charge."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-nearlyfull-pv-output",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=200,
+            home_input=200,
+            battery_input=457,
+        )
+        primary.solarInput.update_value(257)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-pv-output-peer",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=100,
+        )
+        FuseGroup("group-nearlyfull-pv-output", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(57)
+        secondary.power_charge.assert_awaited_once_with(-357)
+
+    async def test_household_demand_raises_near_full_output_above_taper_floor(self, hass):
+        """Household demand should raise output above the minimum required by the taper."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-nearlyfull-demand-output",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            output_limit=250,
+            home_output=250,
+            battery_input=50,
+        )
+        primary.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(250)
 
     async def test_near_full_sf800_pro_output_accounts_for_local_pv_taper(self, hass):
         """Local PV already flowing into the battery should raise the output target to honor taper."""

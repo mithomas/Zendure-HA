@@ -235,6 +235,8 @@ class _PowerRoutingDevice:
     produced_home: int
     # Minimum home output required to keep local PV battery charge within taper.
     taper_output_floor: int
+    # Maximum AC input that keeps local PV plus AC battery charge within taper.
+    taper_input_capacity: int | None
     # Current device input that should be reduced before switching direction.
     charge_floor: int
     # Local production left for this device's own battery after current home output.
@@ -1177,24 +1179,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return min(limit, self._primary_discharge_limit(device))
         return min(limit, max(0, device.fuseGrp.discharge_limit(device)))
 
-    def _current_taper_output_floor(self, device: ZendureDevice, *, primary_aware: bool = False) -> int:
-        """Return local-PV home output needed to keep battery charge within taper."""
-        if device.discharge_limit <= 0:
-            return 0
-
-        taper = device.taper_charge_limit
-        if taper is None:
-            return 0
-
-        local_production = max(0, -device.pwr_produced)
-        floor = max(0, local_production - taper)
-        if floor == 0:
-            return 0
-
-        if primary_aware:
-            return min(floor, self._primary_discharge_limit(device))
-        return min(floor, max(0, device.fuseGrp.discharge_limit(device)))
-
     def _primary_charge_limit(self, device: ZendureDevice) -> int:
         """Return the maximum charge power for the primary within its fusegroup."""
         other_input = sum(max(0, other.homeInput.asInt) for other in device.fuseGrp.devices if other is not device)
@@ -2063,6 +2047,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             produced_limit = self._current_produced_output_limit(device, primary_aware=primary_aware)
             home_output = max(0, device.homeOutput.asInt)
             produced_home = min(home_output, produced_limit)
+            taper = device.taper_charge_limit
+            local_production = max(0, -device.pwr_produced)
+            taper_balance = None if taper is None else taper - local_production
+            taper_output_floor = 0
+            if taper_balance is not None and taper_balance < 0 and device.discharge_limit > 0:
+                output_capacity = (
+                    self._primary_discharge_limit(device)
+                    if primary_aware
+                    else max(0, device.fuseGrp.discharge_limit(device))
+                )
+                taper_output_floor = min(-taper_balance, output_capacity)
             bypass_passthrough = 0
             if (
                 getattr(device, "byPass", None) is not None
@@ -2078,7 +2073,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 discharging=device in self.discharge,
                 produced_limit=produced_limit,
                 produced_home=produced_home,
-                taper_output_floor=self._current_taper_output_floor(device, primary_aware=primary_aware),
+                taper_output_floor=taper_output_floor,
+                taper_input_capacity=None if taper_balance is None else max(0, taper_balance),
                 charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
                 charge_surplus=device.current_charge_surplus_limit(),
                 bypass_passthrough=bypass_passthrough,
@@ -2176,10 +2172,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and selected_primary.state == DeviceState.SOCNEARLYFULL
         )
         selected_primary_near_full_device = selected_primary if selected_primary_near_full_output else None
-        if (
-            selected_primary_near_full_device is not None
-            and selected_primary_near_full_device.acMode.value == AcMode.OUTPUT
-        ):
+        if selected_primary_near_full_device is not None:
             extra_surplus = max(0, extra_surplus - routing.charge_surplus(selected_primary_near_full_device))
         charge_transition_would_zero = self.charge_time > time
         protects_selected_primary_floor = (
@@ -2789,18 +2782,29 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and (input_source_available or allow_blocked_primary_taper_overflow_charge)
         )
         primary_charge_target = 0
+        primary_taper_input_target: int | None = None
+        primary_taper_output_target: int | None = None
         if (
             self.operation == ManagerMode.MATCHING
             and primary is not None
             and selected_primary is primary
-            and (primary.acMode.value != AcMode.INPUT or selected_primary_taper_charge_source)
+            and primary.acMode.value != AcMode.INPUT
             and input_switch_allowed
             and (output_secondary_input_candidates or selected_primary_taper_charge_source)
             and setpoint < 0
             and not positive_demand_charge_lag
         ):
-            if selected_primary_taper_charge_source and local_charge.selected_primary_local_surplus > 0:
-                primary_charge_target = -min(-setpoint, local_charge.selected_primary_local_surplus)
+            primary_route = routing.route(primary)
+            if primary_route.taper_input_capacity is not None:
+                current_output_target = active_discharge_targets.get(primary, 0)
+                output_reduction_capacity = max(0, current_output_target - primary_route.taper_output_floor)
+                ac_input_capacity = min(primary_route.taper_input_capacity, -self._primary_charge_limit(primary))
+                primary_absorption_capacity = output_reduction_capacity + ac_input_capacity
+                primary_charge_target = -min(-setpoint, primary_absorption_capacity)
+
+                output_reduction = min(-primary_charge_target, output_reduction_capacity)
+                primary_taper_output_target = current_output_target - output_reduction
+                primary_taper_input_target = -(max(0, -primary_charge_target - output_reduction))
             else:
                 primary_charge_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
             setpoint -= primary_charge_target
@@ -2947,9 +2951,22 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             await primary.power_charge(0)
         elif primary is not None:
             if primary_charge_target != 0:
-                await primary.power_charge(primary_charge_target)
+                if primary_taper_input_target is not None and primary_taper_input_target < 0:
+                    await primary.power_charge(primary_taper_input_target)
+                elif primary_taper_output_target is not None:
+                    await self._command_home_output(
+                        primary,
+                        primary_taper_output_target,
+                        allow_bypass_zero=True,
+                    )
+                else:
+                    await primary.power_charge(primary_charge_target)
             elif setpoint < 0:
-                primary_target = min(0, max(setpoint, self._primary_charge_limit(primary)))
+                primary_input_limit = self._primary_charge_limit(primary)
+                primary_route = routing.route(primary)
+                if self.operation == ManagerMode.MATCHING and primary_route.taper_input_capacity is not None:
+                    primary_input_limit = max(primary_input_limit, -primary_route.taper_input_capacity)
+                primary_target = min(0, max(setpoint, primary_input_limit))
                 if primary_target != 0:
                     setpoint -= await primary.power_charge(primary_target)
                 elif (
@@ -2958,6 +2975,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     and not positive_demand_charge_lag
                 ):
                     await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
+                elif (
+                    self.operation == ManagerMode.MATCHING
+                    and primary_route.taper_input_capacity == 0
+                    and primary in self.charge
+                ):
+                    await primary.power_charge(0)
             elif (
                 not strict_output_stop
                 and active_discharge_targets.get(primary, 0) > 0
