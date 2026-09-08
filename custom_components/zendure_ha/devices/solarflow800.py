@@ -11,9 +11,9 @@ from custom_components.zendure_ha.sensor import ZendureRestoreSensor, ZendureSen
 _LOGGER = logging.getLogger(__name__)
 
 SF800_PRO_TAPER_LIMITS = (
-    (1, 200),
-    (2, 250),
-    (3, 300),
+    (3.60, 20),
+    (3.55, 80),
+    (3.54, 150),
 )
 
 
@@ -54,12 +54,17 @@ class SolarFlow800Pro(ZendureZenSDKWithLocalMQTT):
 
     @property
     def taper_charge_limit(self) -> int | None:
-        """Return the charge rate cap in watts when near-full, or None below the taper range."""
-        distance_to_target = self.socSet.asNumber - self.electricLevel.asNumber
-        if distance_to_target <= 0:
+        """Return the charge rate cap in watts derived from maximum cell voltage."""
+        if len(self.batteries) != 1:
             return None
-        for distance, limit in SF800_PRO_TAPER_LIMITS:
-            if distance_to_target <= distance:
+
+        battery = next(iter(self.batteries.values()))
+        max_voltage = battery.entities.get("maxVol")
+        if not isinstance(max_voltage, ZendureSensor):
+            return None
+
+        for voltage, limit in SF800_PRO_TAPER_LIMITS:
+            if max_voltage.asNumber >= voltage:
                 return limit
         return None
 

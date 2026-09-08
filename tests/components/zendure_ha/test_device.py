@@ -13,7 +13,7 @@ from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.sensor import ZendureSensor
 
-from .common import make_device
+from .common import add_battery_max_cell_voltage, make_device
 
 TARGET_SOC_AFTER_UPDATE = 90
 MIN_SOC_AFTER_UPDATE = 8
@@ -212,25 +212,23 @@ def test_reports_full_bypass_pv_is_device_owned(hass, state, bypass_on, has_bypa
 
 
 @pytest.mark.parametrize(
-    ("level", "soc_set", "max_expected_charge"),
+    ("max_cell_voltage", "max_expected_charge"),
     [
-        (97, 100, 300),
-        (98, 100, 250),
-        (99, 100, 200),
-        (77, 80, 300),
-        (78, 80, 250),
-        (79, 80, 200),
+        (3.54, 150),
+        (3.55, 80),
+        (3.60, 20),
     ],
 )
-def test_current_charge_surplus_limit_respects_taper(hass, level, soc_set, max_expected_charge):
+def test_current_charge_surplus_limit_respects_taper(hass, max_cell_voltage, max_expected_charge):
     """Current charge surplus should be capped at the device taper limit."""
     device = make_device(
         hass,
         device_cls=SolarFlow800Pro,
         device_id="sf800-pro-surplus",
         product_model="SolarFlow 800 Pro",
-        level=level,
-        soc_set=soc_set,
+        level=50,
+        soc_set=100,
+        max_cell_voltage=max_cell_voltage,
     )
     device.pwr_produced = -500
 
@@ -967,26 +965,18 @@ class TestHttpConnectionClose:
 
 
 @pytest.mark.parametrize(
-    ("level", "soc_set", "expected_taper"),
+    ("level", "soc_set"),
     [
-        (93, 100, None),
-        (95, 100, None),
-        (96, 100, None),
-        (97, 100, 300),
-        (98, 100, 250),
-        (99, 100, 200),
-        (100, 100, None),
-        (73, 80, None),
-        (75, 80, None),
-        (76, 80, None),
-        (77, 80, 300),
-        (78, 80, 250),
-        (79, 80, 200),
-        (80, 80, None),
+        (50, 100),
+        (97, 100),
+        (99, 100),
+        (100, 100),
+        (79, 80),
+        (80, 80),
     ],
 )
-def test_sf800_pro_taper_charge_limit_by_soc_set_offset(hass, level, soc_set, expected_taper):
-    """SF800 Pro should return the correct taper limit by distance below socSet."""
+def test_sf800_pro_taper_charge_limit_is_independent_of_soc_target(hass, level, soc_set):
+    """SF800 Pro should use maximum cell voltage regardless of SoC target distance."""
     device = make_device(
         hass,
         device_cls=SolarFlow800Pro,
@@ -994,63 +984,141 @@ def test_sf800_pro_taper_charge_limit_by_soc_set_offset(hass, level, soc_set, ex
         product_model="SolarFlow 800 Pro",
         level=level,
         soc_set=soc_set,
+        max_cell_voltage=3.55,
+    )
+
+    assert device.taper_charge_limit == 80
+
+
+@pytest.mark.parametrize(
+    ("max_cell_voltage", "expected_taper"),
+    [
+        (3.53, None),
+        (3.54, 150),
+        (3.55, 80),
+        (3.60, 20),
+        (3.61, 20),
+    ],
+)
+def test_sf800_pro_taper_charge_limit_by_max_cell_voltage(hass, max_cell_voltage, expected_taper):
+    """SF800 Pro should derive its taper limit from maximum cell voltage."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-voltage-taper",
+        product_model="SolarFlow 800 Pro",
+        level=50,
+        soc_set=100,
+        max_cell_voltage=max_cell_voltage,
     )
 
     assert device.taper_charge_limit == expected_taper
 
 
+def test_sf800_pro_has_no_soc_taper_without_max_cell_voltage(hass):
+    """SF800 Pro should not taper from SoC when maximum cell voltage is unavailable."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-no-voltage-taper",
+        product_model="SolarFlow 800 Pro",
+        level=99,
+        soc_set=100,
+    )
+
+    assert device.taper_charge_limit is None
+    assert device.effective_charge_limit == device.charge_limit
+
+
+@pytest.mark.parametrize("max_cell_voltage", [0, "unavailable"])
+def test_sf800_pro_ignores_invalid_max_cell_voltage(hass, max_cell_voltage):
+    """SF800 Pro should not taper from a non-usable maximum cell voltage."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-invalid-voltage-taper",
+        product_model="SolarFlow 800 Pro",
+        level=99,
+        soc_set=100,
+    )
+    add_battery_max_cell_voltage(hass, device, max_cell_voltage)
+
+    assert device.taper_charge_limit is None
+
+
+def test_sf800_pro_does_not_apply_single_pack_taper_to_multiple_batteries(hass):
+    """SF800 Pro should not apply the single-pack voltage policy to multiple batteries."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-multiple-battery-taper",
+        product_model="SolarFlow 800 Pro",
+        max_cell_voltage=3.60,
+    )
+    add_battery_max_cell_voltage(hass, device, 3.60, battery_id="C12E345679")
+
+    assert device.taper_charge_limit is None
+
+
+def test_sf800_pro_voltage_taper_has_no_hysteresis(hass):
+    """SF800 Pro should immediately follow a lower maximum-cell-voltage tier."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-stateless-voltage-taper",
+        product_model="SolarFlow 800 Pro",
+        max_cell_voltage=3.60,
+    )
+    max_voltage = cast("ZendureSensor", next(iter(device.batteries.values())).entities["maxVol"])
+
+    assert device.taper_charge_limit == 20
+
+    max_voltage.update_value(354)
+
+    assert device.taper_charge_limit == 150
+
+
 @pytest.mark.parametrize(
-    ("level", "soc_set", "expected_effective"),
+    ("max_cell_voltage", "expected_effective"),
     [
-        (90, 100, -1000),
-        (95, 100, -1000),
-        (96, 100, -1000),
-        (97, 100, -300),
-        (98, 100, -250),
-        (99, 100, -200),
-        (73, 80, -1000),
-        (75, 80, -1000),
-        (76, 80, -1000),
-        (77, 80, -300),
-        (78, 80, -250),
-        (79, 80, -200),
+        (None, -1000),
+        (3.53, -1000),
+        (3.54, -150),
+        (3.55, -80),
+        (3.60, -20),
     ],
 )
-def test_sf800_pro_effective_charge_limit_reflects_relative_taper(hass, level, soc_set, expected_effective):
+def test_sf800_pro_effective_charge_limit_reflects_voltage_taper(hass, max_cell_voltage, expected_effective):
     """effective_charge_limit should match the taper cap in watts (negative) or the device limit."""
     device = make_device(
         hass,
         device_cls=SolarFlow800Pro,
         device_id="sf800-pro-effective",
         product_model="SolarFlow 800 Pro",
-        level=level,
-        soc_set=soc_set,
+        level=50,
+        soc_set=100,
+        max_cell_voltage=max_cell_voltage,
     )
 
     assert device.effective_charge_limit == expected_effective
 
 
 @pytest.mark.parametrize(
-    ("level", "soc_set", "expected_state"),
+    ("level", "soc_set", "max_cell_voltage", "expected_state"),
     [
-        (90, 100, DeviceState.INACTIVE),
-        (95, 100, DeviceState.INACTIVE),
-        (96, 100, DeviceState.INACTIVE),
-        (97, 100, DeviceState.SOCNEARLYFULL),
-        (98, 100, DeviceState.SOCNEARLYFULL),
-        (100, 100, DeviceState.SOCFULL),
-        (73, 80, DeviceState.INACTIVE),
-        (75, 80, DeviceState.INACTIVE),
-        (76, 80, DeviceState.INACTIVE),
-        (77, 80, DeviceState.SOCNEARLYFULL),
-        (78, 80, DeviceState.SOCNEARLYFULL),
-        (79, 80, DeviceState.SOCNEARLYFULL),
-        (80, 80, DeviceState.SOCFULL),
-        (81, 80, DeviceState.SOCFULL),
+        (99, 100, None, DeviceState.INACTIVE),
+        (50, 100, 3.53, DeviceState.INACTIVE),
+        (50, 100, 3.54, DeviceState.SOCNEARLYFULL),
+        (79, 80, 3.55, DeviceState.SOCNEARLYFULL),
+        (99, 100, 3.60, DeviceState.SOCNEARLYFULL),
+        (100, 100, 3.60, DeviceState.SOCFULL),
+        (80, 80, 3.55, DeviceState.SOCFULL),
     ],
 )
-def test_sf800_pro_state_transitions_around_taper_thresholds(hass, level, soc_set, expected_state):
-    """SF800 Pro should enter SOCNEARLYFULL near socSet but SOCFULL at/above socSet."""
+def test_sf800_pro_state_transitions_around_voltage_taper_thresholds(
+    hass, level, soc_set, max_cell_voltage, expected_state
+):
+    """SF800 Pro should derive near-full from voltage while retaining SoC-full precedence."""
     device = make_device(
         hass,
         device_cls=SolarFlow800Pro,
@@ -1058,6 +1126,7 @@ def test_sf800_pro_state_transitions_around_taper_thresholds(hass, level, soc_se
         product_model="SolarFlow 800 Pro",
         level=level,
         soc_set=soc_set,
+        max_cell_voltage=max_cell_voltage,
     )
 
     device.refresh_discharge_state()
@@ -1082,6 +1151,7 @@ def test_sf800_pro_socnearlyfull_state_uses_nearly_full_soc_limit_sensor(hass):
         product_model="SolarFlow 800 Pro",
         level=98,
         soc_set=100,
+        max_cell_voltage=3.55,
     )
 
     device.refresh_discharge_state()
@@ -1102,6 +1172,7 @@ def test_raw_device_state_update_does_not_overwrite_derived_state_sensor(hass):
         product_model="SolarFlow 800 Pro",
         level=98,
         soc_set=100,
+        max_cell_voltage=3.55,
     )
     state_sensor = cast("ZendureSensor", device.entities["state"])
 

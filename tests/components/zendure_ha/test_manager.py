@@ -954,6 +954,7 @@ class TestSmartMatchingPrimaryAware:
             soc_set=100,
             home_output=100,
             battery_output=70,
+            max_cell_voltage=3.54,
         )
         FuseGroup("group3600", 3600, primary.charge_limit or -1000, [primary, secondary])
         manager = make_manager(
@@ -995,6 +996,7 @@ class TestSmartMatchingPrimaryAware:
             reserve=10,
             soc_set=100,
             home_output=100,
+            max_cell_voltage=3.54,
         )
         secondary = make_device(
             hass,
@@ -1008,6 +1010,7 @@ class TestSmartMatchingPrimaryAware:
             soc_set=100,
             home_output=100,
             battery_output=70,
+            max_cell_voltage=3.54,
         )
         FuseGroup("group3600-bypass99", 3600, primary.charge_limit or -1000, [primary, secondary])
         manager = make_manager(
@@ -1151,6 +1154,7 @@ class TestSmartMatchingPrimaryAware:
             reserve=10,
             soc_set=100,
             home_output=255,
+            max_cell_voltage=3.54,
         )
         second = make_device(
             hass,
@@ -1215,6 +1219,7 @@ class TestSmartMatchingPrimaryAware:
             reserve=10,
             soc_set=100,
             home_output=255,
+            max_cell_voltage=3.54,
         )
         manager = make_manager(
             hass,
@@ -7363,12 +7368,12 @@ class TestSmartMatchingPrimaryAware:
         first.power_discharge.assert_not_awaited()
         second.power_discharge.assert_not_awaited()
 
-    async def test_charges_a_99_percent_primary_in_output_mode_before_the_secondary(self, hass):
+    async def test_charges_a_voltage_tapered_primary_in_output_mode_before_the_secondary(self, hass):
         """
-        A selected primary at 99% should absorb local PV up to its taper before the secondary.
+        A selected primary should absorb local PV up to its voltage taper before the secondary.
 
-        At 99% the taper cap is 200W. With 300W local PV and no household demand, the primary must
-        keep a 100W output limit so its battery receives 200W, while the secondary absorbs that 100W.
+        At 3.54V maximum cell voltage the taper cap is 150W. With 300W local PV and no household
+        demand, the primary must keep a 150W output limit while the secondary absorbs that 150W.
         """
         primary = make_device(
             hass,
@@ -7384,6 +7389,7 @@ class TestSmartMatchingPrimaryAware:
             input_limit=0,
             output_limit=0,
             home_output=300,
+            max_cell_voltage=3.54,
         )
         secondary = make_device(
             hass,
@@ -7419,8 +7425,8 @@ class TestSmartMatchingPrimaryAware:
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(100)
-        secondary.power_charge.assert_awaited_once_with(-100)
+        primary.power_discharge.assert_awaited_once_with(150)
+        secondary.power_charge.assert_awaited_once_with(-150)
 
     async def test_primary_absorbs_unexplained_surplus_before_secondary_switches_to_input(self, hass):
         """An output-mode secondary should not switch to input when the selected primary can absorb all surplus."""
@@ -7535,8 +7541,8 @@ class TestSmartMatchingPrimaryAware:
         A near-full selected primary should keep only its tapered PV charge and hand excess PV to the secondary.
 
         The primary has 500W PV: 200W already serves the home and 300W is currently flowing into the battery.
-        At 99% SoC it may keep only 200W for charging, so the remaining 100W must be routed to the secondary
-        instead of being dropped when the primary charge target is reduced.
+        At 3.54V maximum cell voltage it may keep only 150W for charging, so the remaining 150W must
+        be routed to the secondary instead of being dropped when the primary charge target is reduced.
         """
         primary = make_device(
             hass,
@@ -7553,6 +7559,7 @@ class TestSmartMatchingPrimaryAware:
             output_limit=0,
             home_output=200,
             battery_input=300,
+            max_cell_voltage=3.54,
         )
         secondary = make_device(
             hass,
@@ -7588,8 +7595,8 @@ class TestSmartMatchingPrimaryAware:
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(300)
-        secondary.power_charge.assert_awaited_once_with(-100)
+        primary.power_discharge.assert_awaited_once_with(350)
+        secondary.power_charge.assert_awaited_once_with(-150)
         secondary.power_discharge.assert_not_awaited()
 
     async def test_1232_near_full_primary_routes_export_overflow_to_secondary(self, hass):
@@ -7617,9 +7624,10 @@ class TestSmartMatchingPrimaryAware:
             input_limit=0,
             output_limit=434,
             home_output=434,
-            battery_input=252,
+            battery_input=202,
+            max_cell_voltage=3.54,
         )
-        primary.solarInput.update_value(686)
+        primary.solarInput.update_value(636)
         secondary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -7701,6 +7709,7 @@ class TestSmartMatchingPrimaryAware:
             output_limit=434,
             home_output=434,
             battery_input=252,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(686)
         secondary = make_device(
@@ -7791,12 +7800,13 @@ class TestSmartMatchingPrimaryAware:
             input_limit=0,
             output_limit=434 if secondary_mode == "output" else 497,
             home_output=434 if secondary_mode == "output" else 497,
-            battery_input=252 if secondary_mode == "output" else 100,
+            battery_input=202 if secondary_mode == "output" else 100,
+            max_cell_voltage=3.54,
         )
-        primary.solarInput.update_value(686 if secondary_mode == "output" else 597)
+        primary.solarInput.update_value(636 if secondary_mode == "output" else 597)
         if secondary_mode == "output":
             p1 = -302
-            expected_secondary_charge = 232
+            expected_secondary_charge = 282
             secondary = make_device(
                 hass,
                 device_cls=SolarFlow800Pro,
@@ -7993,6 +8003,7 @@ class TestSmartMatchingPrimaryAware:
             output_limit=498,
             home_output=497,
             battery_input=100,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(597)
         secondary = make_device(
@@ -8035,8 +8046,8 @@ class TestSmartMatchingPrimaryAware:
         if charge_time == datetime.min:
             secondary.power_discharge.assert_not_awaited()
             primary.power_charge.assert_not_awaited()
-            primary.power_discharge.assert_awaited_once_with(397)
-            secondary.power_charge.assert_awaited_once_with(-43)
+            primary.power_discharge.assert_awaited_once_with(447)
+            secondary.power_charge.assert_awaited_once_with(-93)
         else:
             secondary.power_discharge.assert_awaited_once_with(0)
             primary.power_charge.assert_not_awaited()
@@ -8060,6 +8071,7 @@ class TestSmartMatchingPrimaryAware:
             output_limit=497,
             home_output=497,
             battery_input=100,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(597)
         secondary = make_device(
@@ -9661,6 +9673,7 @@ class TestNearFullChargeTaper:
             input_limit=200,
             home_input=200,
             battery_input=257,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(57)
         secondary = make_device(
@@ -9693,9 +9706,9 @@ class TestNearFullChargeTaper:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         assert primary.state is DeviceState.SOCNEARLYFULL
-        primary.power_charge.assert_awaited_once_with(-143)
+        primary.power_charge.assert_awaited_once_with(-93)
         primary.power_discharge.assert_not_awaited()
-        secondary.power_charge.assert_awaited_once_with(-157)
+        secondary.power_charge.assert_awaited_once_with(-207)
 
     async def test_near_full_input_stays_below_available_taper_headroom(self, hass):
         """A small charge allocation should not be raised to the available taper headroom."""
@@ -9710,6 +9723,7 @@ class TestNearFullChargeTaper:
             input_limit=60,
             home_input=60,
             battery_input=117,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(57)
         manager = make_manager(
@@ -9741,6 +9755,7 @@ class TestNearFullChargeTaper:
             input_limit=100,
             home_input=100,
             battery_input=300,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(200)
         manager = make_manager(
@@ -9756,8 +9771,8 @@ class TestNearFullChargeTaper:
 
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
-        primary.power_charge.assert_awaited_once_with(0)
-        primary.power_discharge.assert_not_awaited()
+        primary.power_charge.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(50)
 
     async def test_near_full_input_switches_to_output_when_local_pv_exceeds_taper(self, hass):
         """PV above the taper should become home output rather than additional battery charge."""
@@ -9772,6 +9787,7 @@ class TestNearFullChargeTaper:
             input_limit=200,
             home_input=200,
             battery_input=457,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(257)
         secondary = make_device(
@@ -9804,8 +9820,8 @@ class TestNearFullChargeTaper:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         primary.power_charge.assert_not_awaited()
-        primary.power_discharge.assert_awaited_once_with(57)
-        secondary.power_charge.assert_awaited_once_with(-357)
+        primary.power_discharge.assert_awaited_once_with(107)
+        secondary.power_charge.assert_awaited_once_with(-407)
 
     async def test_household_demand_raises_near_full_output_above_taper_floor(self, hass):
         """Household demand should raise output above the minimum required by the taper."""
@@ -9820,6 +9836,7 @@ class TestNearFullChargeTaper:
             output_limit=250,
             home_output=250,
             battery_input=50,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(300)
         manager = make_manager(
@@ -9850,6 +9867,7 @@ class TestNearFullChargeTaper:
             home_output=250,
             battery_input=322,
             output_limit=250,
+            max_cell_voltage=3.54,
         )
         manager = make_manager(
             hass,
@@ -9863,7 +9881,7 @@ class TestNearFullChargeTaper:
         await _run_prepared_power_routing(manager, 0, datetime.now())
 
         assert device.state is DeviceState.SOCNEARLYFULL
-        device.power_discharge.assert_awaited_once_with(322)
+        device.power_discharge.assert_awaited_once_with(422)
 
     async def test_near_full_sf800_pro_is_not_bypassed_when_reduced_to_zero(self, hass):
         """A near-full SF800 Pro should NOT switch to bypass; bypass is reserved for SOCFULL."""
@@ -9875,6 +9893,7 @@ class TestNearFullChargeTaper:
             level=98,
             soc_set=100,
             home_input=100,
+            max_cell_voltage=3.54,
         )
         manager = make_manager(
             hass,
@@ -9901,6 +9920,7 @@ class TestNearFullChargeTaper:
             level=97,
             soc_set=100,
             home_output=100,
+            max_cell_voltage=3.54,
         )
         manager = make_manager(
             hass,
@@ -11417,24 +11437,25 @@ class TestRegressionTaperOscillation:
     """Regression tests for taper-related energy oscillation."""
 
     @pytest.mark.parametrize(
-        ("level", "expected_taper_limit"),
+        ("max_cell_voltage", "expected_taper_limit"),
         [
-            (97, 300),
-            (98, 250),
-            (99, 200),
+            (3.54, 150),
+            (3.55, 80),
+            (3.60, 20),
         ],
     )
-    async def test_taper_handling_at_percentages(self, hass, level: int, expected_taper_limit: int):
-        """1, 2, 3: Taper handling at 97%, 98%, 99%."""
+    async def test_taper_handling_at_max_cell_voltage(self, hass, max_cell_voltage: float, expected_taper_limit: int):
+        """Taper routing should follow the maximum-cell-voltage charge cap."""
         primary = make_device(
             hass,
             device_cls=SolarFlow800Pro,
             device_id="primary-taper-test",
-            level=level,
+            level=50,
             soc_set=100,
             ac_mode=AcMode.OUTPUT,
             home_output=0,
             battery_input=350,
+            max_cell_voltage=max_cell_voltage,
         )
         primary.solarInput.update_value(350)
 
@@ -11466,6 +11487,7 @@ class TestRegressionTaperOscillation:
             battery_input=118,
             input_limit=0,
             output_limit=182,
+            max_cell_voltage=3.54,
         )
         primary.solarInput.update_value(300)
         secondary = make_device(

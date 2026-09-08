@@ -21,7 +21,7 @@ from custom_components.zendure_ha.const import (
     AcMode,
     ManagerMode,
 )
-from custom_components.zendure_ha.device import ZendureDevice
+from custom_components.zendure_ha.device import ZendureBattery, ZendureDevice
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800
 from custom_components.zendure_ha.fusegroup import FuseGroup
 from custom_components.zendure_ha.manager import ZendureManager
@@ -76,6 +76,21 @@ def make_device_definition(
     }
 
 
+def add_battery_max_cell_voltage(
+    hass: HomeAssistant,
+    device: ZendureDevice,
+    max_cell_voltage: float | str,
+    *,
+    battery_id: str = "C12E345678",
+) -> None:
+    """Attach a battery with a maximum-cell-voltage reading to a test device."""
+    battery = ZendureBattery(hass, battery_id, device)
+    raw_voltage = round(max_cell_voltage * 100) if isinstance(max_cell_voltage, (int, float)) else max_cell_voltage
+    with patch.object(battery, "register_pending_entities"):
+        battery.entityUpdate("maxVol", raw_voltage)
+    device.batteries[battery.deviceId] = battery
+
+
 def make_device(
     hass: HomeAssistant,
     *,
@@ -95,6 +110,7 @@ def make_device(
     home_output: int = 0,
     battery_input: int = 0,
     battery_output: int = 0,
+    max_cell_voltage: float | None = None,
 ) -> ZendureDevice:
     """Create a real device instance with a stable online baseline."""
     definition = make_device_definition(
@@ -126,6 +142,8 @@ def make_device(
     device.homeOutput.update_value(home_output)
     device.batteryInput.update_value(battery_input)
     device.batteryOutput.update_value(battery_output)
+    if max_cell_voltage is not None:
+        add_battery_max_cell_voltage(hass, device, max_cell_voltage)
     if input_limit is not None:
         device.limitInput.update_value(input_limit)
     if output_limit is not None:
