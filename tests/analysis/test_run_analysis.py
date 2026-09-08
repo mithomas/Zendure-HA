@@ -5,6 +5,7 @@ import pytest
 from analysis.run_analysis import (
     POWER_THRESHOLD_W,
     analyze_rows,
+    estimate_ac_input,
     find_sustained_periods,
     parse_float,
     parse_rows,
@@ -106,7 +107,7 @@ def test_sustained_period_stops_when_condition_becomes_false() -> None:
     assert all(period["avg_sml"] >= 100 for period in periods)
 
 
-def test_overcorrection_cycle_uses_only_managed_normal_input_samples() -> None:
+def test_overcorrection_cycle_excludes_full_input_samples() -> None:
     rows = parse_rows(
         [
             _raw_row(0, sml_power=-150),
@@ -122,6 +123,123 @@ def test_overcorrection_cycle_uses_only_managed_normal_input_samples() -> None:
     assert len(result["overcorrection_cycles"]) == 1
     assert result["overcorrection_cycles"][0]["start"] == START
     assert result["overcorrection_cycles"][0]["end"] == START + timedelta(seconds=2)
+
+
+@pytest.mark.parametrize("device_state", ["full", "offline"])
+def test_overcorrection_cycle_excludes_non_charge_capable_input_states(device_state: str) -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, sml_power=-150, wz_balkon_device_state=device_state),
+            _raw_row(1, sml_power=160, wz_balkon_device_state=device_state),
+            _raw_row(2, sml_power=-170, wz_balkon_device_state=device_state),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["overcorrection_cycles"] == []
+
+
+@pytest.mark.parametrize("device_state", ["normal", "nearly_full", "reserve", "reserve_recovery", "empty"])
+def test_overcorrection_cycle_includes_managed_charge_capable_input_states(device_state: str) -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, sml_power=-150, wz_balkon_device_state=device_state),
+            _raw_row(1, sml_power=160, wz_balkon_device_state=device_state),
+            _raw_row(2, sml_power=-170, wz_balkon_device_state=device_state),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert len(result["overcorrection_cycles"]) == 1
+
+
+def test_external_solar_is_not_subtracted_from_ac_input() -> None:
+    row = parse_rows(
+        [
+            _raw_row(
+                0,
+                k_balkon_ac_mode="input",
+                k_balkon_bat_flow=-300,
+                k_balkon_output_power=0,
+                k_balkon_solar_power=400,
+            )
+        ]
+    )[0]
+    device = row["devices"]["k_balkon"]
+
+    assert estimate_ac_input(device) == 0
+    assert estimate_ac_input(device, solar_is_external=True) == 300
+
+
+def test_ac_input_estimate_accounts_for_simultaneous_output_telemetry() -> None:
+    row = parse_rows(
+        [
+            _raw_row(
+                0,
+                wz_balkon_ac_mode="input",
+                wz_balkon_bat_flow=-300,
+                wz_balkon_output_power=200,
+                wz_balkon_solar_power=400,
+            )
+        ]
+    )[0]
+
+    assert estimate_ac_input(row["devices"]["wz_balkon"]) == 100
+
+
+def test_external_solar_reserve_charge_contributes_to_grid_import() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(
+                0,
+                wz_balkon_fusegroup="unmanaged",
+                k_balkon_fusegroup="managed",
+                k_balkon_device_state="reserve",
+                k_balkon_ac_mode="input",
+                k_balkon_bat_flow=-300,
+            ),
+            _raw_row(
+                1,
+                sml_power=100,
+                wz_balkon_fusegroup="unmanaged",
+                k_balkon_fusegroup="managed",
+                k_balkon_device_state="reserve",
+                k_balkon_ac_mode="input",
+                k_balkon_bat_flow=-300,
+            ),
+        ]
+    )
+
+    result = analyze_rows(rows, external_solar_devices=("k_balkon",))
+
+    assert result["grid_import_while_charging_kwh"] == pytest.approx(100 / 3_600_000)
+
+
+def test_nearly_full_battery_output_contributes_to_battery_backed_export() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(
+                0,
+                sml_power=-100,
+                wz_balkon_device_state="nearly_full",
+                wz_balkon_ac_mode="output",
+                wz_balkon_bat_flow=100,
+            ),
+            _raw_row(
+                1,
+                sml_power=-100,
+                wz_balkon_device_state="nearly_full",
+                wz_balkon_ac_mode="output",
+                wz_balkon_bat_flow=100,
+            ),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["battery_backed_export_kwh"] == pytest.approx(100 / 3_600_000)
 
 
 def test_default_analysis_threshold_includes_30_watt_reversals() -> None:

@@ -55,7 +55,10 @@ def _print_periods(title: str, periods: list[dict[str, Any]]) -> None:
 
 
 def analyze_file(
-    file_path: str | Path, *, only_unmanaged: tuple[str, ...] = ()
+    file_path: str | Path,
+    *,
+    only_unmanaged: tuple[str, ...] = (),
+    external_solar_devices: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """Analyze a CSV export and print a routing-aware report."""
     path = Path(file_path)
@@ -72,12 +75,14 @@ def analyze_file(
     print(f"Rows in scope: {len(rows)}/{raw_count}")
     if only_unmanaged:
         print(f"Scope filter: {', '.join(only_unmanaged)} unmanaged")
+    if external_solar_devices:
+        print(f"External solar context: {', '.join(external_solar_devices)}")
     if not rows:
         print("No matching rows.")
         return None
     print(f"Window: {_format_time(rows[0]['time'])} to {_format_time(rows[-1]['time'])}")
 
-    result = analyze_rows(rows)
+    result = analyze_rows(rows, external_solar_devices=external_solar_devices)
     print("\nManager participation samples:")
     for device_id in DEVICE_IDS:
         samples = result["management_samples"][device_id]
@@ -172,6 +177,14 @@ def _parse_args() -> argparse.Namespace:
         metavar="DEVICE",
         help="only analyze rows where DEVICE is explicitly unmanaged; may be repeated",
     )
+    parser.add_argument(
+        "--external-solar",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="treat DEVICE's solar column as external grid context; may be repeated",
+    )
     return parser.parse_args()
 
 
@@ -183,7 +196,11 @@ def main() -> None:
         print(f"No export files found at '{args.path}'.")
         return
     for file_path in csv_files:
-        analyze_file(file_path, only_unmanaged=tuple(args.only_unmanaged))
+        analyze_file(
+            file_path,
+            only_unmanaged=tuple(args.only_unmanaged),
+            external_solar_devices=tuple(args.external_solar),
+        )
 
 
 if __name__ == "__main__":

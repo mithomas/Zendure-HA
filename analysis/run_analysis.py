@@ -14,6 +14,7 @@ DEVICE_IDS = ("wz_balkon", "k_balkon")
 UNKNOWN_VALUES = {"", "none", "null", "unknown", "unavailable"}
 MAX_INTEGRATION_GAP_SECONDS = 5
 POWER_THRESHOLD_W = 30
+CHARGE_CAPABLE_STATES = {"normal", "nearly_full", "reserve", "reserve_recovery", "empty"}
 
 ParsedRow = dict[str, Any]
 AnalysisResult = dict[str, Any]
@@ -244,7 +245,9 @@ def find_large_swings(
     return distinct_swings
 
 
-def estimate_ac_input(device: Mapping[str, Any]) -> float | None:
+def estimate_ac_input(
+    device: Mapping[str, Any], *, solar_is_external: bool = False
+) -> float | None:
     """Estimate actual AC intake, preferring an explicit measurement."""
     if device["mode"] != "input":
         return 0.0
@@ -252,16 +255,20 @@ def estimate_ac_input(device: Mapping[str, Any]) -> float | None:
     if input_power is not None:
         return max(float(input_power), 0.0)
     battery_flow = device["battery_flow"]
-    solar = device["solar"]
-    if battery_flow is None or solar is None:
+    if battery_flow is None:
         return None
-    return max(0.0, -float(battery_flow) - float(solar))
+    solar = device["solar"]
+    if not solar_is_external and solar is None:
+        return None
+    local_solar = 0.0 if solar_is_external else float(solar)
+    output = float(device["output"] or 0.0)
+    return max(0.0, -float(battery_flow) + output - local_solar)
 
 
-def _has_managed_normal_input(row: ParsedRow) -> bool:
+def _has_managed_charge_capable_input(row: ParsedRow) -> bool:
     return any(
         device["managed"] is True
-        and device["state"] == "normal"
+        and device["state"] in CHARGE_CAPABLE_STATES
         and device["mode"] == "input"
         for device in row["devices"].values()
     )
@@ -277,7 +284,7 @@ def find_overcorrection_cycles(
 
     for row in rows:
         sml = row["sml"]
-        if sml is None or not _has_managed_normal_input(row):
+        if sml is None or not _has_managed_charge_capable_input(row):
             start_row = None
             import_row = None
             continue
@@ -307,8 +314,15 @@ def find_overcorrection_cycles(
     return cycles
 
 
-def analyze_rows(rows: list[ParsedRow]) -> AnalysisResult:
+def analyze_rows(
+    rows: list[ParsedRow], *, external_solar_devices: tuple[str, ...] = ()
+) -> AnalysisResult:
     """Calculate routing-aware metrics from parsed rows."""
+    invalid_devices = set(external_solar_devices) - set(DEVICE_IDS)
+    if invalid_devices:
+        invalid_list = ", ".join(sorted(invalid_devices))
+        raise ValueError(f"unknown external-solar device IDs: {invalid_list}")
+    external_solar = set(external_solar_devices)
     management_samples = {
         device_id: {"managed": 0, "unmanaged": 0, "unknown": 0} for device_id in DEVICE_IDS
     }
@@ -323,7 +337,7 @@ def analyze_rows(rows: list[ParsedRow]) -> AnalysisResult:
     for row in rows:
         sml = row["sml"]
         dt = row["dt"]
-        managed_devices: list[Mapping[str, Any]] = []
+        managed_devices: list[tuple[str, Mapping[str, Any]]] = []
 
         for device_id, device in row["devices"].items():
             managed = device["managed"]
@@ -333,7 +347,7 @@ def analyze_rows(rows: list[ParsedRow]) -> AnalysisResult:
             if managed is not True:
                 previous_managed_mode[device_id] = None
                 continue
-            managed_devices.append(device)
+            managed_devices.append((device_id, device))
             mode = device["mode"]
             previous_mode = previous_managed_mode[device_id]
             if previous_mode is not None and mode is not None and mode != previous_mode:
@@ -345,8 +359,14 @@ def analyze_rows(rows: list[ParsedRow]) -> AnalysisResult:
 
         ac_inputs = [
             ac_input
-            for device in managed_devices
-            if device["state"] == "normal" and (ac_input := estimate_ac_input(device)) is not None
+            for device_id, device in managed_devices
+            if (
+                ac_input := estimate_ac_input(
+                    device,
+                    solar_is_external=device_id in external_solar,
+                )
+            )
+            is not None
         ]
         total_ac_input = sum(ac_inputs)
         if sml >= POWER_THRESHOLD_W and total_ac_input > 0:
@@ -354,15 +374,16 @@ def analyze_rows(rows: list[ParsedRow]) -> AnalysisResult:
             import_rows.append(row)
 
         if sml <= -POWER_THRESHOLD_W and any(
-            device["state"] == "normal"
-            and device["battery_flow"] is not None
+            device["battery_flow"] is not None
             and device["battery_flow"] >= POWER_THRESHOLD_W
-            for device in managed_devices
+            for _device_id, device in managed_devices
         ):
             battery_export_ws += -sml * dt
             battery_export_rows.append(row)
 
-        if sml <= -POWER_THRESHOLD_W and any(device["state"] == "full" for device in managed_devices):
+        if sml <= -POWER_THRESHOLD_W and any(
+            device["state"] == "full" for _device_id, device in managed_devices
+        ):
             full_export_ws += -sml * dt
 
     return {
@@ -388,6 +409,14 @@ def _main() -> None:
         metavar="DEVICE",
         help="only include rows where DEVICE is explicitly unmanaged; may be repeated",
     )
+    parser.add_argument(
+        "--external-solar",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="treat DEVICE's solar column as external grid context; may be repeated",
+    )
     args = parser.parse_args()
     files = resolve_export_files(args.path)
     if not files:
@@ -396,11 +425,13 @@ def _main() -> None:
     for file_path in files:
         raw_count, all_rows = read_export(file_path)
         rows = select_management_rows(all_rows, unmanaged_devices=tuple(args.only_unmanaged))
-        result = analyze_rows(rows)
+        result = analyze_rows(rows, external_solar_devices=tuple(args.external_solar))
         print(file_path)
         print(f"  rows: {len(rows)}/{raw_count}")
         if args.only_unmanaged:
             print(f"  scope: {', '.join(args.only_unmanaged)} unmanaged")
+        if args.external_solar:
+            print(f"  external solar context: {', '.join(args.external_solar)}")
         print(f"  management samples: {result['management_samples']}")
         print(f"  managed mode switches: {result['mode_switches']}")
         print(f"  grid import while managed AC charging: {result['grid_import_while_charging_kwh']:.6f} kWh")

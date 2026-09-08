@@ -27,10 +27,10 @@ except ImportError:
     )
 
 
-def _device_summary(row: dict, device_id: str) -> str:
+def _device_summary(row: dict, device_id: str, external_solar_devices: set[str]) -> str:
     device = row["devices"][device_id]
     management = "M" if device["managed"] is True else "U" if device["managed"] is False else "?"
-    ac_input = estimate_ac_input(device)
+    ac_input = estimate_ac_input(device, solar_is_external=device_id in external_solar_devices)
     ac_text = "?" if ac_input is None else f"{ac_input:.0f}"
     solar_text = "?" if device["solar"] is None else f"{device['solar']:.0f}"
     battery_text = "?" if device["battery_flow"] is None else f"{device['battery_flow']:.0f}"
@@ -38,12 +38,17 @@ def _device_summary(row: dict, device_id: str) -> str:
 
 
 def generate_table(
-    file_path: str | Path, *, only_unmanaged: tuple[str, ...] = (), limit: int = 100
+    file_path: str | Path,
+    *,
+    only_unmanaged: tuple[str, ...] = (),
+    external_solar_devices: tuple[str, ...] = (),
+    limit: int = 100,
 ) -> str:
     """Build a table of routing-relevant import and export samples."""
     _, all_rows = read_export(file_path)
     rows = select_management_rows(all_rows, unmanaged_devices=only_unmanaged)
-    result = analyze_rows(rows)
+    result = analyze_rows(rows, external_solar_devices=external_solar_devices)
+    external_solar = set(external_solar_devices)
 
     events = []
     for episode in group_episodes(result["grid_import_while_charging_rows"], gap_allowance_sec=1.5):
@@ -70,6 +75,7 @@ def generate_table(
         f"## {Path(file_path).name}",
         "",
         "M = managed, U = unmanaged, ? = unknown. AC is measured or estimated actual AC intake.",
+        f"External solar context: {', '.join(external_solar_devices) or 'none'}.",
         "",
         "| Period | Duration | Peak grid W | WZ-Balkon (scope, mode, PV, battery, AC) | "
         "K-Balkon (scope, mode, PV, battery, AC) | Finding |",
@@ -81,8 +87,9 @@ def generate_table(
         period = str(start) if start == end else f"{start} to {end.time()}"
         duration = sum(event_row["dt"] for event_row in episode)
         lines.append(
-            f"| {period} | {duration:.0f}s | {row['sml']:.0f} | {_device_summary(row, 'wz_balkon')} | "
-            f"{_device_summary(row, 'k_balkon')} | {reason} |"
+            f"| {period} | {duration:.0f}s | {row['sml']:.0f} | "
+            f"{_device_summary(row, 'wz_balkon', external_solar)} | "
+            f"{_device_summary(row, 'k_balkon', external_solar)} | {reason} |"
         )
     if not events:
         lines.append("| - | - | - | - | - | No routing-relevant events |")
@@ -102,6 +109,14 @@ def _parse_args() -> argparse.Namespace:
         metavar="DEVICE",
         help="only include rows where DEVICE is explicitly unmanaged; may be repeated",
     )
+    parser.add_argument(
+        "--external-solar",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="treat DEVICE's solar column as external grid context; may be repeated",
+    )
     parser.add_argument("--limit", type=int, default=100, help="maximum event episodes per export")
     return parser.parse_args()
 
@@ -114,7 +129,12 @@ def main() -> None:
         raise SystemExit(f"No export CSV files found at {args.path!r}")
     print(
         "\n\n".join(
-            generate_table(path, only_unmanaged=tuple(args.only_unmanaged), limit=args.limit)
+            generate_table(
+                path,
+                only_unmanaged=tuple(args.only_unmanaged),
+                external_solar_devices=tuple(args.external_solar),
+                limit=args.limit,
+            )
             for path in files
         )
     )

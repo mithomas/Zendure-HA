@@ -36,19 +36,26 @@ def _period_count(rows: list[dict], *, importing: bool) -> int:
     return sum(period["duration"] >= 60 for period in periods)
 
 
-def generate_report(file_path: str | Path, *, only_unmanaged: tuple[str, ...] = ()) -> str:
+def generate_report(
+    file_path: str | Path,
+    *,
+    only_unmanaged: tuple[str, ...] = (),
+    external_solar_devices: tuple[str, ...] = (),
+) -> str:
     """Build a routing-aware Markdown summary for one CSV export."""
     raw_count, all_rows = read_export(file_path)
     rows = select_management_rows(all_rows, unmanaged_devices=only_unmanaged)
     if not rows:
         return f"## {Path(file_path).name}\n\nNo matching rows."
 
-    result = analyze_rows(rows)
+    result = analyze_rows(rows, external_solar_devices=external_solar_devices)
     scope = ", ".join(f"{device_id}=unmanaged" for device_id in only_unmanaged) or "all rows"
+    external_solar = ", ".join(external_solar_devices) or "none"
     lines = [
         f"## {Path(file_path).name}",
         "",
         f"- Scope: {scope}",
+        f"- External solar context: {external_solar}",
         f"- Window: {rows[0]['time']} to {rows[-1]['time']}",
         f"- Rows: {len(rows)} of {raw_count}",
         "",
@@ -80,8 +87,9 @@ def generate_report(file_path: str | Path, *, only_unmanaged: tuple[str, ...] = 
             f"| Sustained export periods | {_period_count(rows, importing=False)} |",
             "",
             "AC intake is measured from an explicit input-power column when available. Otherwise it is "
-            "estimated as charging battery flow minus local DC solar. Unmanaged devices remain visible "
-            "as grid context but are excluded from routing metrics.",
+            "estimated from charging battery flow, simultaneous home output, and local DC solar. Solar "
+            "marked as external remains grid context and is not subtracted from device AC intake. "
+            "Unmanaged devices remain visible as grid context but are excluded from routing metrics.",
         ]
     )
 
@@ -116,6 +124,14 @@ def _parse_args() -> argparse.Namespace:
         metavar="DEVICE",
         help="only include rows where DEVICE is explicitly unmanaged; may be repeated",
     )
+    parser.add_argument(
+        "--external-solar",
+        action="append",
+        default=[],
+        choices=DEVICE_IDS,
+        metavar="DEVICE",
+        help="treat DEVICE's solar column as external grid context; may be repeated",
+    )
     return parser.parse_args()
 
 
@@ -125,7 +141,16 @@ def main() -> None:
     files = resolve_export_files(args.path)
     if not files:
         raise SystemExit(f"No export CSV files found at {args.path!r}")
-    print("\n\n".join(generate_report(path, only_unmanaged=tuple(args.only_unmanaged)) for path in files))
+    print(
+        "\n\n".join(
+            generate_report(
+                path,
+                only_unmanaged=tuple(args.only_unmanaged),
+                external_solar_devices=tuple(args.external_solar),
+            )
+            for path in files
+        )
+    )
 
 
 if __name__ == "__main__":
