@@ -713,6 +713,48 @@ async def test_sf800_pro_power_charge_sets_ac_input_mode_and_charge_limits(hass)
     )
 
 
+async def test_sf800_pro_zero_charge_clears_stale_input_limit(hass):
+    """A zero charge target should clear a stale limit even when measured flow is already zero."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-stale-input-limit",
+        device_name="sf800 pro stale input limit",
+        product_model="SolarFlow 800 Pro",
+        ac_mode=AcMode.INPUT,
+        input_limit=8,
+        output_limit=0,
+        home_input=0,
+        home_output=0,
+    )
+    with patch.object(device, "doCommand", AsyncMock()) as mock_do_command:
+        await device.power_charge(0)
+
+    mock_do_command.assert_awaited_once_with(
+        {"properties": {"smartMode": 0, "acMode": 1, "outputLimit": 0, "inputLimit": 0}},
+    )
+
+
+async def test_sf800_pro_zero_charge_skips_already_cleared_input_limit(hass):
+    """A zero charge target should remain a no-op when measured flow and its limit are zero."""
+    device = make_device(
+        hass,
+        device_cls=SolarFlow800Pro,
+        device_id="sf800-pro-zero-input-limit",
+        device_name="sf800 pro zero input limit",
+        product_model="SolarFlow 800 Pro",
+        ac_mode=AcMode.INPUT,
+        input_limit=0,
+        output_limit=0,
+        home_input=0,
+        home_output=0,
+    )
+    with patch.object(device, "doCommand", AsyncMock()) as mock_do_command:
+        await device.power_charge(0)
+
+    mock_do_command.assert_not_awaited()
+
+
 async def test_sf800_pro_power_bypass_sets_ac_input_mode(hass):
     """Bypass on an SF800 Pro should switch it into AC input mode without requesting active output power."""
     device = make_device(

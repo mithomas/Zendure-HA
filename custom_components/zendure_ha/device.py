@@ -1011,7 +1011,9 @@ class ZendureDevice(EntityDevice):
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
         power = min(0, max(power, self.effective_charge_limit))
-        if abs(power - self.homeInput.asInt + self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
+        if (power != 0 or self.limitInput.asInt == 0) and abs(
+            power - self.homeInput.asInt + self.homeOutput.asInt
+        ) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
             return power
         return await self.charge(power)

@@ -168,10 +168,12 @@ def make_manager(
     charge_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
     discharge_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
     idle_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
+    transition_gates: bool = False,
 ) -> ZendureManager:
     """Create a manager instance with the entities needed by the tests."""
     entry = make_config_entry()
     manager = ZendureManager(hass, entry)
+    manager._transition_gates_enabled = transition_gates
     manager.primarydevice = ZendureRestoreSelect(
         manager,
         "primary_device",

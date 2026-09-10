@@ -81,7 +81,7 @@ Apply sources in priority order, stopping when demand is covered:
 6. **Primary with no local solar defers to secondaries:** if the primary is charging but has no solar of its own to contribute (it would draw from the grid to charge), and a secondary has its own solar available, the charge allocation shifts to that secondary instead.
 7. **Full primary hands off to secondaries:** when the primary battery is full and has entered bypass, idle secondary devices that have solar available are promoted to charging so that surplus is not wasted.
 
-> **Anti-oscillation:** entering charge mode sets a 1 s hold timer that suppresses any immediate flip back to discharge. In primary-aware mode an additional 2 s delay also applies before switching into charge mode if doing so would stop PV that is currently serving the home. At zero/export in `MATCHING`, a charging selected primary may preserve its current output and replace measured non-primary PV floors, but must not grow output simply because more local PV is available; that surplus remains available for charging.
+> **Anti-oscillation:** automatic physical AC mode changes use the energy-based transition gates described below. The legacy 1 s charge timer is retained as internal routing state but does not add another delay when transition gates are active. In primary-aware mode the existing 2 s PV-floor debounce remains limited to the case where entering charge mode would stop PV currently serving the home. At zero/export in `MATCHING`, a charging selected primary may preserve its current output and replace measured non-primary PV floors, but must not grow output simply because more local PV is available; that surplus remains available for charging.
 
 > **Input limits are requested caps:** the manager may assign an input limit that a device does not fully ingest. This is expected when the device firmware tapers charging near the target SoC. The manager does not pre-clamp input targets for tapering importers; if the importer accepts less than requested, remaining surplus can appear as grid export until telemetry or P1 feedback routes a later cycle.
 
@@ -91,7 +91,9 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 
 | Control | Default | Purpose | Trade-off of Reducing |
 |---------|---------|---------|----------------------|
-| Charge holdoff | 1 s (was 2 s) | Prevents rapid charge↔discharge flipping | More oscillation; devices may ping-pong between modes |
+| Output -> input gate | >15 W, 200 Ws, minimum 5 s | Prevents short surplus periods from switching the AC relay into input | More export while a genuine surplus is being proven |
+| Input -> output gate | >15 W, 200 Ws, minimum 2 s | Stops charging immediately but delays the physical relay switch until residual demand persists | More import while a genuine residual load is being proven |
+| Legacy charge timer | 1 s | Retains routing-stage compatibility; runs concurrently with the input gate | Not used as an additional physical-switch delay |
 | Charge debounce | 2 s (was 4 s) | Delays charge mode when it would zero active PV floor, without growing charging selected-primary output during export | PV floor may drop briefly before recovery; visible power dips |
 | Selected-primary export cap | P1 ≤ 0 in `MATCHING` | Preserves current primary output and measured non-primary PV floors while stopping PV-only output growth into grid export | Primary PV may cover import only after a positive P1 reading |
 | Primary-output export trim threshold | >10 W export | Lets normal `MATCHING` cycles reduce selected-primary output that is causing measurable grid export | More zero-flow noise can trigger output trims near balance |
@@ -101,8 +103,8 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 ### Adjustment guidance
 
 **Optimized Defaults (Lower risk options applied):**
-- **Charge holdoff** set to 1 s — safe when coupled with zero-charge safe harbor limits.
-- **Charge debounce** set to 2 s — minor risk of PV floor zeroing; fast update lock-out (TIMEFAST) is proportionally set to 1.1 s.
+- **Transition energy** set to 200 Ws with 5 s input and 2 s output minimum durations.
+- **Charge debounce** set to 2 s - minor risk of PV floor zeroing; fast update lock-out (TIMEFAST) is proportionally set to 1.1 s.
 
 **Higher risk:**
 - Lowering spike filter threshold below typical appliance inrush (kettles, AC compressors).
@@ -164,9 +166,33 @@ When P1 is exactly zero the grid is balanced and there is neither demand nor sur
 
 ### Zero-Charge Safe Harbor (Relay Protection)
 
-To prevent severe mechanical relay wear-and-tear on secondary or demoted inverters when grid load oscillates around zero, the manager commands active charging devices to stop by sending `power_charge(0)` (setting input limit to 0 W in AC mode 1) rather than switching the device to output mode 2 (`discharge(0)`). 
+To prevent severe mechanical relay wear-and-tear on secondary or demoted inverters when grid load oscillates around zero, the manager commands active charging devices to stop by sending `power_charge(0)` (setting input limit to 0 W in AC mode 1) rather than switching the device to output mode 2 (`discharge(0)`). A zero target clears a non-zero configured input limit even when measured input has already fallen to zero.
 
 A physical AC mode switch to output is only performed when an actual non-zero battery-backed discharge output is allocated to the device. Full devices supporting bypass are exempt: they still transition to bypass at zero output when allowed to keep home-serving PV active.
+
+### Energy-based AC transition gates
+
+Every automatically managed physical output -> input or input -> output switch is protected per device. Adjusting a limit while the device is already in the requested AC mode is not gated. Explicit manual power or operation changes, shutdown, and safety or bypass commands are also immediate.
+
+A reading qualifies only when corrected residual power is strictly greater than 15 W. A switch is released only after both the direction-specific minimum duration and 200 Ws of qualifying energy have accumulated:
+
+`release delay = max(direction minimum, 200 Ws / qualifying power)`
+
+| Qualifying power | Output -> input | Input -> output |
+|------------------|-----------------|-----------------|
+| 16 W | 12.5 s | 12.5 s |
+| 20 W | 10 s | 10 s |
+| 25 W | 8 s | 8 s |
+| 30 W | 6.7 s | 6.7 s |
+| 40 W | 5 s | 5 s |
+| 50 W | 5 s | 4 s |
+| 100 W or more | 5 s | 2 s |
+
+For changing readings, energy is integrated conservatively using the lower of two consecutive qualifying values. Evidence resets when the requested direction disappears, power falls to 15 W or less, device eligibility changes, the opposite direction is requested, or the sample gap exceeds 15 s. Once a gate releases, it remains released while commands are retried until device telemetry confirms the requested AC mode.
+
+The gate uses prepared residual routing facts rather than raw meter power. Controlled battery output is reduced before surplus can accumulate toward input. In the opposite direction, active AC input is commanded to zero immediately and measured AC input must disappear from device telemetry before residual household demand starts accumulating toward output. The configured input limit is a requested cap rather than evidence of actual flow, so it does not block the transition gate. This prevents a device's own charge load from being mistaken for home demand without allowing a stale limit to block output indefinitely.
+
+Devices already in the requested direction are allocated first. A device whose transition gate has not released must not contribute physical switching capacity; a missed charge or discharge opportunity is preferred over relay chatter. Pending gates reuse the serialized P1 follow-up worker so a stable reading can be reconsidered at the calculated release deadline.
 
 ### Strict output stop
 
@@ -180,16 +206,16 @@ A physical AC mode switch to output is only performed when an actual non-zero ba
 
 In `MATCHING`, output-mode primary and secondary devices should remain in output mode around zero grid flow unless switching to input mode is justified. A corrected negative setpoint alone is not enough to move a home-serving device into input mode, because SF800 Pro input/output mode switches can temporarily drop home output.
 
-An output-mode device may be switched into input mode only for one of these reasons:
+An output-mode device may become an input candidate only for one of these reasons:
 
-- unexplained meter export of at least 50 W after manager-controlled output and trimmable battery-backed output are accounted for,
+- unexplained meter export greater than 15 W after manager-controlled output and trimmable battery-backed output are accounted for,
 - full-device bypass or pass-through PV overflow,
 - near-full taper overflow that the near-full device cannot absorb,
 - the `SOCEMPTY` PV-charge-first exception for the device's own PV.
 
 Normal or at-reserve local PV is not system surplus while it can remain in output mode and serve the home. Output-mode secondaries follow the same switch reasons as the selected primary and are not promoted into input mode for normal local PV alone. If switching the selected primary to input can absorb the available unexplained surplus or overflow, the secondary stays in output mode; only residual surplus or overflow falls through to an output-mode secondary. Already-input devices may continue or reduce local-PV input without authorizing unrelated output-mode devices to switch.
 
-Input-switch gating is separate from primary-output export trimming. In normal `MATCHING` cycles, measured export greater than 10 W may reduce active selected-primary home output even when devices must stay in output mode. Export of 10 W or less is ignored as zero-flow noise for this trim path.
+These source rules admit a candidate; the candidate must then pass the 200 Ws output -> input transition gate. Input-switch gating is separate from primary-output export trimming. In normal `MATCHING` cycles, measured export greater than 10 W may reduce active selected-primary home output even when devices must stay in output mode. Export of 10 W or less is ignored as zero-flow noise for this trim path.
 
 ### Off-grid output at zero
 
@@ -203,17 +229,17 @@ When a device with active off-grid production is stopped (commanded to zero home
 |------|--------------------------------------------------------------------|
 | 1    | Reduce primary charging first                                      |
 | 2    | Reduce secondary charging only after primary charging reaches zero |
-| 3    | If demand still remains, follow the normal discharge priority order above |
+| 3    | If demand still remains, apply the input -> output transition gate before physically switching, then follow the normal discharge priority order above |
 
 > **Constraint:** charge hysteresis must not prevent local PV from being rerouted to household demand in the same cycle.
 
-**Debounce fast-path:** PV-backed active charging and full-device PV bypass charge-lag cases may skip the normal grid-meter debounce when grid deviation is outside the ±20 W zero guard. The fast path uses current device telemetry and is not limited to the selected primary. Readings inside the guard, and active charging without PV evidence, remain debounced to suppress zero-flow noise and non-PV charging churn.
+**Debounce fast-path:** PV-backed active charging and full-device PV bypass charge-lag cases may skip the normal grid-meter debounce when grid deviation is outside the +/-20 W zero guard. The fast path uses current device telemetry and is not limited to the selected primary. It immediately recalculates routing and zeros obsolete input, but does not bypass the physical output gate. Readings inside the guard, and active charging without PV evidence, remain debounced to suppress zero-flow noise and non-PV charging churn.
 
 ## Startup and Stability
 
 - Idle devices are started only when the remaining target exceeds the startup power threshold. Exception: empty, at-reserve, and recovering devices are promoted to charging immediately, without waiting for the surplus to reach the threshold.
 - Fast grid-meter changes are debounced through normal timing windows, except that primary-device changes trigger immediate routing recomputation. A reading is considered fast (and triggers immediate routing) when it deviates from the recent average or from the most recent reading by more than 3.5× the standard deviation of recent readings, with a minimum threshold of 15 W. For example, if recent readings average 100 W with a standard deviation of 10 W, the threshold is 35 W — a new reading of 140 W triggers immediately, a reading of 130 W does not. If readings are very stable (stddev below 15 W), the 15 W minimum applies, giving a fixed threshold of 52 W.
-- The optional P1 spike filter can be enabled through the manager switch. While enabled, upward P1 jumps above the configured threshold are held for the configured duration; if the jump falls back before the duration expires, it is ignored and not added to the recent P1 history.
+- The optional P1 spike filter can be enabled through the manager switch. While enabled, upward P1 jumps above the configured threshold are held for the configured duration; if the jump falls back before the duration expires, it is ignored and not added to the recent P1 history. While any managed device remains in input mode, routing bypasses and clears an upward spike candidate so the spike filter cannot stack another delay onto charge reduction or the input -> output gate. The spike filter remains effective for output growth when devices are already in output mode.
 - Active charge-lag corrections that bypass normal timing still respect the minimum grid-meter update interval.
 - Around zero grid flow, prefer a small export or missed charge opportunity over switching a home-serving device into charge mode and causing grid import. The `MATCHING` input switch gate above is the concrete rule for that preference.
 - Starting with no available devices must not produce user-facing noise beyond expected warning or debug log output.

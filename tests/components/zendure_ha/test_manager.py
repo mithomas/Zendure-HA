@@ -13,7 +13,7 @@ import pytest
 from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, SmartMode
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.fusegroup import FuseGroup
-from custom_components.zendure_ha.manager import ZendureManager, _PowerRoutingIntent
+from custom_components.zendure_ha.manager import ZendureManager, _PowerRoutingIntent, _TransitionDirection
 
 from .common import (
     attach_devices,
@@ -5222,7 +5222,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge = AsyncMock(side_effect=lambda power: power)
         secondary.power_charge = AsyncMock(side_effect=lambda power: power)
 
-        await _run_prepared_power_routing(manager, -49, datetime.now())
+        await _run_prepared_power_routing(manager, -15, datetime.now())
 
         assert secondary.state is expected_state
         primary.power_charge.assert_not_awaited()
@@ -6815,8 +6815,8 @@ class TestSmartMatchingPrimaryAware:
     @pytest.mark.parametrize(
         ("p1", "primary_charge_allowed"),
         [
-            pytest.param(-69, False, id="below-unexplained-export-threshold"),
-            pytest.param(-70, True, id="at-unexplained-export-threshold"),
+            pytest.param(-35, False, id="at-unexplained-export-threshold"),
+            pytest.param(-36, True, id="above-unexplained-export-threshold"),
         ],
     )
     async def test_primary_input_switch_requires_unexplained_export_threshold(self, hass, p1, primary_charge_allowed):
@@ -6975,7 +6975,7 @@ class TestSmartMatchingPrimaryAware:
         primary.power_discharge = AsyncMock(side_effect=lambda power: power)
         secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        await _run_prepared_power_routing(manager, -49, datetime.now())
+        await _run_prepared_power_routing(manager, -15, datetime.now())
 
         primary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_awaited_once_with(0)
@@ -7977,8 +7977,8 @@ class TestSmartMatchingPrimaryAware:
 
         assert all(target > 0 for target in primary_targets)
 
-    @pytest.mark.parametrize("charge_time", [datetime.min, datetime.now() + timedelta(seconds=30)])
-    async def test_output_mode_near_full_primary_export_overflow_charges_secondary(self, hass, charge_time):
+    @pytest.mark.parametrize("holdoff_active", [False, True])
+    async def test_output_mode_near_full_primary_export_overflow_charges_secondary(self, hass, holdoff_active):
         """
         An output-mode near-full primary should keep serving PV and route export overflow to the secondary.
 
@@ -8029,7 +8029,7 @@ class TestSmartMatchingPrimaryAware:
             devices=(primary, secondary),
             operation=ManagerMode.MATCHING,
             primary_device_id=primary.deviceId,
-            charge_time=charge_time,
+            charge_time=datetime.now() + timedelta(seconds=30) if holdoff_active else datetime.min,
         )
         primary.power_get = AsyncMock(return_value=True)
         secondary.power_get = AsyncMock(return_value=True)
@@ -8043,7 +8043,7 @@ class TestSmartMatchingPrimaryAware:
 
         assert primary.state is DeviceState.SOCNEARLYFULL
         primary.power_bypass.assert_not_awaited()
-        if charge_time == datetime.min:
+        if not holdoff_active:
             secondary.power_discharge.assert_not_awaited()
             primary.power_charge.assert_not_awaited()
             primary.power_discharge.assert_awaited_once_with(447)
@@ -10153,25 +10153,260 @@ class TestNearFullChargeTaper:
         assert called_power > 0
 
 
-class TestChargeHoldoffTimers:
-    """Verify the anti-oscillation charge holdoff uses the correct timer values."""
+class TestPowerTransitionGates:
+    """Verify automatic AC direction changes require sustained useful energy."""
 
-    def test_holdoff_duration_is_one_second(self, hass) -> None:
-        """Holdoff is always 1 s."""
-        from custom_components.zendure_ha.manager import CHARGE_HOLDOFF_SECONDS
+    def test_legacy_charge_timer_does_not_stack_with_transition_gate(self, hass) -> None:
+        device = make_device(hass)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        started = datetime.now()
 
-        assert CHARGE_HOLDOFF_SECONDS == 1
+        assert manager._apply_charge_holdoff(-200, started, allow_charge=False) == -200
+        assert manager.charge_time == started + timedelta(seconds=1)
 
-        device = make_device(hass, device_id="holdoff-timer-device", device_name="holdoff timer device", level=50)
-        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING)
+    @pytest.mark.parametrize(
+        ("direction", "power", "elapsed"),
+        [
+            pytest.param(_TransitionDirection.INPUT, 20, 10, id="input-20w-10s"),
+            pytest.param(_TransitionDirection.INPUT, 40, 5, id="input-40w-5s"),
+            pytest.param(_TransitionDirection.INPUT, 100, 5, id="input-100w-5s"),
+            pytest.param(_TransitionDirection.OUTPUT, 20, 10, id="output-20w-10s"),
+            pytest.param(_TransitionDirection.OUTPUT, 40, 5, id="output-40w-5s"),
+            pytest.param(_TransitionDirection.OUTPUT, 100, 2, id="output-100w-2s"),
+        ],
+    )
+    def test_gate_requires_200_ws_and_direction_minimum(self, hass, direction, power, elapsed) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT if direction is _TransitionDirection.INPUT else AcMode.INPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
-        now = datetime.now()
+        assert manager._transition_gate_allows(device, direction, power, started) is False
+        assert (
+            manager._transition_gate_allows(
+                device,
+                direction,
+                power,
+                started + timedelta(seconds=elapsed - 0.001),
+            )
+            is False
+        )
+        assert (
+            manager._transition_gate_allows(
+                device,
+                direction,
+                power,
+                started + timedelta(seconds=elapsed),
+            )
+            is True
+        )
 
-        # Trigger the holdoff by requesting charge while charge_time==datetime.max
-        manager._apply_charge_holdoff(-200, now, allow_charge=True)
+    @pytest.mark.parametrize("power", [0, 15])
+    def test_gate_requires_strictly_more_than_15_w(self, hass, power) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
-        elapsed = (manager.charge_time - now).total_seconds()
-        assert abs(elapsed - 1) < 1
+        assert manager._transition_gate_allows(device, _TransitionDirection.INPUT, 40, started) is False
+        assert (
+            manager._transition_gate_allows(
+                device,
+                _TransitionDirection.INPUT,
+                power,
+                started + timedelta(seconds=5),
+            )
+            is False
+        )
+        assert not manager._transition_candidates
+
+    def test_gate_integrates_varying_power_conservatively(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+        assert manager._transition_gate_allows(device, _TransitionDirection.INPUT, 20, started) is False
+        assert (
+            manager._transition_gate_allows(
+                device,
+                _TransitionDirection.INPUT,
+                100,
+                started + timedelta(seconds=5),
+            )
+            is False
+        )
+        assert (
+            manager._transition_gate_allows(
+                device,
+                _TransitionDirection.INPUT,
+                100,
+                started + timedelta(seconds=6),
+            )
+            is True
+        )
+
+    def test_stale_sample_gap_restarts_candidate(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+        assert manager._transition_gate_allows(device, _TransitionDirection.OUTPUT, 100, started) is False
+        assert (
+            manager._transition_gate_allows(
+                device,
+                _TransitionDirection.OUTPUT,
+                100,
+                started + timedelta(seconds=16),
+            )
+            is False
+        )
+        candidate = next(iter(manager._transition_candidates.values()))
+        assert candidate.started_at == started + timedelta(seconds=16)
+        assert candidate.energy_ws == 0
+
+    async def test_input_command_waits_without_stacking_legacy_holdoff(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+        manager._routing_transition_time = started
+        assert await manager._command_input(device, -40) == 0
+        device.power_charge.assert_not_awaited()
+
+        manager._routing_transition_time = started + timedelta(seconds=5)
+        assert await manager._command_input(device, -40) == -40
+        device.power_charge.assert_awaited_once_with(-40)
+
+    async def test_output_command_uses_zero_charge_safe_harbor_before_switch(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.INPUT, home_input=100, input_limit=100)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+        manager._routing_transition_time = started
+        assert await manager._command_home_output(device, 100) == 0
+        device.power_charge.assert_awaited_once_with(0)
+        device.power_discharge.assert_not_awaited()
+
+        device.homeInput.update_value(0)
+        device.limitInput.update_value(0)
+        manager._routing_transition_time = started + timedelta(seconds=2)
+        assert await manager._command_home_output(device, 100) == 0
+        manager._routing_transition_time = started + timedelta(seconds=4)
+        assert await manager._command_home_output(device, 100) == 100
+        device.power_discharge.assert_awaited_once_with(100)
+
+    async def test_stale_input_limit_does_not_block_output_switch_without_measured_input(self, hass) -> None:
+        """A requested input cap without actual intake must not reset output transition evidence."""
+        device = make_device(hass, ac_mode=AcMode.INPUT, home_input=0, input_limit=8)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 13, 3, 1, 42, tzinfo=UTC)
+
+        manager._routing_transition_time = started
+        assert await manager._command_home_output(device, 100) == 0
+        device.power_charge.assert_awaited_once_with(0)
+        device.power_discharge.assert_not_awaited()
+
+        manager._routing_transition_time = started + timedelta(seconds=2)
+        assert await manager._command_home_output(device, 100) == 100
+        device.power_discharge.assert_awaited_once_with(100)
+
+    async def test_zero_output_keeps_an_input_mode_device_in_input(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        assert await manager._command_home_output(device, 0) == 0
+
+        device.power_charge.assert_awaited_once_with(0)
+        device.power_discharge.assert_not_awaited()
+
+    def test_pending_gate_has_a_followup_deadline(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        started = datetime.now()
+        sample = manager._new_p1_sample(-40, started)
+
+        assert manager._transition_gate_allows(device, _TransitionDirection.INPUT, 40, started) is False
+        manager._consume_p1_sample(sample, routed=True)
+
+        assert manager._p1_followup_needed(sample) is True
+        assert manager._p1_followup_due(sample) == started + timedelta(seconds=5)
+
+    async def test_standard_routing_excludes_input_device_until_gate_releases(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT, input_limit=0, output_limit=0)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+            transition_gates=True,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+
+        await _run_prepared_power_routing(manager, -100, started)
+        device.power_charge.assert_not_awaited()
+
+        await _run_prepared_power_routing(manager, -100, started + timedelta(seconds=4.999))
+        device.power_charge.assert_not_awaited()
+
+        await _run_prepared_power_routing(manager, -100, started + timedelta(seconds=5))
+        device.power_charge.assert_awaited_once_with(-100)
+
+    async def test_manual_command_bypasses_transition_gate(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MANUAL,
+            transition_gates=True,
+        )
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+
+        assert await manager._command_input(device, -100) == -100
+        device.power_charge.assert_awaited_once_with(-100)
+        assert not manager._transition_candidates
+
+    async def test_same_mode_limit_adjustments_are_immediate(self, hass) -> None:
+        input_device = make_device(hass, device_id="input-device", ac_mode=AcMode.INPUT)
+        output_device = make_device(hass, device_id="output-device", ac_mode=AcMode.OUTPUT)
+        manager = make_manager(
+            hass,
+            devices=(input_device, output_device),
+            operation=ManagerMode.MATCHING,
+            transition_gates=True,
+        )
+        input_device.power_charge = AsyncMock(side_effect=lambda power: power)
+        output_device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        assert await manager._command_input(input_device, -40) == -40
+        assert await manager._command_home_output(output_device, 40) == 40
+
+        input_device.power_charge.assert_awaited_once_with(-40)
+        output_device.power_discharge.assert_awaited_once_with(40)
+        assert not manager._transition_candidates
+
+    async def test_active_charge_bypasses_and_clears_spike_filter_candidate(self, hass) -> None:
+        device = make_device(hass, ac_mode=AcMode.INPUT, home_input=100, input_limit=100)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        manager.spike_filter.update_value(1)
+        manager.spike_filter_threshold.update_value(800)
+        manager.spike_filter_duration.update_value(3)
+        manager.zero_fast = datetime.min
+        manager.zero_next = datetime.min
+        _mock_prepared_power_routing(manager)
+
+        routed = await manager._route_p1_update(1000, datetime.now())
+
+        assert routed is True
+        assert manager.p1_spike_started is None
+        _execute_mock(manager).assert_awaited_once()
 
 
 class TestLowSocImmediatePromotion:
