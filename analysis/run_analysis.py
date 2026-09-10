@@ -14,6 +14,8 @@ DEVICE_IDS = ("wz_balkon", "k_balkon")
 UNKNOWN_VALUES = {"", "none", "null", "unknown", "unavailable"}
 MAX_INTEGRATION_GAP_SECONDS = 5
 POWER_THRESHOLD_W = 30
+LOW_POWER_EXPORT_THRESHOLD_W = 15
+LOW_POWER_EXPORT_MIN_DURATION_SECONDS = 15
 CHARGE_CAPABLE_STATES = {"normal", "nearly_full", "reserve", "reserve_recovery", "empty"}
 
 ParsedRow = dict[str, Any]
@@ -188,6 +190,22 @@ def find_sustained_periods(
     if current_period:
         periods.append(current_period)
     return [_period_stats(period) for period in periods]
+
+
+def find_low_power_export_periods(rows: list[ParsedRow]) -> list[dict[str, Any]]:
+    """Return export periods above 15 W that last longer than 15 seconds."""
+    periods = find_sustained_periods(
+        rows,
+        lambda row: (
+            row["sml"] is not None and row["sml"] < -LOW_POWER_EXPORT_THRESHOLD_W
+        ),
+        gap_allowance_sec=MAX_INTEGRATION_GAP_SECONDS,
+    )
+    return [
+        period
+        for period in periods
+        if period["duration"] > LOW_POWER_EXPORT_MIN_DURATION_SECONDS
+    ]
 
 
 def group_episodes(rows: list[ParsedRow], gap_allowance_sec: float = 30) -> list[list[ParsedRow]]:
@@ -395,6 +413,7 @@ def analyze_rows(
         "grid_import_while_charging_rows": import_rows,
         "battery_backed_export_rows": battery_export_rows,
         "overcorrection_cycles": find_overcorrection_cycles(rows),
+        "low_power_export_periods": find_low_power_export_periods(rows),
     }
 
 

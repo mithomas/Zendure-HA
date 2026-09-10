@@ -9,6 +9,8 @@ from typing import Any
 try:
     from .run_analysis import (
         DEVICE_IDS,
+        LOW_POWER_EXPORT_MIN_DURATION_SECONDS,
+        LOW_POWER_EXPORT_THRESHOLD_W,
         POWER_THRESHOLD_W,
         analyze_rows,
         find_large_swings,
@@ -20,6 +22,8 @@ try:
 except ImportError:
     from run_analysis import (
         DEVICE_IDS,
+        LOW_POWER_EXPORT_MIN_DURATION_SECONDS,
+        LOW_POWER_EXPORT_THRESHOLD_W,
         POWER_THRESHOLD_W,
         analyze_rows,
         find_large_swings,
@@ -131,6 +135,17 @@ def analyze_file(
     _print_periods(
         f"Top sustained high export periods (<= -{POWER_THRESHOLD_W} W for >= 1m):",
         export_periods,
+    )
+    low_power_export_periods = sorted(
+        result["low_power_export_periods"],
+        key=lambda period: period["duration"],
+        reverse=True,
+    )
+    _print_periods(
+        "Top sustained export periods "
+        f"(> {LOW_POWER_EXPORT_THRESHOLD_W} W for "
+        f"> {LOW_POWER_EXPORT_MIN_DURATION_SECONDS}s):",
+        low_power_export_periods,
     )
 
     print("\nTop grid-power swings within a 2-minute window:")

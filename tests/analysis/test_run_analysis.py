@@ -107,6 +107,28 @@ def test_sustained_period_stops_when_condition_becomes_false() -> None:
     assert all(period["avg_sml"] >= 100 for period in periods)
 
 
+@pytest.mark.parametrize(
+    ("grid_power", "duration_seconds", "expected_periods"),
+    [
+        (-16, 16, 1),
+        (-16, 15, 0),
+        (-15, 16, 0),
+    ],
+)
+def test_low_power_export_periods_use_strict_thresholds(
+    grid_power: int,
+    duration_seconds: int,
+    expected_periods: int,
+) -> None:
+    rows = parse_rows(
+        [_raw_row(second, sml_power=grid_power) for second in range(duration_seconds + 1)]
+    )
+
+    result = analyze_rows(rows)
+
+    assert len(result["low_power_export_periods"]) == expected_periods
+
+
 def test_overcorrection_cycle_excludes_full_input_samples() -> None:
     rows = parse_rows(
         [

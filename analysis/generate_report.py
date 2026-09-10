@@ -8,6 +8,8 @@ from pathlib import Path
 try:
     from .run_analysis import (
         DEVICE_IDS,
+        LOW_POWER_EXPORT_MIN_DURATION_SECONDS,
+        LOW_POWER_EXPORT_THRESHOLD_W,
         POWER_THRESHOLD_W,
         analyze_rows,
         find_sustained_periods,
@@ -18,6 +20,8 @@ try:
 except ImportError:
     from run_analysis import (
         DEVICE_IDS,
+        LOW_POWER_EXPORT_MIN_DURATION_SECONDS,
+        LOW_POWER_EXPORT_THRESHOLD_W,
         POWER_THRESHOLD_W,
         analyze_rows,
         find_sustained_periods,
@@ -49,6 +53,14 @@ def generate_report(
         return f"## {Path(file_path).name}\n\nNo matching rows."
 
     result = analyze_rows(rows, external_solar_devices=external_solar_devices)
+    low_power_export_periods = sorted(
+        result["low_power_export_periods"],
+        key=lambda period: period["duration"],
+        reverse=True,
+    )
+    low_power_export_kwh = -sum(
+        period["energy_kwh"] for period in low_power_export_periods
+    )
     scope = ", ".join(f"{device_id}=unmanaged" for device_id in only_unmanaged) or "all rows"
     external_solar = ", ".join(external_solar_devices) or "none"
     lines = [
@@ -85,6 +97,14 @@ def generate_report(
             f"| Export -> import -> export cycles | {len(result['overcorrection_cycles'])} |",
             f"| Sustained import periods | {_period_count(rows, importing=True)} |",
             f"| Sustained export periods | {_period_count(rows, importing=False)} |",
+            "| Export periods "
+            f"> {LOW_POWER_EXPORT_THRESHOLD_W} W for "
+            f"> {LOW_POWER_EXPORT_MIN_DURATION_SECONDS} s | "
+            f"{len(low_power_export_periods)} |",
+            "| Energy in export periods "
+            f"> {LOW_POWER_EXPORT_THRESHOLD_W} W for "
+            f"> {LOW_POWER_EXPORT_MIN_DURATION_SECONDS} s | "
+            f"{low_power_export_kwh:.6f} kWh |",
             "",
             "AC intake is measured from an explicit input-power column when available. Otherwise it is "
             "estimated from charging battery flow, simultaneous home output, and local DC solar. Solar "
@@ -92,6 +112,23 @@ def generate_report(
             "Unmanaged devices remain visible as grid context but are excluded from routing metrics.",
         ]
     )
+
+    if low_power_export_periods:
+        lines.extend(
+            [
+                "",
+                f"### Export periods above {LOW_POWER_EXPORT_THRESHOLD_W} W",
+                "",
+                "| Period | Duration | Average grid power | Exported energy |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for period in low_power_export_periods[:10]:
+            lines.append(
+                f"| {period['start']} to {period['end'].time()} | "
+                f"{period['duration']:.0f} s | {period['avg_sml']:.1f} W | "
+                f"{-period['energy_kwh']:.6f} kWh |"
+            )
 
     cycles = result["overcorrection_cycles"]
     if cycles:
