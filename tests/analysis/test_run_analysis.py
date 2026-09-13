@@ -6,6 +6,7 @@ from analysis.run_analysis import (
     POWER_THRESHOLD_W,
     analyze_rows,
     estimate_ac_input,
+    find_large_swings,
     find_sustained_periods,
     parse_float,
     parse_rows,
@@ -120,9 +121,7 @@ def test_low_power_export_periods_use_strict_thresholds(
     duration_seconds: int,
     expected_periods: int,
 ) -> None:
-    rows = parse_rows(
-        [_raw_row(second, sml_power=grid_power) for second in range(duration_seconds + 1)]
-    )
+    rows = parse_rows([_raw_row(second, sml_power=grid_power) for second in range(duration_seconds + 1)])
 
     result = analyze_rows(rows)
 
@@ -278,6 +277,220 @@ def test_default_analysis_threshold_includes_30_watt_reversals() -> None:
     assert POWER_THRESHOLD_W == 30
     assert len(result["overcorrection_cycles"]) == 1
     assert result["grid_import_while_charging_kwh"] == pytest.approx(30 / 3_600_000)
+
+
+def test_actual_input_stop_and_same_mode_restart_are_correlated_with_command() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, sml_power=10, wz_balkon_input_power=40, wz_balkon_input_limit=40),
+            _raw_row(1, sml_power=-50, wz_balkon_input_power=0, wz_balkon_input_limit=0),
+            _raw_row(4, sml_power=5, wz_balkon_input_power=40, wz_balkon_input_limit=40),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["input_interruption_counts"] == {"wz_balkon": 1, "k_balkon": 0}
+    episode = result["input_interruptions"]["wz_balkon"][0]
+    assert episode["stop"] == START + timedelta(seconds=1)
+    assert episode["restart"] == START + timedelta(seconds=4)
+    assert episode["duration"] == 3
+    assert episode["power_before_w"] == 40
+    assert episode["peak_grid_impact_w"] == 50
+    assert episode["command_limit_cleared"] is True
+    assert episode["same_mode_restart"] is True
+
+
+def test_stale_input_limit_without_actual_intake_is_not_an_interruption() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, wz_balkon_input_power=0, wz_balkon_input_limit=100),
+            _raw_row(1, wz_balkon_input_power=0, wz_balkon_input_limit=0),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["input_interruption_counts"]["wz_balkon"] == 0
+    assert result["input_interruptions"]["wz_balkon"] == []
+
+
+def test_secondary_output_stop_and_restart_are_detected_without_mode_switch() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(
+                0,
+                wz_balkon_fusegroup="unmanaged",
+                k_balkon_fusegroup="managed",
+                k_balkon_output_power=60,
+                k_balkon_output_limit=60,
+            ),
+            _raw_row(
+                1,
+                sml_power=80,
+                wz_balkon_fusegroup="unmanaged",
+                k_balkon_fusegroup="managed",
+                k_balkon_output_power=0,
+                k_balkon_output_limit=0,
+            ),
+            _raw_row(
+                5,
+                wz_balkon_fusegroup="unmanaged",
+                k_balkon_fusegroup="managed",
+                k_balkon_output_power=60,
+                k_balkon_output_limit=60,
+            ),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["mode_switches"]["k_balkon"] == 0
+    assert result["output_interruption_counts"]["k_balkon"] == 1
+    episode = result["output_interruptions"]["k_balkon"][0]
+    assert episode["restart"] == START + timedelta(seconds=5)
+    assert episode["same_mode_restart"] is True
+    assert episode["peak_grid_impact_w"] == 80
+
+
+def test_interruption_detection_ignores_repeated_zeroes_and_sample_gaps() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(0, wz_balkon_input_power=40),
+            _raw_row(10, wz_balkon_input_power=0),
+            _raw_row(11, wz_balkon_input_power=0),
+            _raw_row(12, wz_balkon_input_power=40),
+            _raw_row(13, wz_balkon_input_power=0),
+            _raw_row(14, wz_balkon_input_power=0),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["input_interruption_counts"]["wz_balkon"] == 1
+
+
+def test_local_pv_withheld_during_grid_import_is_device_scoped() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(
+                0,
+                sml_power=100,
+                wz_balkon_ac_mode="output",
+                wz_balkon_solar_power=500,
+                wz_balkon_output_power=300,
+                wz_balkon_bat_flow=-200,
+            ),
+            _raw_row(
+                1,
+                sml_power=120,
+                wz_balkon_ac_mode="output",
+                wz_balkon_solar_power=500,
+                wz_balkon_output_power=280,
+                wz_balkon_bat_flow=-220,
+            ),
+        ]
+    )
+
+    result = analyze_rows(rows)
+
+    assert result["local_pv_withheld_import_counts"] == {"wz_balkon": 1, "k_balkon": 0}
+    period = result["local_pv_withheld_import_periods"]["wz_balkon"][0]
+    assert period["duration"] == 1
+    assert period["peak_grid_import_w"] == 120
+    assert period["peak_local_battery_charge_w"] == 220
+    assert period["withheld_energy_kwh"] == pytest.approx(120 / 3_600_000)
+
+
+@pytest.mark.parametrize(
+    ("managed", "external_solar_devices"),
+    [
+        ("unmanaged", ()),
+        ("managed", ("wz_balkon",)),
+    ],
+)
+def test_local_pv_withheld_detection_excludes_unmanaged_and_external_solar(
+    managed: str,
+    external_solar_devices: tuple[str, ...],
+) -> None:
+    rows = parse_rows(
+        [
+            _raw_row(
+                0,
+                sml_power=100,
+                wz_balkon_fusegroup=managed,
+                wz_balkon_ac_mode="output",
+                wz_balkon_solar_power=500,
+                wz_balkon_output_power=300,
+                wz_balkon_bat_flow=-200,
+            )
+        ]
+    )
+
+    result = analyze_rows(rows, external_solar_devices=external_solar_devices)
+
+    assert result["local_pv_withheld_import_counts"]["wz_balkon"] == 0
+
+
+def test_large_swings_sliding_window_matches_reference_implementation() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(second, sml_power="unknown" if second in {3, 9} else ((second * 37) % 101) - 50)
+            for second in range(0, 361, 3)
+        ]
+    )
+
+    expected = []
+    for index, start_row in enumerate(rows):
+        window = [
+            row
+            for row in rows[index:]
+            if (row["time"] - start_row["time"]).total_seconds() <= 120 and row["sml"] is not None
+        ]
+        if len(window) < 2:
+            continue
+        values = [row["sml"] for row in window]
+        expected.append(
+            {
+                "start_time": start_row["time"],
+                "end_time": window[-1]["time"],
+                "swing": max(values) - min(values),
+                "min_sml": min(values),
+                "max_sml": max(values),
+                "rows": window,
+            }
+        )
+    expected.sort(key=lambda swing: swing["swing"], reverse=True)
+    distinct = []
+    for swing in expected:
+        if all(abs((swing["start_time"] - existing["start_time"]).total_seconds()) >= 120 for existing in distinct):
+            distinct.append(swing)
+            if len(distinct) == 3:
+                break
+
+    actual = find_large_swings(rows, limit=3)
+
+    assert [
+        (
+            swing["start_time"],
+            swing["end_time"],
+            swing["swing"],
+            swing["min_sml"],
+            swing["max_sml"],
+            [row["idx"] for row in swing["rows"]],
+        )
+        for swing in actual
+    ] == [
+        (
+            swing["start_time"],
+            swing["end_time"],
+            swing["swing"],
+            swing["min_sml"],
+            swing["max_sml"],
+            [row["idx"] for row in swing["rows"]],
+        )
+        for swing in distinct
+    ]
 
 
 def test_default_analysis_threshold_excludes_29_watt_reversals() -> None:

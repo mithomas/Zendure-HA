@@ -10392,6 +10392,177 @@ class TestPowerTransitionGates:
         output_device.power_discharge.assert_awaited_once_with(40)
         assert not manager._transition_candidates
 
+    @pytest.mark.parametrize("selected_primary", [False, True], ids=["secondary", "selected-primary"])
+    async def test_active_output_zero_holds_until_sustained_export_evidence(
+        self,
+        hass,
+        selected_primary,
+    ) -> None:
+        device = make_device(
+            hass,
+            device_id=f"protected-output-{selected_primary}",
+            ac_mode=AcMode.OUTPUT,
+            home_output=100,
+            output_limit=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId if selected_primary else None,
+            transition_gates=True,
+        )
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 13, 8, 13, tzinfo=UTC)
+
+        manager._routing_transition_time = started
+        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 60
+        manager._routing_transition_time = started + timedelta(seconds=4.999)
+        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 60
+        manager._routing_transition_time = started + timedelta(seconds=5)
+        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 0
+
+        assert device.power_discharge.await_args_list == [call(60), call(60), call(0)]
+
+    async def test_active_input_zero_holds_until_sustained_import_evidence(self, hass) -> None:
+        device = make_device(
+            hass,
+            ac_mode=AcMode.INPUT,
+            home_input=100,
+            input_limit=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            transition_gates=True,
+        )
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 13, 3, 1, 42, tzinfo=UTC)
+
+        manager._routing_transition_time = started
+        assert await manager._command_input(device, 0, input_stop_residual_w=100) == -60
+        manager._routing_transition_time = started + timedelta(seconds=1.999)
+        assert await manager._command_input(device, 0, input_stop_residual_w=100) == -60
+        manager._routing_transition_time = started + timedelta(seconds=2)
+        assert await manager._command_input(device, 0, input_stop_residual_w=100) == 0
+
+        assert device.power_charge.await_args_list == [call(-60), call(-60), call(0)]
+
+    async def test_stale_input_limit_with_zero_measured_intake_clears_immediately(self, hass) -> None:
+        device = make_device(
+            hass,
+            ac_mode=AcMode.INPUT,
+            home_input=0,
+            input_limit=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            transition_gates=True,
+        )
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+
+        assert await manager._command_input(device, 0, input_stop_residual_w=100) == 0
+
+        device.power_charge.assert_awaited_once_with(0)
+        assert not manager._transition_candidates
+
+    @pytest.mark.parametrize(
+        ("operation", "protect_zero"),
+        [
+            pytest.param(ManagerMode.MANUAL, True, id="manual"),
+            pytest.param(ManagerMode.OFF, True, id="off"),
+            pytest.param(ManagerMode.STORE_SOLAR, False, id="strict-safety"),
+        ],
+    )
+    async def test_immediate_output_stop_paths_bypass_flow_protection(
+        self,
+        hass,
+        operation,
+        protect_zero,
+    ) -> None:
+        device = make_device(hass, ac_mode=AcMode.OUTPUT, home_output=100, output_limit=100)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=operation,
+            transition_gates=True,
+        )
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        assert (
+            await manager._command_home_output(
+                device,
+                0,
+                output_stop_residual_w=100,
+                protect_zero=protect_zero,
+            )
+            == 0
+        )
+
+        device.power_discharge.assert_awaited_once_with(0)
+        assert not manager._transition_candidates
+
+    async def test_bypass_passthrough_zero_remains_immediate(self, hass) -> None:
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="protected-bypass-zero",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=100,
+            output_limit=100,
+        )
+        device.solarInput.update_value(100)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            transition_gates=True,
+        )
+        device.power_bypass = AsyncMock(return_value=0)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        assert (
+            await manager._command_home_output(
+                device,
+                0,
+                allow_bypass_zero=True,
+                output_stop_residual_w=100,
+            )
+            == 0
+        )
+
+        device.power_bypass.assert_awaited_once_with()
+        device.power_discharge.assert_not_awaited()
+        assert not manager._transition_candidates
+
+    async def test_offline_output_zero_remains_immediate(self, hass) -> None:
+        device = make_device(
+            hass,
+            ac_mode=AcMode.OUTPUT,
+            home_output=100,
+            output_limit=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            transition_gates=True,
+        )
+        device.lastseen = datetime.min
+        device.setStatus()
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 0
+
+        device.power_discharge.assert_awaited_once_with(0)
+        assert not manager._transition_candidates
+
     async def test_active_charge_bypasses_and_clears_spike_filter_candidate(self, hass) -> None:
         device = make_device(hass, ac_mode=AcMode.INPUT, home_input=100, input_limit=100)
         manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
@@ -10407,6 +10578,87 @@ class TestPowerTransitionGates:
         assert routed is True
         assert manager.p1_spike_started is None
         _execute_mock(manager).assert_awaited_once()
+
+
+class TestHiddenPowerFlowInterruptions:
+    """Protect useful same-direction flow from automatic zero commands."""
+
+    async def test_no_primary_local_pv_charge_does_not_select_input_route(self, hass) -> None:
+        device = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-no-primary-local-pv",
+            product_model="SolarFlow 800 Pro",
+            ac_mode=AcMode.OUTPUT,
+            home_output=300,
+            output_limit=300,
+            battery_input=200,
+        )
+        device.solarInput.update_value(500)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            charge_time=datetime.min,
+            transition_gates=True,
+        )
+        device.power_get = AsyncMock(return_value=True)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -20, datetime.now())
+
+        device.power_charge.assert_not_awaited()
+        device.power_discharge.assert_awaited_once_with(280)
+
+    async def test_fast_export_trim_preserves_primary_production_floor_before_load_spike(self, hass) -> None:
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="fast-trim-production-floor",
+            product_model="SolarFlow 800 Pro",
+            ac_mode=AcMode.OUTPUT,
+            home_output=800,
+            output_limit=800,
+            battery_output=500,
+        )
+        primary.solarInput.update_value(300)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+            transition_gates=True,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 12, 9, 0, 40, tzinfo=UTC)
+
+        manager._reset_power_distribution_state()
+        setpoint = await manager._poll_devices_and_prepare_routing_state(-616)
+        intent, routing, _ = manager._prepare_power_routing(
+            -616,
+            started,
+            setpoint,
+            trim_home_output_only=True,
+        )
+        await manager._execute_power_routing(intent, started, routing)
+
+        primary.power_discharge.assert_awaited_once_with(300)
+
+        primary.power_discharge.reset_mock()
+        primary.homeOutput.update_value(300)
+        primary.limitOutput.update_value(300)
+        primary.batteryOutput.update_value(0)
+        await _run_prepared_power_routing(
+            manager,
+            1128,
+            started.replace(tzinfo=None) + timedelta(seconds=3),
+        )
+
+        primary.power_discharge.assert_awaited_once_with(800)
 
 
 class TestLowSocImmediatePromotion:

@@ -272,6 +272,10 @@ class _PowerRoutingDevice:
     available_discharge: int
     # Discharge capacity including production that can output even when battery discharge is blocked.
     available_discharge_with_produced: int
+    # Current meter import available as evidence for stopping this device's input.
+    input_stop_residual_w: int
+    # Current meter export available as evidence for stopping this device's output.
+    output_stop_residual_w: int
 
     @property
     def active_produced_home(self) -> int:
@@ -1302,21 +1306,49 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             min(device.electricLevel.asInt if device.state != DeviceState.SOCFULL else 100 for device in devices),
         )
 
-    async def _command_home_output(self, device: ZendureDevice, power: int, *, allow_bypass_zero: bool = False) -> int:
-        """Command home output, optionally using bypass as the zero-output command."""
-        if power == 0 and allow_bypass_zero and getattr(device, "byPass", None) is not None and device.byPass.is_on:
-            return 0
-        if power == 0 and allow_bypass_zero and device.can_bypass:
-            return await device.power_bypass()
+    async def _command_home_output(
+        self,
+        device: ZendureDevice,
+        power: int,
+        *,
+        allow_bypass_zero: bool = False,
+        route: _PowerRoutingDevice | None = None,
+        input_stop_residual_w: int | None = None,
+        output_stop_residual_w: int | None = None,
+        protect_zero: bool = True,
+    ) -> int:
+        """Command home output while protecting an active flow from an automatic zero."""
+        if route is not None:
+            input_stop_residual_w = route.input_stop_residual_w
+            output_stop_residual_w = route.output_stop_residual_w
+        if power == 0:
+            return await self._command_zero_home_output(
+                device,
+                allow_bypass_zero=allow_bypass_zero,
+                input_stop_residual_w=input_stop_residual_w,
+                output_stop_residual_w=output_stop_residual_w,
+                protect_zero=protect_zero,
+            )
+
         if (
-            power == 0
-            and self._transition_gates_enabled
-            and not self._transition_gates_bypassed
-            and self.operation != ManagerMode.MANUAL
-            and device.acMode.value == AcMode.INPUT
+            device.acMode.value == AcMode.INPUT
+            and self._actual_input_flow(device) > MODE_SWITCH_POWER_FLOOR_W
+            and self._flow_protection_active(
+                device,
+                input_stop_residual_w,
+                protect_zero=protect_zero,
+            )
         ):
+            if not self._flow_stop_allows(
+                device,
+                _TransitionDirection.OUTPUT,
+                input_stop_residual_w,
+                protect_zero=protect_zero,
+            ):
+                hold = self._flow_hold_target(self._actual_input_flow(device))
+                await device.power_charge(-hold)
+                return 0
             await device.power_charge(0)
-            return 0
         if power > 0 and not self._transition_gate_allows(
             device,
             _TransitionDirection.OUTPUT,
@@ -1329,10 +1361,85 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return 0
         return await device.power_discharge(power)
 
-    async def _command_input(self, device: ZendureDevice, power: int) -> int:
-        """Command device input after applying the physical input transition gate."""
+    async def _command_zero_home_output(
+        self,
+        device: ZendureDevice,
+        *,
+        allow_bypass_zero: bool,
+        input_stop_residual_w: int | None,
+        output_stop_residual_w: int | None,
+        protect_zero: bool,
+    ) -> int:
+        """Apply bypass and active-flow safeguards for a zero home-output target."""
+        if allow_bypass_zero and getattr(device, "byPass", None) is not None and device.byPass.is_on:
+            return 0
+        if allow_bypass_zero and device.can_bypass:
+            return await device.power_bypass()
+        if (
+            device.acMode.value == AcMode.INPUT
+            and self._transition_gates_enabled
+            and not self._transition_gates_bypassed
+            and self.operation != ManagerMode.MANUAL
+        ):
+            return await self._command_input(
+                device,
+                0,
+                input_stop_residual_w=input_stop_residual_w,
+                protect_zero=protect_zero,
+            )
+        if not self._flow_stop_allows(
+            device,
+            _TransitionDirection.INPUT,
+            output_stop_residual_w,
+            protect_zero=protect_zero,
+        ):
+            hold = self._flow_hold_target(device.homeOutput.asInt)
+            return await device.power_discharge(hold)
+        return await device.power_discharge(0)
+
+    async def _command_input(
+        self,
+        device: ZendureDevice,
+        power: int,
+        *,
+        route: _PowerRoutingDevice | None = None,
+        input_stop_residual_w: int | None = None,
+        output_stop_residual_w: int | None = None,
+        protect_zero: bool = True,
+    ) -> int:
+        """Command device input while protecting an active flow from an automatic zero."""
+        if route is not None:
+            input_stop_residual_w = route.input_stop_residual_w
+            output_stop_residual_w = route.output_stop_residual_w
         if power >= 0:
+            if power == 0 and not self._flow_stop_allows(
+                device,
+                _TransitionDirection.OUTPUT,
+                input_stop_residual_w,
+                protect_zero=protect_zero,
+            ):
+                hold = self._flow_hold_target(self._actual_input_flow(device))
+                return await device.power_charge(-hold)
             return await device.power_charge(power)
+        if (
+            device.acMode.value == AcMode.OUTPUT
+            and device.homeOutput.asInt > MODE_SWITCH_POWER_FLOOR_W
+            and self._flow_protection_active(
+                device,
+                output_stop_residual_w,
+                protect_zero=protect_zero,
+            )
+        ):
+            if not self._flow_stop_allows(
+                device,
+                _TransitionDirection.INPUT,
+                output_stop_residual_w,
+                protect_zero=protect_zero,
+            ):
+                hold = self._flow_hold_target(device.homeOutput.asInt)
+                await device.power_discharge(hold)
+                return 0
+            await device.power_discharge(0)
         if not self._transition_gate_allows(
             device,
             _TransitionDirection.INPUT,
@@ -1341,6 +1448,65 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         ):
             return 0
         return await device.power_charge(power)
+
+    @staticmethod
+    def _actual_input_flow(device: ZendureDevice) -> int:
+        """Return measured AC input after excluding off-grid input."""
+        return max(0, device.homeInput.asInt - max(0, device.pwr_offgrid))
+
+    @staticmethod
+    def _flow_hold_target(actual_flow_w: int) -> int:
+        """Return the nonzero target used while stop evidence is pending."""
+        return max(MODE_SWITCH_POWER_FLOOR_W + 1, min(60, max(0, actual_flow_w)))
+
+    def _flow_stop_allows(
+        self,
+        device: ZendureDevice,
+        direction: _TransitionDirection,
+        residual_w: int | None,
+        *,
+        protect_zero: bool,
+    ) -> bool:
+        """Return whether an automatic command may stop an active same-direction flow."""
+        actual_flow = (
+            self._actual_input_flow(device)
+            if direction is _TransitionDirection.OUTPUT
+            else max(0, device.homeOutput.asInt)
+        )
+        if (
+            not protect_zero
+            or residual_w is None
+            or actual_flow <= MODE_SWITCH_POWER_FLOOR_W
+            or not device.online
+            or not self._transition_gates_enabled
+            or self._transition_gates_bypassed
+            or self.operation in {ManagerMode.MANUAL, ManagerMode.OFF}
+        ):
+            self._reset_transition_candidate(device, direction)
+            return True
+        return self._transition_evidence_allows(
+            device,
+            direction,
+            residual_w,
+            self._transition_time(),
+        )
+
+    def _flow_protection_active(
+        self,
+        device: ZendureDevice,
+        residual_w: int | None,
+        *,
+        protect_zero: bool,
+    ) -> bool:
+        """Return whether this command is subject to automatic flow-stop protection."""
+        return (
+            protect_zero
+            and residual_w is not None
+            and device.online
+            and self._transition_gates_enabled
+            and not self._transition_gates_bypassed
+            and self.operation not in {ManagerMode.MANUAL, ManagerMode.OFF}
+        )
 
     def _transition_time(self) -> datetime:
         """Return the timestamp used for transition evidence in this routing cycle."""
@@ -1387,7 +1553,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         key = (device.deviceId, direction)
         self._transition_candidates_seen.add(key)
         target_mode = self._transition_target_mode(direction)
-        allowed = False
         if (
             not self._transition_gates_enabled
             or self._transition_gates_bypassed
@@ -1395,74 +1560,91 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or device.acMode.value == target_mode
         ):
             self._reset_transition_candidate(device)
-            allowed = True
-        else:
-            opposite = (
-                _TransitionDirection.OUTPUT if direction is _TransitionDirection.INPUT else _TransitionDirection.INPUT
-            )
-            self._reset_transition_candidate(device, opposite)
+            return True
 
-            # Do not use demand that still includes the device's own active AC
-            # charging, or surplus still caused by controlled battery output.
-            active_source_flow = (direction is _TransitionDirection.OUTPUT and device.homeInput.asInt > 0) or (
-                direction is _TransitionDirection.INPUT
-                and device.homeOutput.asInt > 0
-                and device.reports_battery_backed_home_output()
-            )
-            power_w = max(0, int(power_w))
-            if active_source_flow or power_w <= MODE_SWITCH_POWER_FLOOR_W:
+        opposite = (
+            _TransitionDirection.OUTPUT if direction is _TransitionDirection.INPUT else _TransitionDirection.INPUT
+        )
+        self._reset_transition_candidate(device, opposite)
+
+        # A stop gate may already be accumulating residual meter evidence for
+        # this direction. Keep it while telemetry still shows the old flow.
+        active_source_flow = (direction is _TransitionDirection.OUTPUT and self._actual_input_flow(device) > 0) or (
+            direction is _TransitionDirection.INPUT
+            and device.homeOutput.asInt > 0
+            and device.reports_battery_backed_home_output()
+        )
+        candidate = self._transition_candidates.get(key)
+        if active_source_flow:
+            if candidate is None:
                 self._reset_transition_candidate(device, direction)
-            else:
-                candidate = self._transition_candidates.get(key)
-                if candidate is None:
-                    candidate = _TransitionCandidate(time, time, power_w)
-                    self._transition_candidates[key] = candidate
-                    _LOGGER.debug(
-                        "AC transition gate started: device=%s direction=%s power=%sW",
-                        device.name,
-                        direction.value,
-                        power_w,
-                    )
-                elif candidate.released:
-                    allowed = True
-                else:
-                    sample_gap = self._transition_elapsed_seconds(candidate.last_evaluated_at, time)
-                    if sample_gap > MODE_SWITCH_MAX_SAMPLE_GAP_SECONDS:
-                        candidate.started_at = time
-                        candidate.last_evaluated_at = time
-                        candidate.last_power_w = power_w
-                        candidate.energy_ws = 0
-                        _LOGGER.debug(
-                            "AC transition gate restarted after sample gap: device=%s direction=%s gap=%.3fs",
-                            device.name,
-                            direction.value,
-                            sample_gap,
-                        )
-                    else:
-                        candidate.energy_ws += min(candidate.last_power_w, power_w) * sample_gap
-                        candidate.last_evaluated_at = time
-                        candidate.last_power_w = power_w
-                        elapsed = self._transition_elapsed_seconds(candidate.started_at, time)
-                        minimum_seconds = (
-                            MODE_SWITCH_TO_INPUT_MIN_SECONDS
-                            if direction is _TransitionDirection.INPUT
-                            else MODE_SWITCH_TO_OUTPUT_MIN_SECONDS
-                        )
-                        candidate.released = (
-                            elapsed >= minimum_seconds and candidate.energy_ws + 1e-6 >= MODE_SWITCH_ENERGY_THRESHOLD_WS
-                        )
-                        allowed = candidate.released
-                        _LOGGER.debug(
-                            "AC transition gate evaluated: device=%s direction=%s power=%sW elapsed=%.3fs "
-                            "energy=%.1fWs released=%s",
-                            device.name,
-                            direction.value,
-                            power_w,
-                            elapsed,
-                            candidate.energy_ws,
-                            candidate.released,
-                        )
-        return allowed
+            return candidate is not None and candidate.released
+        return self._transition_evidence_allows(device, direction, power_w, time)
+
+    def _transition_evidence_allows(
+        self,
+        device: ZendureDevice,
+        direction: _TransitionDirection,
+        power_w: int,
+        time: datetime,
+    ) -> bool:
+        """Accumulate the shared duration and energy evidence for one direction."""
+        key = (device.deviceId, direction)
+        self._transition_candidates_seen.add(key)
+        power_w = max(0, int(power_w))
+        if power_w <= MODE_SWITCH_POWER_FLOOR_W:
+            self._reset_transition_candidate(device, direction)
+            return False
+
+        candidate = self._transition_candidates.get(key)
+        if candidate is None:
+            self._transition_candidates[key] = _TransitionCandidate(time, time, power_w)
+            _LOGGER.debug(
+                "AC transition gate started: device=%s direction=%s power=%sW",
+                device.name,
+                direction.value,
+                power_w,
+            )
+            return False
+        if candidate.released:
+            return True
+
+        sample_gap = self._transition_elapsed_seconds(candidate.last_evaluated_at, time)
+        if sample_gap > MODE_SWITCH_MAX_SAMPLE_GAP_SECONDS:
+            candidate.started_at = time
+            candidate.last_evaluated_at = time
+            candidate.last_power_w = power_w
+            candidate.energy_ws = 0
+            _LOGGER.debug(
+                "AC transition gate restarted after sample gap: device=%s direction=%s gap=%.3fs",
+                device.name,
+                direction.value,
+                sample_gap,
+            )
+            return False
+
+        candidate.energy_ws += min(candidate.last_power_w, power_w) * sample_gap
+        candidate.last_evaluated_at = time
+        candidate.last_power_w = power_w
+        elapsed = self._transition_elapsed_seconds(candidate.started_at, time)
+        minimum_seconds = (
+            MODE_SWITCH_TO_INPUT_MIN_SECONDS
+            if direction is _TransitionDirection.INPUT
+            else MODE_SWITCH_TO_OUTPUT_MIN_SECONDS
+        )
+        candidate.released = (
+            elapsed >= minimum_seconds and candidate.energy_ws + 1e-6 >= MODE_SWITCH_ENERGY_THRESHOLD_WS
+        )
+        _LOGGER.debug(
+            "AC transition gate evaluated: device=%s direction=%s power=%sW elapsed=%.3fs energy=%.1fWs released=%s",
+            device.name,
+            direction.value,
+            power_w,
+            elapsed,
+            candidate.energy_ws,
+            candidate.released,
+        )
+        return candidate.released
 
     def _pending_transition_due(self) -> datetime | None:
         """Return the earliest release deadline among pending transition candidates."""
@@ -1493,11 +1675,24 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
         self._transition_candidates_seen.clear()
 
-    async def _stop_home_output_for_input(self, device: ZendureDevice, *, allow_bypass_zero: bool) -> None:
+    async def _stop_home_output_for_input(
+        self,
+        device: ZendureDevice,
+        *,
+        allow_bypass_zero: bool,
+        route: _PowerRoutingDevice | None = None,
+        protect_zero: bool = True,
+    ) -> None:
         """Stop home output before input, optionally using bypass as the zero-output command."""
         # pwr_offgrid devices may otherwise import from grid when stopped exactly at zero.
         if device.pwr_offgrid == 0:
-            await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
+            await self._command_home_output(
+                device,
+                0,
+                allow_bypass_zero=allow_bypass_zero,
+                route=route,
+                protect_zero=protect_zero,
+            )
         else:
             await device.power_discharge(-10)
 
@@ -2029,6 +2224,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             selected_primary,
             primary_aware=selected_primary_routing,
             pv_charge_first=pv_charge_first_mode,
+            p1=p1,
         )
         selected_charge_primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
@@ -2081,7 +2277,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             setpoint = int(self.manualpower.asNumber)
 
         if trim_home_output_only:
-            setpoint = max(0, setpoint)
+            selected_primary_produced_floor = (
+                routing.route(routing.selected_primary).active_produced_home
+                if routing.selected_primary is not None and routing.selected_primary in routing.discharge_devices
+                else 0
+            )
+            setpoint = max(0, setpoint, selected_primary_produced_floor)
 
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
@@ -2266,6 +2467,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         primary_aware: bool,
         pv_charge_first: bool = False,
+        p1: int = 0,
     ) -> _PowerRoutingSnapshot:
         """
         Build immutable per-device route facts from the current classification.
@@ -2329,6 +2531,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     primary_aware=primary_aware,
                     allow_produced_only=True,
                 ),
+                input_stop_residual_w=max(0, p1),
+                output_stop_residual_w=max(0, -p1),
             )
 
         return _PowerRoutingSnapshot(
@@ -2385,6 +2589,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 setpoint = max(setpoint, gross_discharge_setpoint)
         discharge_candidate_setpoint = setpoint
 
+        # Local PV already handled by an active output device without a selected
+        # primary must not select the AC-input route. Meter export still remains
+        # in the setpoint and can reduce or eventually stop that output.
+        active_output_production_without_primary = (
+            sum(max(0, -device.pwr_produced) for device in routing.discharge_devices)
+            if self.operation == ManagerMode.MATCHING and selected_primary is None
+            else 0
+        )
+
         # Local PV already charging the selected primary must not be counted as
         # additional meter surplus. Keep production from other devices available
         # for the allocation layer to redistribute.
@@ -2408,7 +2621,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         else:
             extra_surplus = max(
                 0,
-                self.produced - self.discharge_bypass - selected_primary_charge_surplus,
+                self.produced
+                - self.discharge_bypass
+                - selected_primary_charge_surplus
+                - active_output_production_without_primary,
             )
         selected_primary_near_full_output = (
             matching_primary_aware
@@ -2728,7 +2944,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # avoid stopping bypassing devices
             if not strict_output_stop and d.byPass.is_on:
                 continue
-            await self._stop_home_output_for_input(d, allow_bypass_zero=False)
+            await self._stop_home_output_for_input(
+                d,
+                allow_bypass_zero=False,
+                route=routing.route(d),
+                protect_zero=not strict_output_stop,
+            )
 
         # prevent hysteria
         setpoint = self._apply_charge_holdoff(setpoint, time, allow_charge=False)
@@ -2744,12 +2965,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             for d in list(candidates):
                 if (floor := routing.route(d).taper_output_floor) > 0:
                     candidates.remove(d)
-                    await self._command_home_output(d, floor, allow_bypass_zero=False)
+                    await self._command_home_output(
+                        d,
+                        floor,
+                        allow_bypass_zero=False,
+                        route=routing.route(d),
+                    )
 
         dev_start = await self._apply_weighted_charge_allocation(
             setpoint,
             charge_devices,
             idle_devices,
+            routing,
             input_capacities={device: routing.route(device).effective_input_capacity for device in charge_devices},
         )
         await self._start_idle_charge_devices(idle_devices, dev_start, routing)
@@ -3200,7 +3427,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         for d in self.discharge:
             if pv_charge_first_local_targets.get(d, 0) != 0 and charge_targets.get(d, 0) == 0:
-                await self._command_home_output(d, 0)
+                await self._command_home_output(d, 0, route=routing.route(d))
                 continue
             if charge_targets.get(d, 0) != 0:
                 continue
@@ -3209,22 +3436,28 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # full devices have nowhere to store PV; keep their pass-through running
             if strict_output_stop and d.state == DeviceState.SOCFULL:
                 continue
-            await self._stop_home_output_for_input(d, allow_bypass_zero=not strict_output_stop)
+            await self._stop_home_output_for_input(
+                d,
+                allow_bypass_zero=not strict_output_stop,
+                route=routing.route(d),
+                protect_zero=not strict_output_stop,
+            )
 
         if move_primary_charge_to_secondary and primary is not None:
-            await primary.power_charge(0)
+            await self._command_input(primary, 0, route=routing.route(primary))
         elif primary is not None:
             if primary_charge_target != 0:
                 if primary_taper_input_target is not None and primary_taper_input_target < 0:
-                    await self._command_input(primary, primary_taper_input_target)
+                    await self._command_input(primary, primary_taper_input_target, route=routing.route(primary))
                 elif primary_taper_output_target is not None:
                     await self._command_home_output(
                         primary,
                         primary_taper_output_target,
                         allow_bypass_zero=True,
+                        route=routing.route(primary),
                     )
                 else:
-                    await self._command_input(primary, primary_charge_target)
+                    await self._command_input(primary, primary_charge_target, route=routing.route(primary))
             elif setpoint < 0:
                 primary_input_limit = self._primary_charge_limit(primary)
                 primary_route = routing.route(primary)
@@ -3232,28 +3465,43 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     primary_input_limit = max(primary_input_limit, -primary_route.effective_input_capacity)
                 primary_target = min(0, max(setpoint, primary_input_limit))
                 if primary_target != 0:
-                    setpoint -= await self._command_input(primary, primary_target)
+                    setpoint -= await self._command_input(primary, primary_target, route=routing.route(primary))
                 elif (
                     not strict_output_stop
                     and active_discharge_targets.get(primary, 0) > 0
                     and not positive_demand_charge_lag
                 ):
-                    await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
+                    await self._command_home_output(
+                        primary,
+                        active_discharge_targets[primary],
+                        allow_bypass_zero=True,
+                        route=routing.route(primary),
+                    )
                 elif (
                     self.operation == ManagerMode.MATCHING
                     and primary_route.taper_active
                     and primary_route.effective_input_capacity == 0
                     and primary in self.charge
                 ):
-                    await primary.power_charge(0)
+                    await self._command_input(
+                        primary,
+                        0,
+                        route=routing.route(primary),
+                        protect_zero=False,
+                    )
             elif (
                 not strict_output_stop
                 and active_discharge_targets.get(primary, 0) > 0
                 and (not positive_demand_charge_lag or routing.route(primary).taper_output_floor > 0)
             ):
-                await self._command_home_output(primary, active_discharge_targets[primary], allow_bypass_zero=True)
+                await self._command_home_output(
+                    primary,
+                    active_discharge_targets[primary],
+                    allow_bypass_zero=True,
+                    route=routing.route(primary),
+                )
             elif positive_demand_charge_lag and primary in self.charge:
-                await primary.power_charge(0)
+                await self._command_input(primary, 0, route=routing.route(primary))
         elif (
             not strict_output_stop
             and selected_primary is not None
@@ -3264,15 +3512,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 selected_primary,
                 active_discharge_targets[selected_primary],
                 allow_bypass_zero=True,
+                route=routing.route(selected_primary),
             )
 
         for d in active_secondary_local_pv_only_devices:
-            await d.power_charge(0)
+            await self._command_input(d, 0, route=routing.route(d))
 
         dev_start = await self._apply_weighted_charge_allocation(
             setpoint,
             charge_devices,
             idle_devices,
+            routing,
             charge_targets=charge_targets,
             fallback_devices=set(pure_secondary_charge_devices) if move_primary_charge_to_secondary else None,
             input_capacities={device: routing.route(device).effective_input_capacity for device in charge_devices},
@@ -3283,26 +3533,36 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         for d in idle_secondary_charge_devices:
             target = charge_targets.get(d, 0)
             if target != 0:
-                await self._command_input(d, target)
+                await self._command_input(d, target, route=routing.route(d))
 
         for d in active_secondary_charge_devices:
             target = charge_targets.get(d, 0)
             if target != 0:
-                await self._command_input(d, target)
+                await self._command_input(d, target, route=routing.route(d))
             elif not strict_output_stop and active_discharge_targets.get(d, 0) > 0:
-                await self._command_home_output(d, active_discharge_targets[d], allow_bypass_zero=True)
+                await self._command_home_output(
+                    d,
+                    active_discharge_targets[d],
+                    allow_bypass_zero=True,
+                    route=routing.route(d),
+                )
 
         for d in pv_charge_first_local_targets:
             if d in self.discharge or charge_targets.get(d, 0) != 0:
                 continue
-            await self._command_home_output(d, 0)
+            await self._command_home_output(d, 0, route=routing.route(d))
 
         if not strict_output_stop:
             for d, target in active_discharge_targets.items():
                 if d is selected_primary or d in active_secondary_charge_devices:
                     continue
                 if target > 0:
-                    await self._command_home_output(d, target, allow_bypass_zero=True)
+                    await self._command_home_output(
+                        d,
+                        target,
+                        allow_bypass_zero=True,
+                        route=routing.route(d),
+                    )
 
         await self._start_idle_charge_devices(idle_devices, dev_start, routing)
 
@@ -3311,6 +3571,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         setpoint: int,
         charge_devices: list[ZendureDevice],
         idle_devices: list[ZendureDevice],
+        routing: _PowerRoutingSnapshot,
         *,
         charge_targets: dict[ZendureDevice, int] | None = None,
         fallback_devices: set[ZendureDevice] | None = None,
@@ -3348,12 +3609,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 pwr = target - base_target
 
             if subtract_actual_charge:
-                actual_target = await self._command_input(d, target)
+                actual_target = await self._command_input(d, target, route=routing.route(d))
                 setpoint -= actual_target - base_target
             else:
                 setpoint -= pwr
                 if command_zero_targets or target != 0:
-                    await self._command_input(d, target)
+                    await self._command_input(d, target, route=routing.route(d))
             dev_start += -1 if pwr != 0 and d.electricLevel.asInt > idle_lvlmin + 3 else 0
 
         return dev_start
@@ -3378,7 +3639,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
             if target < -routing.route(d).effective_input_capacity:
                 continue
-            await self._command_input(d, target)
+            await self._command_input(d, target, route=routing.route(d))
             if (dev_start := dev_start - d.charge_optimal * 2) >= 0:
                 break
 
@@ -3399,7 +3660,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Home output => setpoint %sW", setpoint)
 
         self._reset_home_output_charge_state()
-        await self._stop_charging_for_home_output()
+        await self._stop_charging_for_home_output(routing)
 
         discharge_devices = routing.discharge_candidates(
             list(self.discharge),
@@ -3418,7 +3679,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             0 if produced_only else self._add_battery_remainder(targets, setpoint, discharge_devices, idle_lvlmax)
         )
 
-        await self._command_home_output_targets(discharge_devices, targets)
+        await self._command_home_output_targets(discharge_devices, targets, routing)
 
         if produced_only:
             return
@@ -3465,6 +3726,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and routing.produced_limit(device) > 0
         ]
         await self._stop_charging_for_home_output(
+            routing,
             skip_devices=set(charge_produced_devices),
             allow_bypass_zero=True,
         )
@@ -3512,7 +3774,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 selected_primary.name,
                 selected_primary.discharge_floor_soc(),
             )
-            await self._command_home_output(selected_primary, 0, allow_bypass_zero=True)
+            await self._command_home_output(
+                selected_primary,
+                0,
+                allow_bypass_zero=True,
+                route=routing.route(selected_primary),
+                protect_zero=False,
+            )
 
         primary = (
             selected_primary
@@ -3621,12 +3889,27 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         async def command_primary_aware_home_output(device: ZendureDevice, target: int) -> None:
             route = routing.route(device)
             if device.can_bypass and target <= route.bypass_passthrough:
-                await self._command_home_output(device, 0, allow_bypass_zero=True)
+                await self._command_home_output(
+                    device,
+                    0,
+                    allow_bypass_zero=True,
+                    route=route,
+                )
             else:
-                await self._command_home_output(device, target, allow_bypass_zero=True)
+                await self._command_home_output(
+                    device,
+                    target,
+                    allow_bypass_zero=True,
+                    route=route,
+                )
 
         for device in input_exit_devices:
-            await self._command_home_output(device, 0, allow_bypass_zero=True)
+            await self._command_home_output(
+                device,
+                0,
+                allow_bypass_zero=True,
+                route=routing.route(device),
+            )
 
         if primary is not None and primary_target > 0:
             await command_primary_aware_home_output(primary, primary_target)
@@ -3636,7 +3919,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and selected_primary in self.discharge
             and requested_setpoint == 0
         ):
-            await self._command_home_output(selected_primary, 0, allow_bypass_zero=True)
+            await self._command_home_output(
+                selected_primary,
+                0,
+                allow_bypass_zero=True,
+                route=routing.route(selected_primary),
+            )
 
         for device in command_devices:
             await command_primary_aware_home_output(device, targets[device])
@@ -3653,6 +3941,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     async def _stop_charging_for_home_output(
         self,
+        routing: _PowerRoutingSnapshot,
         *,
         skip_devices: set[ZendureDevice] | None = None,
         allow_bypass_zero: bool = False,
@@ -3665,20 +3954,36 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # SF 2400 may show more gridInputPower than offGridPower and will be
             # recognized as charging, so set power to 10 instead of 0.
             if max(0, device.pwr_offgrid) > 0:
-                await self._command_home_output(device, 10, allow_bypass_zero=allow_bypass_zero)
+                await self._command_home_output(
+                    device,
+                    10,
+                    allow_bypass_zero=allow_bypass_zero,
+                    route=routing.route(device),
+                )
             elif allow_bypass_zero and device.can_bypass:
-                await self._command_home_output(device, 0, allow_bypass_zero=allow_bypass_zero)
+                await self._command_home_output(
+                    device,
+                    0,
+                    allow_bypass_zero=allow_bypass_zero,
+                    route=routing.route(device),
+                )
             else:
                 # OPTIMIZATION: Stop charging by zeroing input limit instead of switching AC mode to output
-                await device.power_charge(0)
+                await self._command_input(device, 0, route=routing.route(device))
 
     async def _command_home_output_targets(
         self,
         devices: list[ZendureDevice],
         targets: dict[ZendureDevice, int],
+        routing: _PowerRoutingSnapshot,
         *,
         allow_bypass_zero: bool = False,
     ) -> None:
         """Command home output targets for the provided devices."""
         for device in devices:
-            await self._command_home_output(device, targets[device], allow_bypass_zero=allow_bypass_zero)
+            await self._command_home_output(
+                device,
+                targets[device],
+                allow_bypass_zero=allow_bypass_zero,
+                route=routing.route(device),
+            )

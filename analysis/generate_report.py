@@ -58,9 +58,7 @@ def generate_report(
         key=lambda period: period["duration"],
         reverse=True,
     )
-    low_power_export_kwh = -sum(
-        period["energy_kwh"] for period in low_power_export_periods
-    )
+    low_power_export_kwh = -sum(period["energy_kwh"] for period in low_power_export_periods)
     scope = ", ".join(f"{device_id}=unmanaged" for device_id in only_unmanaged) or "all rows"
     external_solar = ", ".join(external_solar_devices) or "none"
     lines = [
@@ -73,16 +71,23 @@ def generate_report(
         "",
         "### Manager participation",
         "",
-        "| Device | Managed | Unmanaged | Unknown | Managed mode switches |",
-        "|---|---:|---:|---:|---:|",
+        "| Device | Managed | Unmanaged | Unknown | Mode switches | Input interruptions | "
+        "Output interruptions | PV-withholding periods |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for device_id in DEVICE_IDS:
         samples = result["management_samples"][device_id]
         lines.append(
             f"| {device_id} | {samples['managed']} | {samples['unmanaged']} | "
-            f"{samples['unknown']} | {result['mode_switches'][device_id]} |"
+            f"{samples['unknown']} | {result['mode_switches'][device_id]} | "
+            f"{result['input_interruption_counts'][device_id]} | "
+            f"{result['output_interruption_counts'][device_id]} | "
+            f"{result['local_pv_withheld_import_counts'][device_id]} |"
         )
 
+    withheld_periods = [
+        period for device_id in DEVICE_IDS for period in result["local_pv_withheld_import_periods"][device_id]
+    ]
     lines.extend(
         [
             "",
@@ -90,11 +95,12 @@ def generate_report(
             "",
             "| Metric | Value |",
             "|---|---:|",
-            "| Grid import attributable to managed AC charging | "
-            f"{result['grid_import_while_charging_kwh']:.6f} kWh |",
+            f"| Grid import attributable to managed AC charging | {result['grid_import_while_charging_kwh']:.6f} kWh |",
             f"| Battery-backed grid export | {result['battery_backed_export_kwh']:.6f} kWh |",
             f"| Grid export while a managed battery was full | {result['full_export_kwh']:.6f} kWh |",
             f"| Export -> import -> export cycles | {len(result['overcorrection_cycles'])} |",
+            "| Usable local PV withheld during grid import | "
+            f"{sum(period['withheld_energy_kwh'] for period in withheld_periods):.6f} kWh |",
             f"| Sustained import periods | {_period_count(rows, importing=True)} |",
             f"| Sustained export periods | {_period_count(rows, importing=False)} |",
             "| Export periods "
@@ -112,6 +118,59 @@ def generate_report(
             "Unmanaged devices remain visible as grid context but are excluded from routing metrics.",
         ]
     )
+
+    interruptions = [
+        episode
+        for direction in ("input", "output")
+        for device_id in DEVICE_IDS
+        for episode in result[f"{direction}_interruptions"][device_id]
+    ]
+    interruptions.sort(key=lambda episode: episode["stop"])
+    if interruptions:
+        lines.extend(
+            [
+                "",
+                "### First actual-flow interruptions",
+                "",
+                "| Stop | Device | Flow | Power before | Duration | Restart | Peak grid impact | "
+                "Command limit cleared |",
+                "|---|---|---|---:|---:|---|---:|---|",
+            ]
+        )
+        for episode in interruptions[:20]:
+            restart = episode["restart"] or "-"
+            cleared = (
+                "unknown"
+                if episode["command_limit_cleared"] is None
+                else "yes"
+                if episode["command_limit_cleared"]
+                else "no"
+            )
+            lines.append(
+                f"| {episode['stop']} | {episode['device_id']} | {episode['direction']} | "
+                f"{episode['power_before_w']:.0f} W | {episode['duration']:.0f} s | {restart} | "
+                f"{episode['peak_grid_impact_w']:.0f} W | {cleared} |"
+            )
+
+    if withheld_periods:
+        withheld_periods.sort(key=lambda period: period["peak_withheld_w"], reverse=True)
+        lines.extend(
+            [
+                "",
+                "### Local PV withheld during grid import",
+                "",
+                "| Period | Device | Duration | Peak import | Peak local battery charge | "
+                "Peak usable withheld power | Withheld energy |",
+                "|---|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for period in withheld_periods[:20]:
+            lines.append(
+                f"| {period['start']} to {period['end'].time()} | {period['device_id']} | "
+                f"{period['duration']:.0f} s | {period['peak_grid_import_w']:.0f} W | "
+                f"{period['peak_local_battery_charge_w']:.0f} W | "
+                f"{period['peak_withheld_w']:.0f} W | {period['withheld_energy_kwh']:.6f} kWh |"
+            )
 
     if low_power_export_periods:
         lines.extend(

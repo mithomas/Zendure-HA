@@ -58,6 +58,7 @@ def generate_table(
                 episode,
                 max(episode, key=lambda row: row["sml"]),
                 "managed AC charging contributes to import",
+                None,
             )
         )
     for episode in group_episodes(result["battery_backed_export_rows"], gap_allowance_sec=1.5):
@@ -67,8 +68,53 @@ def generate_table(
                 episode,
                 min(episode, key=lambda row: row["sml"]),
                 "managed battery discharges while grid exports",
+                None,
             )
         )
+    for direction in ("input", "output"):
+        for device_id in DEVICE_IDS:
+            for interruption in result[f"{direction}_interruptions"][device_id]:
+                episode = interruption["rows"]
+                row = (
+                    min(episode, key=lambda sample: sample["sml"] or 0)
+                    if direction == "input"
+                    else max(episode, key=lambda sample: sample["sml"] or 0)
+                )
+                restart = (
+                    f"restarted after {interruption['duration']:.0f}s"
+                    if interruption["same_mode_restart"]
+                    else "no same-mode restart within 30s"
+                )
+                cleared = (
+                    "command limit unknown"
+                    if interruption["command_limit_cleared"] is None
+                    else "command limit cleared"
+                    if interruption["command_limit_cleared"]
+                    else "limit retained"
+                )
+                events.append(
+                    (
+                        interruption["stop"],
+                        episode,
+                        row,
+                        f"{device_id} actual {direction} stopped from "
+                        f"{interruption['power_before_w']:.0f} W; {restart}; {cleared}",
+                        interruption["duration"],
+                    )
+                )
+    for device_id in DEVICE_IDS:
+        for period in result["local_pv_withheld_import_periods"][device_id]:
+            episode = period["rows"]
+            events.append(
+                (
+                    period["start"],
+                    episode,
+                    max(episode, key=lambda row: row["sml"]),
+                    f"{device_id} stores local PV while grid imports; "
+                    f"peak usable withheld power {period['peak_withheld_w']:.0f} W",
+                    period["duration"],
+                )
+            )
     events.sort(key=lambda event: event[0])
 
     lines = [
@@ -81,13 +127,14 @@ def generate_table(
         "K-Balkon (scope, mode, PV, battery, AC) | Finding |",
         "|---|---:|---:|---|---|---|",
     ]
-    for _, episode, row, reason in events[:limit]:
+    for _, episode, row, reason, duration_override in events[:limit]:
         start = episode[0]["time"]
         end = episode[-1]["time"]
         period = str(start) if start == end else f"{start} to {end.time()}"
-        duration = sum(event_row["dt"] for event_row in episode)
+        duration = sum(event_row["dt"] for event_row in episode) if duration_override is None else duration_override
+        grid_power = "?" if row["sml"] is None else f"{row['sml']:.0f}"
         lines.append(
-            f"| {period} | {duration:.0f}s | {row['sml']:.0f} | "
+            f"| {period} | {duration:.0f}s | {grid_power} | "
             f"{_device_summary(row, 'wz_balkon', external_solar)} | "
             f"{_device_summary(row, 'k_balkon', external_solar)} | {reason} |"
         )

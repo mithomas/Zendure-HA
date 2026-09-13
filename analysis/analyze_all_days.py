@@ -58,6 +58,30 @@ def _print_periods(title: str, periods: list[dict[str, Any]]) -> None:
         )
 
 
+def _print_interruptions(title: str, interruptions: list[dict[str, Any]]) -> None:
+    """Print the first actual-flow interruptions for one device and direction."""
+    print(f"\n{title}")
+    if not interruptions:
+        print("  none")
+        return
+    for episode in interruptions[:5]:
+        restart = (
+            f"restart {_format_time(episode['restart'])}" if episode["restart"] is not None else "no restart within 30s"
+        )
+        cleared = (
+            "unknown"
+            if episode["command_limit_cleared"] is None
+            else "cleared"
+            if episode["command_limit_cleared"]
+            else "not cleared"
+        )
+        print(
+            f"  {_format_time(episode['stop'])}: {episode['power_before_w']:.0f} W -> 0, "
+            f"{restart}, peak grid impact {episode['peak_grid_impact_w']:.0f} W, "
+            f"limit {cleared}"
+        )
+
+
 def analyze_file(
     file_path: str | Path,
     *,
@@ -99,11 +123,13 @@ def analyze_file(
 
     print("\nManaged routing behavior:")
     for device_id in DEVICE_IDS:
-        print(f"  {device_id} mode switches: {result['mode_switches'][device_id]}")
-    print(
-        "  Grid import attributable to managed AC charging: "
-        f"{result['grid_import_while_charging_kwh']:.6f} kWh"
-    )
+        print(
+            f"  {device_id}: {result['mode_switches'][device_id]} mode switches, "
+            f"{result['input_interruption_counts'][device_id]} input interruptions, "
+            f"{result['output_interruption_counts'][device_id]} output interruptions, "
+            f"{result['local_pv_withheld_import_counts'][device_id]} local-PV withholding periods"
+        )
+    print(f"  Grid import attributable to managed AC charging: {result['grid_import_while_charging_kwh']:.6f} kWh")
     print(f"  Battery-backed grid export: {result['battery_backed_export_kwh']:.6f} kWh")
     print(f"  Grid export while a managed battery was full: {result['full_export_kwh']:.6f} kWh")
     print(f"  Export -> import -> export overcorrection cycles: {len(result['overcorrection_cycles'])}")
@@ -169,6 +195,30 @@ def analyze_file(
                 f"-{cycle['export_before_w']:.0f} W, +{cycle['import_w']:.0f} W, "
                 f"-{cycle['export_after_w']:.0f} W"
             )
+
+    for device_id in DEVICE_IDS:
+        _print_interruptions(
+            f"First {device_id} input interruptions:",
+            result["input_interruptions"][device_id],
+        )
+        _print_interruptions(
+            f"First {device_id} output interruptions:",
+            result["output_interruptions"][device_id],
+        )
+
+    withheld_periods = [
+        period for device_id in DEVICE_IDS for period in result["local_pv_withheld_import_periods"][device_id]
+    ]
+    withheld_periods.sort(key=lambda period: period["peak_withheld_w"], reverse=True)
+    print("\nTop local-PV withholding periods during grid import:")
+    if not withheld_periods:
+        print("  none")
+    for period in withheld_periods[:5]:
+        print(
+            f"  {period['device_id']} {_format_time(period['start'])} to "
+            f"{_format_time(period['end'])}: {period['duration']:.0f}s, "
+            f"peak usable withheld power {period['peak_withheld_w']:.0f} W"
+        )
 
     return {
         "file": str(path),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,10 @@ MAX_INTEGRATION_GAP_SECONDS = 5
 POWER_THRESHOLD_W = 30
 LOW_POWER_EXPORT_THRESHOLD_W = 15
 LOW_POWER_EXPORT_MIN_DURATION_SECONDS = 15
+FLOW_ACTIVE_THRESHOLD_W = 15
+FLOW_ZERO_THRESHOLD_W = 5
+FLOW_RESTART_WINDOW_SECONDS = 30
+WITHHELD_LOCAL_PV_IMPORT_THRESHOLD_W = 30
 CHARGE_CAPABLE_STATES = {"normal", "nearly_full", "reserve", "reserve_recovery", "empty"}
 
 ParsedRow = dict[str, Any]
@@ -95,9 +100,7 @@ def parse_rows(raw_rows: Iterable[Mapping[str, object]]) -> list[ParsedRow]:
                 "time": timestamp,
                 "sml": parse_float(raw_row.get("sml_power")),
                 "primary": raw_row.get("primary_device") or None,
-                "devices": {
-                    device_id: _device_from_row(raw_row, device_id) for device_id in DEVICE_IDS
-                },
+                "devices": {device_id: _device_from_row(raw_row, device_id) for device_id in DEVICE_IDS},
             }
         )
 
@@ -123,9 +126,7 @@ def resolve_export_files(path: str | Path) -> list[Path]:
     return []
 
 
-def select_management_rows(
-    rows: list[ParsedRow], *, unmanaged_devices: tuple[str, ...] = ()
-) -> list[ParsedRow]:
+def select_management_rows(rows: list[ParsedRow], *, unmanaged_devices: tuple[str, ...] = ()) -> list[ParsedRow]:
     """Select rows by explicit manager participation and recalculate intervals."""
     invalid_devices = set(unmanaged_devices) - set(DEVICE_IDS)
     if invalid_devices:
@@ -133,9 +134,7 @@ def select_management_rows(
         raise ValueError(f"unknown device IDs: {invalid_list}")
 
     selected = [
-        {**row}
-        for row in rows
-        if all(row["devices"][device_id]["managed"] is False for device_id in unmanaged_devices)
+        {**row} for row in rows if all(row["devices"][device_id]["managed"] is False for device_id in unmanaged_devices)
     ]
     _set_intervals(selected)
     return selected
@@ -156,9 +155,7 @@ def _period_stats(period_rows: list[ParsedRow]) -> dict[str, Any]:
         "end": period_rows[-1]["time"],
         "duration": sum(durations),
         "avg_sml": sum(sml_values) / len(sml_values),
-        "energy_kwh": sum(
-            row["sml"] * duration for row, duration in zip(period_rows, durations, strict=True)
-        )
+        "energy_kwh": sum(row["sml"] * duration for row, duration in zip(period_rows, durations, strict=True))
         / 3_600_000,
         "rows": period_rows,
     }
@@ -196,16 +193,10 @@ def find_low_power_export_periods(rows: list[ParsedRow]) -> list[dict[str, Any]]
     """Return export periods above 15 W that last longer than 15 seconds."""
     periods = find_sustained_periods(
         rows,
-        lambda row: (
-            row["sml"] is not None and row["sml"] < -LOW_POWER_EXPORT_THRESHOLD_W
-        ),
+        lambda row: row["sml"] is not None and row["sml"] < -LOW_POWER_EXPORT_THRESHOLD_W,
         gap_allowance_sec=MAX_INTEGRATION_GAP_SECONDS,
     )
-    return [
-        period
-        for period in periods
-        if period["duration"] > LOW_POWER_EXPORT_MIN_DURATION_SECONDS
-    ]
+    return [period for period in periods if period["duration"] > LOW_POWER_EXPORT_MIN_DURATION_SECONDS]
 
 
 def group_episodes(rows: list[ParsedRow], gap_allowance_sec: float = 30) -> list[list[ParsedRow]]:
@@ -222,31 +213,49 @@ def group_episodes(rows: list[ParsedRow], gap_allowance_sec: float = 30) -> list
     return episodes
 
 
-def find_large_swings(
-    parsed_rows: list[ParsedRow], window_sec: float = 120, limit: int = 5
-) -> list[dict[str, Any]]:
+def find_large_swings(parsed_rows: list[ParsedRow], window_sec: float = 120, limit: int = 5) -> list[dict[str, Any]]:
     """Return the largest distinct grid-power ranges in rolling windows."""
     swings: list[dict[str, Any]] = []
+    minimum: deque[int] = deque()
+    maximum: deque[int] = deque()
+    valid: deque[int] = deque()
+    window_end = 0
+
     for index, start_row in enumerate(parsed_rows):
-        window = []
-        for row in parsed_rows[index:]:
+        while valid and valid[0] < index:
+            valid.popleft()
+        while minimum and minimum[0] < index:
+            minimum.popleft()
+        while maximum and maximum[0] < index:
+            maximum.popleft()
+
+        while window_end < len(parsed_rows):
+            row = parsed_rows[window_end]
             if (row["time"] - start_row["time"]).total_seconds() > window_sec:
                 break
             if row["sml"] is not None:
-                window.append(row)
-        if len(window) < 2:
+                valid.append(window_end)
+                while minimum and parsed_rows[minimum[-1]]["sml"] > row["sml"]:
+                    minimum.pop()
+                minimum.append(window_end)
+                while maximum and parsed_rows[maximum[-1]]["sml"] < row["sml"]:
+                    maximum.pop()
+                maximum.append(window_end)
+            window_end += 1
+
+        if len(valid) < 2:
             continue
-        sml_values = [row["sml"] for row in window]
-        min_sml = min(sml_values)
-        max_sml = max(sml_values)
+        min_sml = parsed_rows[minimum[0]]["sml"]
+        max_sml = parsed_rows[maximum[0]]["sml"]
         swings.append(
             {
                 "start_time": start_row["time"],
-                "end_time": window[-1]["time"],
+                "end_time": parsed_rows[valid[-1]]["time"],
                 "swing": max_sml - min_sml,
                 "min_sml": min_sml,
                 "max_sml": max_sml,
-                "rows": window,
+                "start_index": index,
+                "end_index": valid[-1],
             }
         )
 
@@ -260,12 +269,14 @@ def find_large_swings(
             distinct_swings.append(swing)
             if len(distinct_swings) == limit:
                 break
+    for swing in distinct_swings:
+        swing["rows"] = [
+            row for row in parsed_rows[swing.pop("start_index") : swing.pop("end_index") + 1] if row["sml"] is not None
+        ]
     return distinct_swings
 
 
-def estimate_ac_input(
-    device: Mapping[str, Any], *, solar_is_external: bool = False
-) -> float | None:
+def estimate_ac_input(device: Mapping[str, Any], *, solar_is_external: bool = False) -> float | None:
     """Estimate actual AC intake, preferring an explicit measurement."""
     if device["mode"] != "input":
         return 0.0
@@ -283,11 +294,218 @@ def estimate_ac_input(
     return max(0.0, -float(battery_flow) + output - local_solar)
 
 
+def _flow_power(
+    device: Mapping[str, Any],
+    direction: str,
+    *,
+    solar_is_external: bool,
+) -> float | None:
+    """Return actual input or output flow for interruption detection."""
+    if direction == "input":
+        input_power = device["input_power"]
+        if input_power is not None:
+            return max(0.0, float(input_power))
+        return estimate_ac_input(device, solar_is_external=solar_is_external)
+    output = device["output"]
+    return None if output is None else max(0.0, float(output))
+
+
+def _grid_impact(row: ParsedRow, direction: str) -> float:
+    """Return grid power in the direction expected after one flow stops."""
+    sml = row["sml"]
+    if sml is None:
+        return 0.0
+    return max(0.0, -float(sml) if direction == "input" else float(sml))
+
+
+def find_flow_interruptions(
+    rows: list[ParsedRow],
+    direction: str,
+    *,
+    external_solar_devices: tuple[str, ...] = (),
+) -> dict[str, list[dict[str, Any]]]:
+    """Find actual-flow stop edges and short same-mode restarts per device."""
+    external_solar = set(external_solar_devices)
+    interruptions: dict[str, list[dict[str, Any]]] = {device_id: [] for device_id in DEVICE_IDS}
+
+    for device_id in DEVICE_IDS:
+        armed_power: float | None = None
+        armed_mode: str | None = None
+        previous_time: datetime | None = None
+        pending: dict[str, Any] | None = None
+
+        for row in rows:
+            device = row["devices"][device_id]
+            timestamp = row["time"]
+            gap = 0.0 if previous_time is None else (timestamp - previous_time).total_seconds()
+            previous_time = timestamp
+
+            if device["managed"] is not True or gap > MAX_INTEGRATION_GAP_SECONDS:
+                armed_power = None
+                armed_mode = None
+                pending = None
+                if device["managed"] is not True:
+                    continue
+
+            flow = _flow_power(
+                device,
+                direction,
+                solar_is_external=device_id in external_solar,
+            )
+            mode = device["mode"] if isinstance(device["mode"], str) else None
+            if flow is None:
+                armed_power = None
+                armed_mode = None
+                pending = None
+                continue
+
+            if pending is not None:
+                restart_elapsed = (timestamp - pending["stop"]).total_seconds()
+                if flow > FLOW_ACTIVE_THRESHOLD_W and mode == pending["mode"]:
+                    pending["restart"] = timestamp
+                    pending["end"] = timestamp
+                    pending["duration"] = restart_elapsed
+                    pending["same_mode_restart"] = restart_elapsed <= FLOW_RESTART_WINDOW_SECONDS
+                    pending = None
+                elif mode != pending["mode"]:
+                    pending = None
+                elif flow <= FLOW_ZERO_THRESHOLD_W:
+                    impact = _grid_impact(row, direction)
+                    pending["end"] = timestamp
+                    pending["duration"] = restart_elapsed
+                    pending["peak_grid_impact_w"] = max(
+                        pending["peak_grid_impact_w"],
+                        impact,
+                    )
+                    pending["grid_impact_samples"].append(impact)
+                    pending["avg_grid_impact_w"] = sum(pending["grid_impact_samples"]) / len(
+                        pending["grid_impact_samples"]
+                    )
+                    pending["rows"].append(row)
+                    command_limit = device[f"{direction}_limit"]
+                    if command_limit is not None:
+                        pending["command_limit_cleared"] = (
+                            pending["command_limit_cleared"] is True or command_limit <= FLOW_ZERO_THRESHOLD_W
+                        )
+
+            if flow > FLOW_ACTIVE_THRESHOLD_W:
+                armed_power = flow
+                armed_mode = mode
+                continue
+            if flow > FLOW_ZERO_THRESHOLD_W or armed_power is None:
+                continue
+
+            command_limit = device[f"{direction}_limit"]
+            impact = _grid_impact(row, direction)
+            pending = {
+                "device_id": device_id,
+                "direction": direction,
+                "mode": armed_mode,
+                "stop": timestamp,
+                "end": timestamp,
+                "restart": None,
+                "duration": 0.0,
+                "power_before_w": armed_power,
+                "peak_grid_impact_w": impact,
+                "avg_grid_impact_w": impact,
+                "grid_impact_samples": [impact],
+                "command_limit_cleared": (None if command_limit is None else command_limit <= FLOW_ZERO_THRESHOLD_W),
+                "same_mode_stop": mode == armed_mode,
+                "same_mode_restart": False,
+                "rows": [row],
+            }
+            interruptions[device_id].append(pending)
+            armed_power = None
+            armed_mode = None
+
+    for episodes in interruptions.values():
+        for episode in episodes:
+            episode.pop("grid_impact_samples")
+    return interruptions
+
+
+def find_local_pv_withheld_import_periods(
+    rows: list[ParsedRow],
+    *,
+    external_solar_devices: tuple[str, ...] = (),
+) -> dict[str, list[dict[str, Any]]]:
+    """Find output-mode periods that store local PV while importing household demand."""
+    external_solar = set(external_solar_devices)
+    periods: dict[str, list[dict[str, Any]]] = {device_id: [] for device_id in DEVICE_IDS}
+
+    for device_id in DEVICE_IDS:
+        if device_id in external_solar:
+            continue
+        matching: list[tuple[ParsedRow, float, float]] = []
+        grouped: list[list[tuple[ParsedRow, float, float]]] = []
+        for row in rows:
+            device = row["devices"][device_id]
+            solar = device["solar"]
+            battery_flow = device["battery_flow"]
+            grid_import = row["sml"]
+            local_battery_charge = (
+                min(float(solar), -float(battery_flow)) if solar is not None and battery_flow is not None else 0.0
+            )
+            qualifies = (
+                device["managed"] is True
+                and device["mode"] == "output"
+                and grid_import is not None
+                and grid_import > WITHHELD_LOCAL_PV_IMPORT_THRESHOLD_W
+                and local_battery_charge > FLOW_ACTIVE_THRESHOLD_W
+            )
+            if not qualifies:
+                if matching:
+                    grouped.append(matching)
+                    matching = []
+                continue
+            if matching and (row["time"] - matching[-1][0]["time"]).total_seconds() > MAX_INTEGRATION_GAP_SECONDS:
+                grouped.append(matching)
+                matching = []
+            matching.append(
+                (
+                    row,
+                    local_battery_charge,
+                    min(float(grid_import), local_battery_charge),
+                )
+            )
+        if matching:
+            grouped.append(matching)
+
+        for group in grouped:
+            durations = [0.0]
+            durations.extend(
+                (sample[0]["time"] - previous[0]["time"]).total_seconds()
+                for previous, sample in zip(group, group[1:], strict=False)
+            )
+            grid_imports = [float(sample[0]["sml"]) for sample in group]
+            local_charges = [sample[1] for sample in group]
+            withheld = [sample[2] for sample in group]
+            periods[device_id].append(
+                {
+                    "device_id": device_id,
+                    "start": group[0][0]["time"],
+                    "end": group[-1][0]["time"],
+                    "duration": sum(durations),
+                    "avg_grid_import_w": sum(grid_imports) / len(grid_imports),
+                    "peak_grid_import_w": max(grid_imports),
+                    "avg_local_battery_charge_w": sum(local_charges) / len(local_charges),
+                    "peak_local_battery_charge_w": max(local_charges),
+                    "avg_withheld_w": sum(withheld) / len(withheld),
+                    "peak_withheld_w": max(withheld),
+                    "withheld_energy_kwh": sum(
+                        power * duration for power, duration in zip(withheld, durations, strict=True)
+                    )
+                    / 3_600_000,
+                    "rows": [sample[0] for sample in group],
+                }
+            )
+
+    return periods
+
+
 def _has_managed_charge_capable_input(row: ParsedRow) -> bool:
     return any(
-        device["managed"] is True
-        and device["state"] in CHARGE_CAPABLE_STATES
-        and device["mode"] == "input"
+        device["managed"] is True and device["state"] in CHARGE_CAPABLE_STATES and device["mode"] == "input"
         for device in row["devices"].values()
     )
 
@@ -332,18 +550,14 @@ def find_overcorrection_cycles(
     return cycles
 
 
-def analyze_rows(
-    rows: list[ParsedRow], *, external_solar_devices: tuple[str, ...] = ()
-) -> AnalysisResult:
+def analyze_rows(rows: list[ParsedRow], *, external_solar_devices: tuple[str, ...] = ()) -> AnalysisResult:
     """Calculate routing-aware metrics from parsed rows."""
     invalid_devices = set(external_solar_devices) - set(DEVICE_IDS)
     if invalid_devices:
         invalid_list = ", ".join(sorted(invalid_devices))
         raise ValueError(f"unknown external-solar device IDs: {invalid_list}")
     external_solar = set(external_solar_devices)
-    management_samples = {
-        device_id: {"managed": 0, "unmanaged": 0, "unknown": 0} for device_id in DEVICE_IDS
-    }
+    management_samples = {device_id: {"managed": 0, "unmanaged": 0, "unknown": 0} for device_id in DEVICE_IDS}
     mode_switches = {device_id: 0 for device_id in DEVICE_IDS}
     previous_managed_mode: dict[str, str | None] = {device_id: None for device_id in DEVICE_IDS}
     import_ws = 0.0
@@ -392,21 +606,39 @@ def analyze_rows(
             import_rows.append(row)
 
         if sml <= -POWER_THRESHOLD_W and any(
-            device["battery_flow"] is not None
-            and device["battery_flow"] >= POWER_THRESHOLD_W
+            device["battery_flow"] is not None and device["battery_flow"] >= POWER_THRESHOLD_W
             for _device_id, device in managed_devices
         ):
             battery_export_ws += -sml * dt
             battery_export_rows.append(row)
 
-        if sml <= -POWER_THRESHOLD_W and any(
-            device["state"] == "full" for _device_id, device in managed_devices
-        ):
+        if sml <= -POWER_THRESHOLD_W and any(device["state"] == "full" for _device_id, device in managed_devices):
             full_export_ws += -sml * dt
+
+    input_interruptions = find_flow_interruptions(
+        rows,
+        "input",
+        external_solar_devices=external_solar_devices,
+    )
+    output_interruptions = find_flow_interruptions(
+        rows,
+        "output",
+        external_solar_devices=external_solar_devices,
+    )
+    withheld_periods = find_local_pv_withheld_import_periods(
+        rows,
+        external_solar_devices=external_solar_devices,
+    )
 
     return {
         "management_samples": management_samples,
         "mode_switches": mode_switches,
+        "input_interruption_counts": {device_id: len(input_interruptions[device_id]) for device_id in DEVICE_IDS},
+        "output_interruption_counts": {device_id: len(output_interruptions[device_id]) for device_id in DEVICE_IDS},
+        "input_interruptions": input_interruptions,
+        "output_interruptions": output_interruptions,
+        "local_pv_withheld_import_counts": {device_id: len(withheld_periods[device_id]) for device_id in DEVICE_IDS},
+        "local_pv_withheld_import_periods": withheld_periods,
         "grid_import_while_charging_kwh": import_ws / 3_600_000,
         "battery_backed_export_kwh": battery_export_ws / 3_600_000,
         "full_export_kwh": full_export_ws / 3_600_000,
@@ -453,6 +685,9 @@ def _main() -> None:
             print(f"  external solar context: {', '.join(args.external_solar)}")
         print(f"  management samples: {result['management_samples']}")
         print(f"  managed mode switches: {result['mode_switches']}")
+        print(f"  managed input interruptions: {result['input_interruption_counts']}")
+        print(f"  managed output interruptions: {result['output_interruption_counts']}")
+        print(f"  local PV withheld during grid import: {result['local_pv_withheld_import_counts']}")
         print(f"  grid import while managed AC charging: {result['grid_import_while_charging_kwh']:.6f} kWh")
         print(f"  battery-backed export: {result['battery_backed_export_kwh']:.6f} kWh")
         print(f"  export while full: {result['full_export_kwh']:.6f} kWh")
