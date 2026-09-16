@@ -10168,8 +10168,8 @@ class TestPowerTransitionGates:
         ("direction", "power", "elapsed"),
         [
             pytest.param(_TransitionDirection.INPUT, 20, 10, id="input-20w-10s"),
-            pytest.param(_TransitionDirection.INPUT, 40, 5, id="input-40w-5s"),
-            pytest.param(_TransitionDirection.INPUT, 100, 5, id="input-100w-5s"),
+            pytest.param(_TransitionDirection.INPUT, 40, 10, id="input-40w-10s"),
+            pytest.param(_TransitionDirection.INPUT, 100, 10, id="input-100w-10s"),
             pytest.param(_TransitionDirection.OUTPUT, 20, 10, id="output-20w-10s"),
             pytest.param(_TransitionDirection.OUTPUT, 40, 5, id="output-40w-5s"),
             pytest.param(_TransitionDirection.OUTPUT, 100, 2, id="output-100w-2s"),
@@ -10223,13 +10223,14 @@ class TestPowerTransitionGates:
         manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
         started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
 
-        assert manager._transition_gate_allows(device, _TransitionDirection.INPUT, 20, started) is False
+        assert manager._transition_gate_allows(device, _TransitionDirection.INPUT, 16, started) is False
+        # Conservative integration credits min(16, 100) over the interval, so 160 Ws stays below the threshold.
         assert (
             manager._transition_gate_allows(
                 device,
                 _TransitionDirection.INPUT,
                 100,
-                started + timedelta(seconds=5),
+                started + timedelta(seconds=10),
             )
             is False
         )
@@ -10238,7 +10239,7 @@ class TestPowerTransitionGates:
                 device,
                 _TransitionDirection.INPUT,
                 100,
-                started + timedelta(seconds=6),
+                started + timedelta(seconds=13),
             )
             is True
         )
@@ -10272,7 +10273,7 @@ class TestPowerTransitionGates:
         assert await manager._command_input(device, -40) == 0
         device.power_charge.assert_not_awaited()
 
-        manager._routing_transition_time = started + timedelta(seconds=5)
+        manager._routing_transition_time = started + timedelta(seconds=10)
         assert await manager._command_input(device, -40) == -40
         device.power_charge.assert_awaited_once_with(-40)
 
@@ -10334,7 +10335,7 @@ class TestPowerTransitionGates:
         manager._consume_p1_sample(sample, routed=True)
 
         assert manager._p1_followup_needed(sample) is True
-        assert manager._p1_followup_due(sample) == started + timedelta(seconds=5)
+        assert manager._p1_followup_due(sample) == started + timedelta(seconds=10)
 
     async def test_standard_routing_excludes_input_device_until_gate_releases(self, hass) -> None:
         device = make_device(hass, ac_mode=AcMode.OUTPUT, input_limit=0, output_limit=0)
@@ -10353,10 +10354,10 @@ class TestPowerTransitionGates:
         await _run_prepared_power_routing(manager, -100, started)
         device.power_charge.assert_not_awaited()
 
-        await _run_prepared_power_routing(manager, -100, started + timedelta(seconds=4.999))
+        await _run_prepared_power_routing(manager, -100, started + timedelta(seconds=9.999))
         device.power_charge.assert_not_awaited()
 
-        await _run_prepared_power_routing(manager, -100, started + timedelta(seconds=5))
+        await _run_prepared_power_routing(manager, -100, started + timedelta(seconds=10))
         device.power_charge.assert_awaited_once_with(-100)
 
     async def test_manual_command_bypasses_transition_gate(self, hass) -> None:
@@ -10417,9 +10418,9 @@ class TestPowerTransitionGates:
 
         manager._routing_transition_time = started
         assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 60
-        manager._routing_transition_time = started + timedelta(seconds=4.999)
+        manager._routing_transition_time = started + timedelta(seconds=9.999)
         assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 60
-        manager._routing_transition_time = started + timedelta(seconds=5)
+        manager._routing_transition_time = started + timedelta(seconds=10)
         assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 0
 
         assert device.power_discharge.await_args_list == [call(60), call(60), call(0)]
@@ -12474,3 +12475,53 @@ class TestCorrectedStopResiduals:
 
         device.power_discharge.assert_awaited_with(0)
         device.power_charge.assert_awaited_with(-100)
+
+
+class TestAcInputDwell:
+    """Starting AC input needs sustained evidence, not a short export transient."""
+
+    @staticmethod
+    def _gate(hass: Any) -> Any:
+        device = make_device(hass, device_id="dwell-gate", ac_mode=AcMode.OUTPUT)
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            transition_gates=True,
+        )
+        return device, manager
+
+    @pytest.mark.parametrize(
+        ("elapsed_seconds", "releases"),
+        [
+            pytest.param(5, False, id="five-seconds-is-no-longer-enough"),
+            pytest.param(10, True, id="ten-second-dwell"),
+        ],
+    )
+    async def test_starting_ac_input_requires_a_ten_second_dwell(
+        self, hass: Any, elapsed_seconds: int, releases: bool
+    ) -> None:
+        device, manager = self._gate(hass)
+        start = datetime(2026, 9, 16, 16, 0, 0, tzinfo=UTC)
+        manager._transition_evidence_allows(device, _TransitionDirection.INPUT, 100, start)
+
+        released = manager._transition_evidence_allows(
+            device,
+            _TransitionDirection.INPUT,
+            100,
+            start + timedelta(seconds=elapsed_seconds),
+        )
+
+        assert released is releases
+
+    async def test_starting_home_output_still_uses_the_two_second_dwell(self, hass: Any) -> None:
+        device, manager = self._gate(hass)
+        start = datetime(2026, 9, 16, 16, 0, 0, tzinfo=UTC)
+        manager._transition_evidence_allows(device, _TransitionDirection.OUTPUT, 120, start)
+
+        assert manager._transition_evidence_allows(
+            device,
+            _TransitionDirection.OUTPUT,
+            120,
+            start + timedelta(seconds=2),
+        )
