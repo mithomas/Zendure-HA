@@ -6,8 +6,12 @@ from analysis.run_analysis import (
     POWER_THRESHOLD_W,
     analyze_rows,
     estimate_ac_input,
+    find_actuation_lag,
+    find_charge_overshoot_events,
     find_large_swings,
+    find_neutral_grid_profile,
     find_sustained_periods,
+    neutral_grid_power,
     parse_float,
     parse_rows,
     select_management_rows,
@@ -506,3 +510,131 @@ def test_default_analysis_threshold_excludes_29_watt_reversals() -> None:
 
     assert result["overcorrection_cycles"] == []
     assert result["grid_import_while_charging_kwh"] == 0
+
+
+def _idle_row(second: int, sml: float, **values: object) -> dict[str, str]:
+    """Build a row where the managed device moves no power, so neutral grid equals the meter."""
+    return _raw_row(
+        second,
+        sml_power=sml,
+        wz_balkon_ac_mode="output",
+        wz_balkon_output_power=0,
+        wz_balkon_bat_flow=0,
+        wz_balkon_solar_power=0,
+        **values,
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "sml", "expected"),
+    [
+        (
+            {
+                "wz_balkon_ac_mode": "output",
+                "wz_balkon_output_power": 40,
+                "wz_balkon_bat_flow": 40,
+                "wz_balkon_solar_power": 0,
+            },
+            -10,
+            30,
+        ),
+        (
+            {
+                "wz_balkon_ac_mode": "input",
+                "wz_balkon_output_power": 0,
+                "wz_balkon_bat_flow": -100,
+                "wz_balkon_solar_power": 0,
+            },
+            50,
+            -50,
+        ),
+        (
+            {
+                "wz_balkon_ac_mode": "input",
+                "wz_balkon_output_power": 25,
+                "wz_balkon_bat_flow": -100,
+                "wz_balkon_solar_power": 0,
+            },
+            50,
+            -50,
+        ),
+        ({"wz_balkon_fusegroup": "unmanaged"}, 77, 77),
+    ],
+)
+def test_neutral_grid_power_removes_only_the_devices_own_ac_flows(
+    overrides: dict[str, object], sml: float, expected: float
+) -> None:
+    rows = parse_rows([_raw_row(0, sml_power=sml, **overrides)])
+
+    assert neutral_grid_power(rows[0], "wz_balkon") == pytest.approx(expected)
+
+
+def test_neutral_grid_power_is_unknown_without_a_grid_reading() -> None:
+    rows = parse_rows([_raw_row(0, sml_power="unknown")])
+
+    assert neutral_grid_power(rows[0], "wz_balkon") is None
+
+
+def test_neutral_grid_profile_reports_persistent_surplus() -> None:
+    rows = parse_rows([_idle_row(second, -100) for second in range(2400)])
+
+    profile = find_neutral_grid_profile(rows, device_id="wz_balkon")
+
+    assert profile["mean_w"] == pytest.approx(-100)
+    assert profile["export_fraction"] == pytest.approx(1.0)
+    assert profile["crossings"] == 0
+
+
+def test_neutral_grid_profile_reports_alternation_as_deadband_crossings() -> None:
+    rows = parse_rows([_idle_row(second, -100 if (second // 600) % 2 == 0 else 100) for second in range(2400)])
+
+    profile = find_neutral_grid_profile(rows, device_id="wz_balkon")
+
+    assert profile["crossings"] >= 3
+    assert profile["export_fraction"] < 1.0
+    assert profile["import_fraction"] > 0.0
+
+
+def test_actuation_lag_measures_delay_between_raised_limit_and_intake() -> None:
+    rows = parse_rows(
+        [
+            _raw_row(
+                second,
+                wz_balkon_input_limit=350 if second >= 10 else 250,
+                wz_balkon_bat_flow=-360 if second >= 14 else -300,
+            )
+            for second in range(20)
+        ]
+    )
+
+    lag = find_actuation_lag(rows, "wz_balkon")
+
+    assert lag["samples"] == 1
+    assert lag["median_seconds"] == pytest.approx(4)
+    assert lag["events"][0]["step_w"] == pytest.approx(100)
+
+
+def test_charge_overshoot_event_relates_commanded_limit_to_preceding_export() -> None:
+    rows = parse_rows(
+        [_idle_row(second, -60) for second in range(6)]
+        + [
+            _raw_row(
+                second,
+                sml_power=30 if second >= 8 else -60,
+                wz_balkon_ac_mode="input",
+                wz_balkon_input_limit=150,
+                wz_balkon_output_power=0,
+                wz_balkon_bat_flow=0,
+                wz_balkon_solar_power=0,
+            )
+            for second in range(6, 20)
+        ]
+    )
+
+    events = find_charge_overshoot_events(rows, "wz_balkon")
+
+    assert len(events) == 1
+    assert events[0]["export_before_w"] == pytest.approx(60)
+    assert events[0]["excursion_seconds"] == pytest.approx(6)
+    assert events[0]["peak_input_limit_w"] == pytest.approx(150)
+    assert events[0]["seconds_to_import"] == pytest.approx(2)

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import statistics
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,14 @@ FLOW_ACTIVE_THRESHOLD_W = 15
 FLOW_ZERO_THRESHOLD_W = 5
 FLOW_RESTART_WINDOW_SECONDS = 30
 WITHHELD_LOCAL_PV_IMPORT_THRESHOLD_W = 30
+# Strict neutral-point deadband from plan.md; overridable per call to compare against current behavior.
+NEUTRAL_GRID_DEADBAND_W = 20
+SURPLUS_PERSISTENCE_WINDOW_SECONDS = 300
+SURPLUS_PERSISTENCE_BUCKET_SECONDS = 1800
+ACTUATION_LAG_MAX_SECONDS = 15
+ACTUATION_LAG_MIN_STEP_W = 10
+ACTUATION_LAG_RESPONSE_FRACTION = 0.5
+CHARGE_OVERSHOOT_WINDOW_SECONDS = 30
 CHARGE_CAPABLE_STATES = {"normal", "nearly_full", "reserve", "reserve_recovery", "empty"}
 
 ParsedRow = dict[str, Any]
@@ -503,6 +512,229 @@ def find_local_pv_withheld_import_periods(
     return periods
 
 
+def neutral_grid_power(
+    row: ParsedRow,
+    device_id: str,
+    *,
+    solar_is_external: bool = False,
+) -> float | None:
+    """Return grid power with one managed device's own AC flows removed."""
+    sml = row["sml"]
+    if sml is None:
+        return None
+    device = row["devices"][device_id]
+    if device["managed"] is not True:
+        return float(sml)
+    ac_input = estimate_ac_input(device, solar_is_external=solar_is_external)
+    output = device["output"]
+    if ac_input is None or output is None:
+        return None
+    return float(sml) + max(0.0, float(output)) - ac_input
+
+
+def _deadband_polarity(value: float, deadband_w: float) -> int:
+    if value < -deadband_w:
+        return -1
+    if value > deadband_w:
+        return 1
+    return 0
+
+
+def _count_deadband_crossings(values: Iterable[float], deadband_w: float) -> int:
+    """Count sign reversals of a series, ignoring excursions that stay inside the deadband."""
+    crossings = 0
+    polarity = 0
+    for value in values:
+        current = _deadband_polarity(value, deadband_w)
+        if current == 0:
+            continue
+        if polarity != 0 and current != polarity:
+            crossings += 1
+        polarity = current
+    return crossings
+
+
+def find_neutral_grid_profile(
+    rows: list[ParsedRow],
+    *,
+    device_id: str,
+    external_solar_devices: tuple[str, ...] = (),
+    window_seconds: float = SURPLUS_PERSISTENCE_WINDOW_SECONDS,
+    deadband_w: float = NEUTRAL_GRID_DEADBAND_W,
+    bucket_seconds: float = SURPLUS_PERSISTENCE_BUCKET_SECONDS,
+) -> dict[str, Any]:
+    """Summarise trailing-mean neutral grid power to separate persistent surplus from oscillation."""
+    solar_is_external = device_id in set(external_solar_devices)
+    window: deque[tuple[datetime, float]] = deque()
+    rolling: list[dict[str, Any]] = []
+
+    for row in rows:
+        value = neutral_grid_power(row, device_id, solar_is_external=solar_is_external)
+        if value is None:
+            continue
+        timestamp = row["time"]
+        window.append((timestamp, value))
+        while window and (timestamp - window[0][0]).total_seconds() > window_seconds:
+            window.popleft()
+        rolling.append({
+            "time": timestamp,
+            "value_w": value,
+            "mean_w": sum(sample[1] for sample in window) / len(window),
+        })
+
+    if not rolling:
+        return {
+            "device_id": device_id,
+            "samples": 0,
+            "window_seconds": window_seconds,
+            "deadband_w": deadband_w,
+            "mean_w": 0.0,
+            "export_fraction": 0.0,
+            "import_fraction": 0.0,
+            "neutral_fraction": 0.0,
+            "crossings": 0,
+            "buckets": [],
+            "rolling": [],
+        }
+
+    means = [sample["mean_w"] for sample in rolling]
+    total = len(means)
+    export_samples = sum(1 for mean_w in means if mean_w < -deadband_w)
+    import_samples = sum(1 for mean_w in means if mean_w > deadband_w)
+    start = rolling[0]["time"]
+
+    grouped: dict[int, list[float]] = {}
+    for sample in rolling:
+        index = int((sample["time"] - start).total_seconds() // bucket_seconds)
+        grouped.setdefault(index, []).append(sample["mean_w"])
+
+    return {
+        "device_id": device_id,
+        "samples": total,
+        "window_seconds": window_seconds,
+        "deadband_w": deadband_w,
+        "mean_w": sum(means) / total,
+        "export_fraction": export_samples / total,
+        "import_fraction": import_samples / total,
+        "neutral_fraction": (total - export_samples - import_samples) / total,
+        "crossings": _count_deadband_crossings(means, deadband_w),
+        "buckets": [
+            {
+                "start": start + timedelta(seconds=index * bucket_seconds),
+                "samples": len(values),
+                "mean_w": sum(values) / len(values),
+                "export_fraction": sum(1 for value in values if value < -deadband_w) / len(values),
+                "crossings": _count_deadband_crossings(values, deadband_w),
+            }
+            for index, values in sorted(grouped.items())
+        ],
+        "rolling": rolling,
+    }
+
+
+def find_actuation_lag(
+    rows: list[ParsedRow],
+    device_id: str,
+    *,
+    max_lag_seconds: float = ACTUATION_LAG_MAX_SECONDS,
+    min_step_w: float = ACTUATION_LAG_MIN_STEP_W,
+) -> dict[str, Any]:
+    """Measure the delay between a raised input limit and the battery intake that follows it."""
+    events: list[dict[str, Any]] = []
+
+    for index, row in enumerate(rows):
+        if index == 0:
+            continue
+        device = row["devices"][device_id]
+        previous = rows[index - 1]["devices"][device_id]
+        if device["managed"] is not True or device["input_limit"] is None or previous["input_limit"] is None:
+            continue
+        step = float(device["input_limit"]) - float(previous["input_limit"])
+        intake_before = device["battery_flow"]
+        if step < min_step_w or intake_before is None:
+            continue
+
+        target = -float(intake_before) + step * ACTUATION_LAG_RESPONSE_FRACTION
+        for candidate in rows[index + 1 :]:
+            elapsed = (candidate["time"] - row["time"]).total_seconds()
+            if elapsed > max_lag_seconds:
+                break
+            flow = candidate["devices"][device_id]["battery_flow"]
+            if flow is not None and -float(flow) >= target:
+                events.append({"time": row["time"], "step_w": step, "lag_seconds": elapsed})
+                break
+
+    lags = sorted(event["lag_seconds"] for event in events)
+    return {
+        "device_id": device_id,
+        "samples": len(lags),
+        "median_seconds": statistics.median(lags) if lags else None,
+        "p90_seconds": lags[min(len(lags) - 1, int(0.9 * len(lags)))] if lags else None,
+        "events": events,
+    }
+
+
+def find_charge_overshoot_events(
+    rows: list[ParsedRow],
+    device_id: str,
+    *,
+    external_solar_devices: tuple[str, ...] = (),
+    window_seconds: float = CHARGE_OVERSHOOT_WINDOW_SECONDS,
+    deadband_w: float = NEUTRAL_GRID_DEADBAND_W,
+) -> list[dict[str, Any]]:
+    """Measure commanded and realised charge against the export that justified each input switch."""
+    solar_is_external = device_id in set(external_solar_devices)
+    events: list[dict[str, Any]] = []
+    previous_mode: str | None = None
+
+    for index, row in enumerate(rows):
+        device = row["devices"][device_id]
+        mode = device["mode"] if device["managed"] is True else None
+        is_entry = previous_mode == "output" and mode == "input"
+        previous_mode = mode
+        if not is_entry:
+            continue
+
+        export_w = 0.0
+        excursion_seconds = 0.0
+        for earlier in reversed(rows[:index]):
+            neutral = neutral_grid_power(earlier, device_id, solar_is_external=solar_is_external)
+            if neutral is None or neutral >= -deadband_w:
+                break
+            export_w = max(export_w, -neutral)
+            excursion_seconds = (row["time"] - earlier["time"]).total_seconds()
+
+        peak_limit = 0.0
+        peak_intake = 0.0
+        seconds_to_import: float | None = None
+        for later in rows[index:]:
+            elapsed = (later["time"] - row["time"]).total_seconds()
+            if elapsed > window_seconds:
+                break
+            later_device = later["devices"][device_id]
+            if later_device["input_limit"] is not None:
+                peak_limit = max(peak_limit, float(later_device["input_limit"]))
+            intake = estimate_ac_input(later_device, solar_is_external=solar_is_external)
+            if intake is not None:
+                peak_intake = max(peak_intake, intake)
+            if seconds_to_import is None and later["sml"] is not None and later["sml"] > deadband_w:
+                seconds_to_import = elapsed
+
+        events.append({
+            "device_id": device_id,
+            "start": row["time"],
+            "export_before_w": export_w,
+            "excursion_seconds": excursion_seconds,
+            "peak_input_limit_w": peak_limit,
+            "peak_ac_input_w": peak_intake,
+            "limit_ratio": peak_limit / export_w if export_w > 0 else None,
+            "intake_ratio": peak_intake / export_w if export_w > 0 else None,
+            "seconds_to_import": seconds_to_import,
+        })
+
+    return events
+
+
 def _has_managed_charge_capable_input(row: ParsedRow) -> bool:
     return any(
         device["managed"] is True and device["state"] in CHARGE_CAPABLE_STATES and device["mode"] == "input"
@@ -639,6 +871,23 @@ def analyze_rows(rows: list[ParsedRow], *, external_solar_devices: tuple[str, ..
         "output_interruptions": output_interruptions,
         "local_pv_withheld_import_counts": {device_id: len(withheld_periods[device_id]) for device_id in DEVICE_IDS},
         "local_pv_withheld_import_periods": withheld_periods,
+        "neutral_grid_profiles": {
+            device_id: find_neutral_grid_profile(
+                rows,
+                device_id=device_id,
+                external_solar_devices=external_solar_devices,
+            )
+            for device_id in DEVICE_IDS
+        },
+        "actuation_lag": {device_id: find_actuation_lag(rows, device_id) for device_id in DEVICE_IDS},
+        "charge_overshoot_events": {
+            device_id: find_charge_overshoot_events(
+                rows,
+                device_id,
+                external_solar_devices=external_solar_devices,
+            )
+            for device_id in DEVICE_IDS
+        },
         "grid_import_while_charging_kwh": import_ws / 3_600_000,
         "battery_backed_export_kwh": battery_export_ws / 3_600_000,
         "full_export_kwh": full_export_ws / 3_600_000,

@@ -11,6 +11,7 @@ try:
         DEVICE_IDS,
         LOW_POWER_EXPORT_MIN_DURATION_SECONDS,
         LOW_POWER_EXPORT_THRESHOLD_W,
+        NEUTRAL_GRID_DEADBAND_W,
         POWER_THRESHOLD_W,
         analyze_rows,
         find_large_swings,
@@ -24,6 +25,7 @@ except ImportError:
         DEVICE_IDS,
         LOW_POWER_EXPORT_MIN_DURATION_SECONDS,
         LOW_POWER_EXPORT_THRESHOLD_W,
+        NEUTRAL_GRID_DEADBAND_W,
         POWER_THRESHOLD_W,
         analyze_rows,
         find_large_swings,
@@ -79,6 +81,43 @@ def _print_interruptions(title: str, interruptions: list[dict[str, Any]]) -> Non
             f"  {_format_time(episode['stop'])}: {episode['power_before_w']:.0f} W -> 0, "
             f"{restart}, peak grid impact {episode['peak_grid_impact_w']:.0f} W, "
             f"limit {cleared}"
+        )
+
+
+def _print_neutral_profile(title: str, profile: dict[str, Any]) -> None:
+    """Print whether neutral grid power was a persistent surplus or an oscillation."""
+    print(f"\n{title}")
+    if not profile["samples"]:
+        print("  none")
+        return
+    print(
+        f"  {profile['window_seconds']:.0f}s trailing mean: {profile['mean_w']:.1f} W, "
+        f"export {profile['export_fraction'] * 100:.0f}%, "
+        f"import {profile['import_fraction'] * 100:.0f}%, "
+        f"inside +/-{profile['deadband_w']:.0f} W {profile['neutral_fraction'] * 100:.0f}%, "
+        f"{profile['crossings']} deadband crossings"
+    )
+    for bucket in profile["buckets"]:
+        print(
+            f"    {_format_time(bucket['start'])}: mean {bucket['mean_w']:7.1f} W, "
+            f"export {bucket['export_fraction'] * 100:3.0f}%, "
+            f"{bucket['crossings']} crossings"
+        )
+
+
+def _print_overshoot_events(title: str, events: list[dict[str, Any]]) -> None:
+    """Print commanded and realised charge against the export that justified each input switch."""
+    print(f"\n{title}")
+    if not events:
+        print("  none")
+        return
+    for event in events[:10]:
+        ratio = "n/a" if event["intake_ratio"] is None else f"{event['intake_ratio']:.2f}x"
+        to_import = "none" if event["seconds_to_import"] is None else f"{event['seconds_to_import']:.0f}s"
+        print(
+            f"  {_format_time(event['start'])}: export {event['export_before_w']:.0f} W for "
+            f"{event['excursion_seconds']:.0f}s -> limit {event['peak_input_limit_w']:.0f} W, "
+            f"intake {event['peak_ac_input_w']:.0f} W ({ratio}), import after {to_import}"
         )
 
 
@@ -218,6 +257,24 @@ def analyze_file(
             f"  {period['device_id']} {_format_time(period['start'])} to "
             f"{_format_time(period['end'])}: {period['duration']:.0f}s, "
             f"peak usable withheld power {period['peak_withheld_w']:.0f} W"
+        )
+
+    for device_id in DEVICE_IDS:
+        profile = result["neutral_grid_profiles"][device_id]
+        if not profile["samples"]:
+            continue
+        _print_neutral_profile(
+            f"{device_id} neutral grid power (own AC flows removed, "
+            f"+/-{NEUTRAL_GRID_DEADBAND_W} W deadband):",
+            profile,
+        )
+        lag = result["actuation_lag"][device_id]
+        median = "n/a" if lag["median_seconds"] is None else f"{lag['median_seconds']:.1f}s"
+        p90 = "n/a" if lag["p90_seconds"] is None else f"{lag['p90_seconds']:.1f}s"
+        print(f"\n{device_id} input-limit actuation lag: median {median}, p90 {p90} over {lag['samples']} steps")
+        _print_overshoot_events(
+            f"{device_id} charge overshoot at output -> input switches:",
+            result["charge_overshoot_events"][device_id],
         )
 
     return {
