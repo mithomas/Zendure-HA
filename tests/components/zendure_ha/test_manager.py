@@ -12399,3 +12399,78 @@ class TestImmediateForcedUpdates:
         await manager.manualpower.async_set_native_value(120.0)
 
         assert manager._route_p1_update.call_count == 0
+
+
+class TestCorrectedStopResiduals:
+    """Stop evidence must exclude the device's own AC contribution to the meter."""
+
+    @staticmethod
+    def _route(hass: Any, *, p1: int, home_output: int = 0, home_input: int = 0) -> Any:
+        device = make_device(
+            hass,
+            device_id="stop-residual",
+            ac_mode=AcMode.INPUT if home_input else AcMode.OUTPUT,
+            home_output=home_output,
+            home_input=home_input,
+        )
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            discharge_devices=(device,),
+            transition_gates=True,
+        )
+        return device, manager, manager._power_routing_snapshot(None, primary_aware=False, p1=p1).devices[device]
+
+    @pytest.mark.parametrize(
+        ("p1", "home_output", "home_input", "expected_input_residual", "expected_output_residual"),
+        [
+            # Telemetry 2026-09-16 16:32:20: stopping 51 W of output moves the meter to +6 W.
+            pytest.param(-45, 51, 0, 0, 0, id="output-stop-would-import"),
+            # Stopping 30 W of input while the meter reads +17 W leaves -13 W of export.
+            pytest.param(17, 0, 30, 0, 0, id="input-stop-would-export"),
+            # Genuine surplus survives the correction: -90 W meter, 43 W output, 47 W residual.
+            pytest.param(-90, 43, 0, 0, 47, id="output-stop-keeps-real-export"),
+            pytest.param(100, 0, 30, 70, 0, id="input-stop-keeps-real-demand"),
+            pytest.param(0, 0, 0, 0, 0, id="balanced-meter"),
+        ],
+    )
+    async def test_stop_residuals_exclude_the_devices_own_ac_flow(
+        self,
+        hass: Any,
+        p1: int,
+        home_output: int,
+        home_input: int,
+        expected_input_residual: int,
+        expected_output_residual: int,
+    ) -> None:
+        _device, _manager, route = self._route(hass, p1=p1, home_output=home_output, home_input=home_input)
+
+        assert route.input_stop_residual_w == expected_input_residual
+        assert route.output_stop_residual_w == expected_output_residual
+
+    async def test_home_output_is_held_when_stopping_it_would_cause_grid_import(self, hass: Any) -> None:
+        device, manager, route = self._route(hass, p1=-45, home_output=51)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        start = datetime(2026, 9, 16, 16, 32, 20, tzinfo=UTC)
+        for offset in (0, 10):
+            manager._routing_transition_time = start + timedelta(seconds=offset)
+            await manager._command_input(device, -100, route=route)
+
+        device.power_charge.assert_not_awaited()
+        device.power_discharge.assert_awaited_with(51)
+
+    async def test_real_export_still_releases_the_output_stop(self, hass: Any) -> None:
+        device, manager, route = self._route(hass, p1=-90, home_output=43)
+        device.power_charge = AsyncMock(side_effect=lambda power: power)
+        device.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        start = datetime(2026, 9, 16, 16, 32, 20, tzinfo=UTC)
+        for offset in (0, 10):
+            manager._routing_transition_time = start + timedelta(seconds=offset)
+            await manager._command_input(device, -100, route=route)
+
+        device.power_discharge.assert_awaited_with(0)
+        device.power_charge.assert_awaited_with(-100)

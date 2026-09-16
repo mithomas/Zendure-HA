@@ -272,9 +272,9 @@ class _PowerRoutingDevice:
     available_discharge: int
     # Discharge capacity including production that can output even when battery discharge is blocked.
     available_discharge_with_produced: int
-    # Current meter import available as evidence for stopping this device's input.
+    # Meter import that would remain after stopping this device's input, as stop evidence.
     input_stop_residual_w: int
-    # Current meter export available as evidence for stopping this device's output.
+    # Meter export that would remain after stopping this device's output, as stop evidence.
     output_stop_residual_w: int
 
     @property
@@ -2513,6 +2513,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             ):
                 bypass_passthrough = min(home_output, -device.pwr_produced)
 
+            actual_ac_input = max(0, device.homeInput.asInt - max(0, device.pwr_offgrid))
             routing_devices[device] = _PowerRoutingDevice(
                 device=device,
                 pv_charge_first=pv_charge_first,
@@ -2522,7 +2523,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 taper_output_floor=taper_output_floor,
                 taper_active=taper_active,
                 effective_input_capacity=effective_input_capacity,
-                charge_floor=max(0, device.homeInput.asInt - max(0, device.pwr_offgrid)),
+                charge_floor=actual_ac_input,
                 charge_surplus=device.current_charge_surplus_limit(),
                 bypass_passthrough=bypass_passthrough,
                 available_discharge=self._available_discharge_power(device, primary_aware=primary_aware),
@@ -2531,8 +2532,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     primary_aware=primary_aware,
                     allow_produced_only=True,
                 ),
-                input_stop_residual_w=max(0, p1),
-                output_stop_residual_w=max(0, -p1),
+                # Project the meter past this device's own AC flow so a stop cannot push P1 through zero.
+                input_stop_residual_w=max(0, p1 - actual_ac_input),
+                output_stop_residual_w=max(0, -(p1 + home_output)),
             )
 
         return _PowerRoutingSnapshot(
