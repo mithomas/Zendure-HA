@@ -67,6 +67,8 @@ Apply sources in priority order, stopping when demand is covered:
 
 **Primary unavailability:** if the primary is offline, empty, recovering, or at its discharge limit, remaining demand falls through to secondary devices. If the primary is at reserve, only battery-backed discharge is unavailable; its current PV/off-grid output is still priority 1 and should serve household demand before secondary battery discharge.
 
+**Selected-primary takeover:** allocation decides whether a secondary is still needed. When the selected primary receives the complete home-output budget, a secondary with no required PV, bypass, or taper floor receives a zero target. Execution then verifies that the primary has physically taken over before stopping the secondary. Current grid export plus the 15 W deadband is the aggregate output that can be removed safely; this capacity is reserved across zero-target secondaries so simultaneous stops cannot expose hidden demand. Exact balance after a stop is valid coverage and must not create a permanent minimum-output hold.
+
 > **Note:** recovering devices are excluded from the produced-floor allocation in discharge routing to prevent them from holding a floor they might not sustain.
 
 > **Edge case — full-device bypass:** a full device that supports bypass stays in bypass while PV can cover the household demand. If PV from the primary and secondaries cannot cover demand, the selected primary may discharge before secondary batteries are used. A bypass-capable full device still receives a bypass command instead of a zero-watt discharge command when no battery-backed output is needed from it.
@@ -91,8 +93,9 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 
 | Control | Default | Purpose | Trade-off of Reducing |
 |---------|---------|---------|----------------------|
-| Output -> input gate | >15 W, 200 Ws, minimum 5 s | Prevents short surplus periods from switching the AC relay into input | More export while a genuine surplus is being proven |
+| Output -> input gate | >15 W, 200 Ws, minimum 10 s | Prevents short surplus periods from switching the AC relay into input | More export while a genuine surplus is being proven |
 | Input -> output gate | >15 W, 200 Ws, minimum 2 s | Stops charging immediately but delays the physical relay switch until residual demand persists | More import while a genuine residual load is being proven |
+| Covered-secondary output stop | <=15 W projected demand, 200 Ws, minimum 10 s | Confirms actual primary takeover before zeroing redundant secondary output | More temporary export while takeover is being proven |
 | Legacy charge timer | 1 s | Retains routing-stage compatibility; runs concurrently with the input gate | Not used as an additional physical-switch delay |
 | Charge debounce | 2 s (was 4 s) | Delays charge mode when it would zero active PV floor, without growing charging selected-primary output during export | PV floor may drop briefly before recovery; visible power dips |
 | Selected-primary export cap | P1 ≤ 0 in `MATCHING` | Preserves current primary output and measured non-primary PV floors while stopping PV-only output growth into grid export | Primary PV may cover import only after a positive P1 reading |
@@ -103,7 +106,7 @@ The manager deliberately slows P1 convergence to prevent hunting. Each control p
 ### Adjustment guidance
 
 **Optimized Defaults (Lower risk options applied):**
-- **Transition energy** set to 200 Ws with 5 s input and 2 s output minimum durations.
+- **Transition energy** set to 200 Ws with 10 s input and 2 s output minimum durations.
 - **Charge debounce** set to 2 s - minor risk of PV floor zeroing; fast update lock-out (TIMEFAST) is proportionally set to 1.1 s.
 
 **Higher risk:**
@@ -158,6 +161,14 @@ A device should leave output mode only when one of these conditions applies:
 - The device is full and supports explicit bypass; bypass is reserved for the full state, not near-full taper.
 - The device is already in an input/charge flow that is still backed by local PV. If no eligible source remains, `MATCHING` may switch it back to zero-output output mode rather than holding input mode at zero.
 
+### Covered secondary output stop
+
+In selected-primary `MATCHING`, the prepared allocation is authoritative about whether a secondary is needed. A non-primary device assigned zero output remains in output mode and should eventually receive `power_discharge(0)`; the protective hold is temporary and must not become a steady output floor.
+
+Before completing that zero target, execution verifies actual handover from the prepared routing snapshot. The safely removable output budget is the current grid export plus enough output to permit at most 15 W of projected grid demand. Eligible zero-target secondaries reserve that budget in command order, preventing several devices from independently relying on the same export. PV-backed output, bypass pass-through, and taper output floors are not eligible for this battery-output retirement path.
+
+An admitted secondary reuses the existing 10-second and 200 Ws output-stop dwell. Its current output is the evidence being retired. The candidate resets if the zero target disappears or measured coverage no longer admits the device. Once the dwell completes, the manager commands zero output without changing AC mode. If actual demand later returns, a new nonzero output limit is a same-mode adjustment; a physical switch to input remains protected by the separate output -> input gate.
+
 ### Zero-setpoint charge path
 
 When P1 is exactly zero the grid is balanced and there is neither demand nor surplus. `MATCHING` treats this as a discharge situation and dispatches to the home-output executor, which leaves any active charging untouched.
@@ -172,7 +183,7 @@ A physical AC mode switch to output is only performed when an actual non-zero ba
 
 ### Energy-based AC transition gates
 
-Every automatically managed physical output -> input or input -> output switch is protected per device. Adjusting a limit while the device is already in the requested AC mode is not gated. Explicit manual power or operation changes, shutdown, and safety or bypass commands are also immediate.
+Every automatically managed physical output -> input or input -> output switch is protected per device. Nonzero limit adjustments while the device is already in the requested AC mode are not gated. Zeroing an active flow may use the flow-stop dwell described above even though the AC mode does not change. Explicit manual power or operation changes, shutdown, and safety or bypass commands are immediate.
 
 A reading qualifies only when corrected residual power is strictly greater than 15 W. A switch is released only after both the direction-specific minimum duration and 200 Ws of qualifying energy have accumulated:
 
@@ -182,11 +193,11 @@ A reading qualifies only when corrected residual power is strictly greater than 
 |------------------|-----------------|-----------------|
 | 16 W | 12.5 s | 12.5 s |
 | 20 W | 10 s | 10 s |
-| 25 W | 8 s | 8 s |
-| 30 W | 6.7 s | 6.7 s |
-| 40 W | 5 s | 5 s |
-| 50 W | 5 s | 4 s |
-| 100 W or more | 5 s | 2 s |
+| 25 W | 10 s | 8 s |
+| 30 W | 10 s | 6.7 s |
+| 40 W | 10 s | 5 s |
+| 50 W | 10 s | 4 s |
+| 100 W or more | 10 s | 2 s |
 
 For changing readings, energy is integrated conservatively using the lower of two consecutive qualifying values. Evidence resets when the requested direction disappears, power falls to 15 W or less, device eligibility changes, the opposite direction is requested, or the sample gap exceeds 15 s. Once a gate releases, it remains released while commands are retried until device telemetry confirms the requested AC mode.
 

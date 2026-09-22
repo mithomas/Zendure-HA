@@ -10417,11 +10417,11 @@ class TestPowerTransitionGates:
         started = datetime(2026, 9, 13, 8, 13, tzinfo=UTC)
 
         manager._routing_transition_time = started
-        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 60
+        assert await manager._command_home_output(device, 0, output_stop_evidence_w=100) == 60
         manager._routing_transition_time = started + timedelta(seconds=9.999)
-        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 60
+        assert await manager._command_home_output(device, 0, output_stop_evidence_w=100) == 60
         manager._routing_transition_time = started + timedelta(seconds=10)
-        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 0
+        assert await manager._command_home_output(device, 0, output_stop_evidence_w=100) == 0
 
         assert device.power_discharge.await_args_list == [call(60), call(60), call(0)]
 
@@ -10497,7 +10497,7 @@ class TestPowerTransitionGates:
             await manager._command_home_output(
                 device,
                 0,
-                output_stop_residual_w=100,
+                output_stop_evidence_w=100,
                 protect_zero=protect_zero,
             )
             == 0
@@ -10533,7 +10533,7 @@ class TestPowerTransitionGates:
                 device,
                 0,
                 allow_bypass_zero=True,
-                output_stop_residual_w=100,
+                output_stop_evidence_w=100,
             )
             == 0
         )
@@ -10559,7 +10559,7 @@ class TestPowerTransitionGates:
         device.setStatus()
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
 
-        assert await manager._command_home_output(device, 0, output_stop_residual_w=100) == 0
+        assert await manager._command_home_output(device, 0, output_stop_evidence_w=100) == 0
 
         device.power_discharge.assert_awaited_once_with(0)
         assert not manager._transition_candidates
@@ -12448,7 +12448,7 @@ class TestCorrectedStopResiduals:
         _device, _manager, route = self._route(hass, p1=p1, home_output=home_output, home_input=home_input)
 
         assert route.input_stop_residual_w == expected_input_residual
-        assert route.output_stop_residual_w == expected_output_residual
+        assert route.output_stop_evidence_w == expected_output_residual
 
     async def test_home_output_is_held_when_stopping_it_would_cause_grid_import(self, hass: Any) -> None:
         device, manager, route = self._route(hass, p1=-45, home_output=51)
@@ -12475,6 +12475,151 @@ class TestCorrectedStopResiduals:
 
         device.power_discharge.assert_awaited_with(0)
         device.power_charge.assert_awaited_with(-100)
+
+
+class TestSelectedPrimarySecondaryOutputRetirement:
+    """A covered secondary output should complete its protected stop."""
+
+    @pytest.mark.parametrize(
+        ("p1", "secondary_output", "expected_primary_target"),
+        [
+            pytest.param(-60, 60, 250, id="balanced-after-stop"),
+            pytest.param(-45, 51, 256, id="six-watt-import-after-stop"),
+        ],
+    )
+    async def test_secondary_returns_to_zero_after_primary_covers_household_demand(
+        self,
+        hass: Any,
+        p1: int,
+        secondary_output: int,
+        expected_primary_target: int,
+    ) -> None:
+        primary = make_device(
+            hass,
+            device_id="covered-output-primary",
+            ac_mode=AcMode.OUTPUT,
+            home_output=250,
+            output_limit=250,
+            battery_output=250,
+        )
+        secondary = make_device(
+            hass,
+            device_id="covered-output-secondary",
+            ac_mode=AcMode.OUTPUT,
+            home_output=secondary_output,
+            output_limit=secondary_output,
+            battery_output=secondary_output,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 22, 19, 44, 19, tzinfo=UTC).replace(tzinfo=None)
+
+        await _run_prepared_power_routing(manager, p1, started)
+        await _run_prepared_power_routing(manager, p1, started + timedelta(seconds=10))
+
+        assert primary.power_discharge.await_args_list == [
+            call(expected_primary_target),
+            call(expected_primary_target),
+        ]
+        assert secondary.power_discharge.await_args_list == [call(secondary_output), call(0)]
+        secondary.power_charge.assert_not_awaited()
+
+    async def test_secondary_waits_until_primary_output_actually_covers_demand(self, hass: Any) -> None:
+        primary = make_device(
+            hass,
+            device_id="lagging-output-primary",
+            ac_mode=AcMode.OUTPUT,
+            home_output=250,
+            output_limit=250,
+            battery_output=250,
+        )
+        secondary = make_device(
+            hass,
+            device_id="protected-output-secondary",
+            ac_mode=AcMode.OUTPUT,
+            home_output=60,
+            output_limit=60,
+            battery_output=60,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 22, 19, 44, 19, tzinfo=UTC).replace(tzinfo=None)
+
+        await _run_prepared_power_routing(manager, -20, started)
+        await _run_prepared_power_routing(manager, -20, started + timedelta(seconds=10))
+
+        assert secondary.power_discharge.await_args_list == [call(60), call(60)]
+
+        primary.homeOutput.update_value(290)
+        primary.batteryOutput.update_value(290)
+        await _run_prepared_power_routing(manager, -60, started + timedelta(seconds=20))
+        await _run_prepared_power_routing(manager, -60, started + timedelta(seconds=30))
+
+        assert secondary.power_discharge.await_args_list == [call(60), call(60), call(60), call(0)]
+
+    async def test_multiple_secondaries_reserve_removable_output_capacity(self, hass: Any) -> None:
+        primary = make_device(
+            hass,
+            device_id="aggregate-output-primary",
+            ac_mode=AcMode.OUTPUT,
+            home_output=250,
+            output_limit=250,
+            battery_output=250,
+        )
+        first = make_device(
+            hass,
+            device_id="aggregate-output-first",
+            level=40,
+            ac_mode=AcMode.OUTPUT,
+            home_output=60,
+            output_limit=60,
+            battery_output=60,
+        )
+        second = make_device(
+            hass,
+            device_id="aggregate-output-second",
+            level=60,
+            ac_mode=AcMode.OUTPUT,
+            home_output=60,
+            output_limit=60,
+            battery_output=60,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, first, second),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+        )
+        for device in (primary, first, second):
+            device.power_get = AsyncMock(return_value=True)
+            device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 22, 19, 44, 19, tzinfo=UTC).replace(tzinfo=None)
+
+        await _run_prepared_power_routing(manager, -60, started)
+        await _run_prepared_power_routing(manager, -60, started + timedelta(seconds=10))
+
+        assert cast("AsyncMock", first.power_discharge).await_args_list == [call(60), call(0)]
+        assert cast("AsyncMock", second.power_discharge).await_args_list == [call(60), call(60)]
 
 
 class TestAcInputDwell:

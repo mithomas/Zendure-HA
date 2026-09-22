@@ -272,10 +272,12 @@ class _PowerRoutingDevice:
     available_discharge: int
     # Discharge capacity including production that can output even when battery discharge is blocked.
     available_discharge_with_produced: int
+    # Current measured home output used as prepared evidence when retiring covered output.
+    home_output: int
     # Meter import that would remain after stopping this device's input, as stop evidence.
     input_stop_residual_w: int
-    # Meter export that would remain after stopping this device's output, as stop evidence.
-    output_stop_residual_w: int
+    # Prepared evidence for stopping this device's output.
+    output_stop_evidence_w: int
 
     @property
     def active_produced_home(self) -> int:
@@ -344,6 +346,7 @@ class _PowerRoutingSnapshot:
 
     selected_primary: ZendureDevice | None
     primary_aware: bool
+    grid_power: int
     charge_devices: tuple[ZendureDevice, ...]
     discharge_devices: tuple[ZendureDevice, ...]
     idle_devices: tuple[ZendureDevice, ...]
@@ -1314,19 +1317,21 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         allow_bypass_zero: bool = False,
         route: _PowerRoutingDevice | None = None,
         input_stop_residual_w: int | None = None,
-        output_stop_residual_w: int | None = None,
+        output_stop_evidence_w: int | None = None,
         protect_zero: bool = True,
     ) -> int:
         """Command home output while protecting an active flow from an automatic zero."""
         if route is not None:
-            input_stop_residual_w = route.input_stop_residual_w
-            output_stop_residual_w = route.output_stop_residual_w
+            if input_stop_residual_w is None:
+                input_stop_residual_w = route.input_stop_residual_w
+            if output_stop_evidence_w is None:
+                output_stop_evidence_w = route.output_stop_evidence_w
         if power == 0:
             return await self._command_zero_home_output(
                 device,
                 allow_bypass_zero=allow_bypass_zero,
                 input_stop_residual_w=input_stop_residual_w,
-                output_stop_residual_w=output_stop_residual_w,
+                output_stop_evidence_w=output_stop_evidence_w,
                 protect_zero=protect_zero,
             )
 
@@ -1367,7 +1372,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         allow_bypass_zero: bool,
         input_stop_residual_w: int | None,
-        output_stop_residual_w: int | None,
+        output_stop_evidence_w: int | None,
         protect_zero: bool,
     ) -> int:
         """Apply bypass and active-flow safeguards for a zero home-output target."""
@@ -1390,7 +1395,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if not self._flow_stop_allows(
             device,
             _TransitionDirection.INPUT,
-            output_stop_residual_w,
+            output_stop_evidence_w,
             protect_zero=protect_zero,
         ):
             hold = self._flow_hold_target(device.homeOutput.asInt)
@@ -1404,13 +1409,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         route: _PowerRoutingDevice | None = None,
         input_stop_residual_w: int | None = None,
-        output_stop_residual_w: int | None = None,
+        output_stop_evidence_w: int | None = None,
         protect_zero: bool = True,
     ) -> int:
         """Command device input while protecting an active flow from an automatic zero."""
         if route is not None:
-            input_stop_residual_w = route.input_stop_residual_w
-            output_stop_residual_w = route.output_stop_residual_w
+            if input_stop_residual_w is None:
+                input_stop_residual_w = route.input_stop_residual_w
+            if output_stop_evidence_w is None:
+                output_stop_evidence_w = route.output_stop_evidence_w
         if power >= 0:
             if power == 0 and not self._flow_stop_allows(
                 device,
@@ -1426,14 +1433,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             and device.homeOutput.asInt > MODE_SWITCH_POWER_FLOOR_W
             and self._flow_protection_active(
                 device,
-                output_stop_residual_w,
+                output_stop_evidence_w,
                 protect_zero=protect_zero,
             )
         ):
             if not self._flow_stop_allows(
                 device,
                 _TransitionDirection.INPUT,
-                output_stop_residual_w,
+                output_stop_evidence_w,
                 protect_zero=protect_zero,
             ):
                 hold = self._flow_hold_target(device.homeOutput.asInt)
@@ -2532,14 +2539,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     primary_aware=primary_aware,
                     allow_produced_only=True,
                 ),
+                home_output=home_output,
                 # Project the meter past this device's own AC flow so a stop cannot push P1 through zero.
                 input_stop_residual_w=max(0, p1 - actual_ac_input),
-                output_stop_residual_w=max(0, -(p1 + home_output)),
+                output_stop_evidence_w=max(0, -(p1 + home_output)),
             )
 
         return _PowerRoutingSnapshot(
             selected_primary=selected_primary,
             primary_aware=primary_aware,
+            grid_power=p1,
             charge_devices=tuple(self.charge),
             discharge_devices=tuple(self.discharge),
             idle_devices=tuple(self.idle),
@@ -3888,6 +3897,31 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
         )
 
+        covered_secondary_stop_evidence: dict[ZendureDevice, int] = {}
+        if (
+            self.operation == ManagerMode.MATCHING
+            and primary is not None
+            and requested_setpoint > 0
+            and primary_target >= requested_setpoint
+        ):
+            # Reserve removable output across candidates so concurrent stops
+            # cannot expose more household demand than the neutral deadband.
+            removable_output = max(0, MODE_SWITCH_POWER_FLOOR_W - routing.grid_power)
+            for device in command_devices:
+                route = routing.route(device)
+                if (
+                    device is primary
+                    or targets[device] != 0
+                    or route.active_produced_home > 0
+                    or route.taper_output_floor > 0
+                    or route.bypass_passthrough > 0
+                ):
+                    continue
+
+                evidence = route.home_output if route.home_output <= removable_output else 0
+                covered_secondary_stop_evidence[device] = evidence
+                removable_output -= evidence
+
         async def command_primary_aware_home_output(device: ZendureDevice, target: int) -> None:
             route = routing.route(device)
             if device.can_bypass and target <= route.bypass_passthrough:
@@ -3903,6 +3937,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     target,
                     allow_bypass_zero=True,
                     route=route,
+                    output_stop_evidence_w=covered_secondary_stop_evidence.get(device),
                 )
 
         for device in input_exit_devices:
