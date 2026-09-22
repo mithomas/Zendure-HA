@@ -8434,6 +8434,70 @@ class TestP1RoutingPipeline:
 class TestP1RoutingSerialization:
     """Verify that P1 routing uses one current device-and-meter snapshot."""
 
+    async def test_managed_device_polls_run_concurrently(self, hass):
+        """Independent managed-device reports should be fetched at the same time."""
+        first = make_device(hass, device_id="concurrent-poll-first")
+        second = make_device(hass, device_id="concurrent-poll-second")
+        manager = make_manager(hass, devices=(first, second), operation=ManagerMode.MATCHING)
+        second_started = asyncio.Event()
+        first_observed_second = asyncio.Event()
+
+        async def first_poll() -> bool:
+            await asyncio.sleep(0)
+            if second_started.is_set():
+                first_observed_second.set()
+            return True
+
+        async def second_poll() -> bool:
+            second_started.set()
+            return True
+
+        first.power_get = AsyncMock(side_effect=first_poll)
+        second.power_get = AsyncMock(side_effect=second_poll)
+
+        setpoint = await manager._poll_devices_and_prepare_routing_state(100)
+
+        assert setpoint == 100
+        assert first_observed_second.is_set()
+        first.power_get.assert_awaited_once()
+        second.power_get.assert_awaited_once()
+
+    async def test_poll_exception_waits_for_sibling_poll_before_propagating(self, hass):
+        """An unexpected poll failure must not leave another device poll running."""
+        first = make_device(hass, device_id="failing-concurrent-poll")
+        second = make_device(hass, device_id="settling-concurrent-poll")
+        manager = make_manager(hass, devices=(first, second), operation=ManagerMode.MATCHING)
+        second_started = asyncio.Event()
+        release_second = asyncio.Event()
+        second_finished = asyncio.Event()
+        error_message = "poll failed"
+
+        async def failing_poll() -> bool:
+            await asyncio.sleep(0)
+            raise RuntimeError(error_message)
+
+        async def settling_poll() -> bool:
+            second_started.set()
+            await release_second.wait()
+            second_finished.set()
+            return True
+
+        first.power_get = AsyncMock(side_effect=failing_poll)
+        second.power_get = AsyncMock(side_effect=settling_poll)
+
+        poll_task = asyncio.create_task(manager._poll_devices_and_prepare_routing_state(100))
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        completed_before_sibling = poll_task.done()
+        release_second.set()
+        with pytest.raises(RuntimeError, match=error_message):
+            await poll_task
+
+        assert second_started.is_set()
+        assert completed_before_sibling is False
+        assert second_finished.is_set()
+
     async def test_concurrent_fast_update_is_coalesced_into_active_poll(self, hass):
         """A newer P1 value must replace, rather than overlap, an active route."""
         primary = make_device(

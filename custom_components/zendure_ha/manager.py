@@ -2424,8 +2424,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         setpoint = p1
         power = 0
 
-        for d in self._managed_routing_devices():
-            if await d.power_get():
+        devices = self._managed_routing_devices()
+        poll_results = await asyncio.gather(
+            *(device.power_get() for device in devices),
+            return_exceptions=True,
+        )
+        online_results: list[bool] = []
+        for poll_result in poll_results:
+            if isinstance(poll_result, BaseException):
+                raise poll_result
+            online_results.append(poll_result)
+
+        for d, online in zip(devices, online_results, strict=True):
+            if online:
                 # get power production
                 d.pwr_produced = min(
                     0,
