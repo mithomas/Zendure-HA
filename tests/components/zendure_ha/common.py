@@ -31,6 +31,7 @@ from custom_components.zendure_ha.sensor import ZendureSensor
 from custom_components.zendure_ha.switch import ZendureSwitch
 
 PRIMARY_DEVICE_DISABLED = getattr(manager_module, "PRIMARY_DEVICE_DISABLED", "__disabled__")
+TRANSFER_TARGET_DISABLED = getattr(manager_module, "TRANSFER_TARGET_DISABLED", "__disabled__")
 
 
 def config_entry_data() -> dict[str, Any]:
@@ -164,6 +165,8 @@ def make_manager(
     manual_power: float = 0,
     discharge_recovery_margin: float = 0,
     primary_device_id: str | None = None,
+    transfer_target_id: str | None = None,
+    transfer_target_soc: int = 100,
     charge_time: datetime | None = None,
     charge_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
     discharge_devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
@@ -174,12 +177,47 @@ def make_manager(
     entry = make_config_entry()
     manager = ZendureManager(hass, entry)
     manager._transition_gates_enabled = transition_gates
+    manager.operationmode = ZendureRestoreSelect(
+        manager,
+        "Operation",
+        {
+            0: "off",
+            1: "manual",
+            2: "smart",
+            3: "smart_discharging",
+            4: "smart_charging",
+            5: "store_solar",
+            6: "transfer",
+        },
+        manager.update_operation,
+        operation.value,
+    )
     manager.primarydevice = ZendureRestoreSelect(
         manager,
         "primary_device",
         {PRIMARY_DEVICE_DISABLED: "none"},
         manager.update_primary_device,
         PRIMARY_DEVICE_DISABLED,
+    )
+    manager.transfertarget = ZendureRestoreSelect(
+        manager,
+        "transfer_target_device",
+        {TRANSFER_TARGET_DISABLED: "none"},
+        manager.update_transfer_target,
+        TRANSFER_TARGET_DISABLED,
+    )
+    manager.transfertargetsoc = ZendureRestoreNumber(
+        manager,
+        "transfer_target_soc",
+        manager.update_transfer_target_soc,
+        None,
+        "%",
+        "soc",
+        100,
+        5,
+        NumberMode.BOX,
+        True,
+        initial_value=transfer_target_soc,
     )
     manager.operationstate = ZendureSensor(manager, "operation_state")
     manager.manualpower = ZendureRestoreNumber(
@@ -246,6 +284,9 @@ def make_manager(
         attach_devices(manager, *devices)
     if primary_device_id is not None:
         manager.primarydevice.update_value(primary_device_id)
+    manager.refresh_transfer_target_options()
+    if transfer_target_id is not None:
+        manager.transfertarget.update_value(transfer_target_id)
     if charge_devices is not None:
         manager.charge = list(charge_devices)
     if discharge_devices is not None:

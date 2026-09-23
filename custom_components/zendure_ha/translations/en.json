@@ -109,6 +109,9 @@
       "discharge_recovery_margin": {
         "name": "Discharge Recovery Margin"
       },
+      "transfer_target_soc": {
+        "name": "Transfer Target SoC"
+      },
       "spike_filter_threshold": {
         "name": "Spike Filter Threshold"
       },
@@ -286,7 +289,8 @@
           "0": "Idle",
           "1": "Charging",
           "2": "Discharging",
-          "3": "Off"
+          "3": "Off",
+          "4": "Transfer"
         }
       },
       "device_state": {
@@ -481,11 +485,18 @@
           "smart": "Smart Matching",
           "smart_discharging": "Smart discharge only",
           "smart_charging": "Smart charge only",
-          "store_solar": "Store Solar"
+          "store_solar": "Store Solar",
+          "transfer": "Energy Transfer"
         }
       },
       "primary_device": {
         "name": "Primary Device",
+        "state": {
+          "none": "Disabled"
+        }
+      },
+      "transfer_target_device": {
+        "name": "Transfer Target Device",
         "state": {
           "none": "Disabled"
         }

@@ -54,6 +54,7 @@ class ManagerMode(Enum):
     MATCHING_DISCHARGE = 3
     MATCHING_CHARGE = 4
     STORE_SOLAR = 5
+    TRANSFER = 6
 
 
 class ManagerState(Enum):
@@ -61,6 +62,7 @@ class ManagerState(Enum):
     CHARGE = 1
     DISCHARGE = 2
     OFF = 3
+    TRANSFER = 4
 
 
 class ConnectionMode(IntEnum):

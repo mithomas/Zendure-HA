@@ -95,6 +95,9 @@
       "discharge_recovery_margin": {
         "name": "Ontlaadherstelmarge"
       },
+      "transfer_target_soc": {
+        "name": "Doel-SOC overdracht"
+      },
       "spike_filter_threshold": {
         "name": "Piekfilterdrempel"
       },
@@ -256,7 +259,8 @@
           "0": "Inactief",
           "1": "Laden",
           "2": "Ontladen",
-          "3": "Uit"
+          "3": "Uit",
+          "4": "Overdracht"
         }
       },
       "device_state": {
@@ -385,11 +389,18 @@
           "smart": "Slimme Matching",
           "smart_discharging": "Slim ontladen",
           "smart_charging": "Slim opladen",
-          "store_solar": "Zonne-energie opslaan"
+          "store_solar": "Zonne-energie opslaan",
+          "transfer": "Energieoverdracht"
         }
       },
       "primary_device": {
         "name": "Primair apparaat",
+        "state": {
+          "none": "Uitgeschakeld"
+        }
+      },
+      "transfer_target_device": {
+        "name": "Doelapparaat overdracht",
         "state": {
           "none": "Uitgeschakeld"
         }

@@ -99,6 +99,9 @@
       "discharge_recovery_margin": {
         "name": "Marge de reprise de decharge"
       },
+      "transfer_target_soc": {
+        "name": "SoC cible du transfert"
+      },
       "spike_filter_threshold": {
         "name": "Seuil du filtre de pics"
       },
@@ -261,7 +264,8 @@
           "0": "En veille",
           "1": "En charge",
           "2": "En décharge",
-          "3": "Éteint"
+          "3": "Éteint",
+          "4": "Transfert"
         }
       },
       "device_state": {
@@ -450,11 +454,18 @@
           "smart": "Couplage intelligent",
           "smart_discharging": "Décharge intelligente",
           "smart_charging": "Charge intelligente",
-          "store_solar": "Stocker le solaire"
+          "store_solar": "Stocker le solaire",
+          "transfer": "Transfert d'énergie"
         }
       },
       "primary_device": {
         "name": "Appareil principal",
+        "state": {
+          "none": "Désactivé"
+        }
+      },
+      "transfer_target_device": {
+        "name": "Appareil cible du transfert",
         "state": {
           "none": "Désactivé"
         }

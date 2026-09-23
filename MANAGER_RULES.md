@@ -11,6 +11,27 @@ This document summarizes the intended routing preferences for the Zendure manage
 
 The manager accounts for power devices are already providing or consuming before issuing new commands. This prevents overreaction to telemetry lag, already-active PV pass-through, or in-flight charge/discharge activity.
 
+## Energy Transfer Mode
+
+`TRANSFER` is a one-shot AC battery transfer from the selected Primary Device to the selected Transfer Target Device. The Transfer Target SoC is independent of the receiver's normal Target SoC. When an online receiver reaches the transfer cutoff (by either meeting the target SoC or entering the `SOCFULL` state), the manager updates the visible Operation Mode to `MATCHING` in that cycle and immediately routes the cycle as Smart Matching. A later SoC drop does not restart transfer automatically.
+
+Temporary pair ineligibility does not change the visible mode. The manager falls back to Smart Matching and resumes transfer automatically when the pair becomes eligible again. Fallback applies when either selection is disabled or invalid, both selections identify the same device, the receiver is offline or full, or the receiver has no safe input capacity. Transfer is also suppressed while the source is offline, empty, at reserve, recovering, or otherwise discharge-blocked. Source PV can still serve household demand through fallback matching. Empty, at-reserve, and recovering receivers remain eligible to charge.
+
+The transfer targets are prepared once from the routing snapshot:
+
+```text
+household balance = P1 + measured managed AC output - measured managed AC input
+household demand = max(0, household balance)
+external export = max(0, -household balance)
+receiver capacity = local-PV-adjusted min(device, fuse-group, taper capacity)
+source output = min(source safe output, max(0, household demand + receiver capacity - external export - peer produced output))
+receiver input = min(receiver capacity, external export + max(0, peer produced output + source output - household demand))
+```
+
+Household demand therefore has first claim on source output. Receiver AC input gets only the remaining AC-visible output plus any independently measured external export. Source PV above the commanded AC-output target is not added to the receiver budget and remains available to the source battery. If demand exceeds source capacity, normal selected-primary Smart Matching gives the source output priority and allocates remaining demand to eligible secondaries.
+
+Execution reduces obsolete receiver charging immediately when demand rises. It then commands source output through the normal per-device transition gate. Receiver input may increase only against measured source output or measured external export, so a requested but not yet observed source increase cannot deliberately import grid power. The receiver's output-to-input transition uses the existing gate, as does a source input-to-output transition. Operation State reports `Transfer` only when the prepared cycle has both nonzero source output and receiver input targets; fallback cycles report the normal Charging, Discharging, or Idle state.
+
 ## Device States
 
 Device reserve and recovery state is owned by the device; the manager consumes it and must not recompute it from back-references.

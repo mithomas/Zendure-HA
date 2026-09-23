@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, SmartMode
+from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, ManagerState, SmartMode
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.fusegroup import FuseGroup
 from custom_components.zendure_ha.manager import ZendureManager, _PowerRoutingIntent, _TransitionDirection
@@ -12734,3 +12734,330 @@ class TestAcInputDwell:
             120,
             start + timedelta(seconds=2),
         )
+
+
+class TestEnergyTransfer:
+    """One-shot AC transfer routes source output into the selected receiver safely."""
+
+    @staticmethod
+    def _manager(hass: Any, source: Any, receiver: Any, *, cutoff: int = 100) -> ZendureManager:
+        manager = make_manager(
+            hass,
+            devices=(source, receiver),
+            operation=ManagerMode.TRANSFER,
+            primary_device_id=source.deviceId,
+        )
+        manager.transfertarget = Mock(value=receiver.deviceId)
+        manager.transfertargetsoc = Mock(asInt=cutoff)
+        manager.operationmode = Mock()
+        for device in (source, receiver):
+            device.power_get = AsyncMock(return_value=True)
+            device.power_charge = AsyncMock(side_effect=lambda power: power)
+            device.power_discharge = AsyncMock(side_effect=lambda power: power)
+        return manager
+
+    @staticmethod
+    async def _intent(manager: ZendureManager, p1: int = 0) -> _PowerRoutingIntent:
+        manager._reset_power_distribution_state()
+        setpoint = await manager._poll_devices_and_prepare_routing_state(p1)
+        intent, _routing, _setpoint = manager._prepare_power_routing(p1, datetime.now(), setpoint)
+        return intent
+
+    async def test_household_demand_gets_source_output_before_receiver_charge(self, hass: Any) -> None:
+        source = make_device(
+            hass,
+            device_id="transfer-source",
+            ac_mode=AcMode.OUTPUT,
+            home_output=800,
+            output_limit=800,
+            battery_output=800,
+        )
+        receiver = make_device(
+            hass,
+            device_id="transfer-receiver",
+            ac_mode=AcMode.INPUT,
+            home_input=500,
+            input_limit=500,
+            battery_input=500,
+        )
+        manager = self._manager(hass, source, receiver)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        cast("AsyncMock", source.power_discharge).assert_awaited_with(800)
+        cast("AsyncMock", receiver.power_charge).assert_awaited_with(-500)
+        assert manager.operationstate.asInt == ManagerState.TRANSFER.value
+
+    async def test_receiver_cap_limits_source_output(self, hass: Any) -> None:
+        source = make_device(hass, device_id="capped-transfer-source", home_output=500, battery_output=500)
+        receiver = make_device(
+            hass,
+            device_id="capped-transfer-receiver",
+            ac_mode=AcMode.INPUT,
+            home_input=200,
+            battery_input=200,
+        )
+        receiver.fuseGrp.minpower = -200
+        manager = self._manager(hass, source, receiver)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        cast("AsyncMock", source.power_discharge).assert_awaited_with(500)
+        cast("AsyncMock", receiver.power_charge).assert_awaited_with(-200)
+
+    async def test_source_pv_above_ac_ceiling_does_not_increase_receiver_input(self, hass: Any) -> None:
+        source = make_device(
+            hass,
+            device_id="solar-transfer-source",
+            home_output=800,
+            battery_input=400,
+        )
+        receiver = make_device(
+            hass,
+            device_id="solar-transfer-receiver",
+            ac_mode=AcMode.INPUT,
+            home_input=500,
+            battery_input=500,
+        )
+        manager = self._manager(hass, source, receiver)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        cast("AsyncMock", source.power_discharge).assert_awaited_with(800)
+        cast("AsyncMock", receiver.power_charge).assert_awaited_with(-500)
+
+    async def test_demand_above_source_capacity_uses_matching_for_receiver_remainder(self, hass: Any) -> None:
+        source = make_device(hass, device_id="demand-transfer-source", home_output=800, battery_output=800)
+        receiver = make_device(hass, device_id="demand-transfer-receiver", home_output=400, battery_output=400)
+        manager = self._manager(hass, source, receiver)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        cast("AsyncMock", source.power_discharge).assert_awaited_with(800)
+        cast("AsyncMock", receiver.power_discharge).assert_awaited_with(400)
+        cast("AsyncMock", receiver.power_charge).assert_not_awaited()
+        assert manager.operation is ManagerMode.TRANSFER
+        assert manager.operationstate.asInt == ManagerState.DISCHARGE.value
+
+    async def test_cutoff_switches_visible_mode_and_same_cycle_uses_matching(self, hass: Any) -> None:
+        source = make_device(hass, device_id="cutoff-transfer-source", home_output=300, battery_output=300)
+        receiver = make_device(hass, device_id="cutoff-transfer-receiver", level=80)
+        manager = self._manager(hass, source, receiver, cutoff=80)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        assert manager.operation is ManagerMode.MATCHING
+        cast("Mock", manager.operationmode.update_value).assert_called_once_with(ManagerMode.MATCHING.value)
+        cast("AsyncMock", receiver.power_charge).assert_not_awaited()
+
+        receiver.electricLevel.update_value(70)
+        receiver.state = DeviceState.INACTIVE
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+        assert manager.operation is ManagerMode.MATCHING
+
+    async def test_cutoff_finishes_when_receiver_reports_socfull_below_cutoff(self, hass: Any) -> None:
+        source = make_device(hass, device_id="socfull-cutoff-source", home_output=300, battery_output=300)
+        receiver = make_device(hass, device_id="socfull-cutoff-receiver", level=99)
+        receiver.state = DeviceState.SOCFULL
+        manager = self._manager(hass, source, receiver, cutoff=100)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        assert manager.operation is ManagerMode.MATCHING
+        cast("Mock", manager.operationmode.update_value).assert_called_once_with(ManagerMode.MATCHING.value)
+        cast("AsyncMock", receiver.power_charge).assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "source_state",
+        [
+            DeviceState.OFFLINE,
+            DeviceState.SOCEMPTY,
+            DeviceState.SOCRESERVE,
+            DeviceState.RESERVE_RECOVERY,
+        ],
+    )
+    async def test_blocked_source_falls_back_without_leaving_transfer(
+        self,
+        hass: Any,
+        source_state: DeviceState,
+    ) -> None:
+        source = make_device(hass, device_id=f"blocked-source-{source_state.name.lower()}")
+        receiver = make_device(hass, device_id=f"blocked-receiver-{source_state.name.lower()}")
+        manager = self._manager(hass, source, receiver)
+        if source_state is DeviceState.RESERVE_RECOVERY:
+            source.electricLevel.update_value(15)
+            source.discharge_recovery_margin_soc = 10
+            source.discharge_recovery_active = True
+            source.refresh_discharge_state()
+        else:
+            source.state = source_state
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is None
+        assert manager.operation is ManagerMode.TRANSFER
+
+    @pytest.mark.parametrize(
+        "receiver_state",
+        [DeviceState.SOCEMPTY, DeviceState.SOCRESERVE, DeviceState.RESERVE_RECOVERY],
+    )
+    async def test_low_soc_receiver_remains_transfer_eligible(
+        self,
+        hass: Any,
+        receiver_state: DeviceState,
+    ) -> None:
+        source = make_device(
+            hass,
+            device_id=f"low-receiver-source-{receiver_state.name.lower()}",
+            home_output=800,
+            battery_output=800,
+        )
+        receiver = make_device(
+            hass,
+            device_id=f"low-receiver-{receiver_state.name.lower()}",
+            level=5,
+            ac_mode=AcMode.INPUT,
+            home_input=500,
+            battery_input=500,
+        )
+        manager = self._manager(hass, source, receiver)
+        receiver.state = receiver_state
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is not None
+        assert intent.transfer_plan.receiver is receiver
+
+    async def test_unavailable_receiver_temporarily_falls_back(self, hass: Any) -> None:
+        source = make_device(hass, device_id="fallback-source-offline")
+        receiver = make_device(hass, device_id="fallback-receiver-offline", level=90)
+        manager = self._manager(hass, source, receiver)
+        receiver.state = DeviceState.OFFLINE
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is None
+        assert manager.operation is ManagerMode.TRANSFER
+
+    async def test_external_export_adds_to_receiver_input_without_local_pv_double_counting(self, hass: Any) -> None:
+        source = make_device(
+            hass,
+            device_id="export-transfer-source",
+            home_output=800,
+            battery_input=400,
+        )
+        receiver = make_device(
+            hass,
+            device_id="export-transfer-receiver",
+            ac_mode=AcMode.INPUT,
+            home_input=900,
+            battery_input=900,
+        )
+        manager = self._manager(hass, source, receiver)
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is not None
+        assert intent.transfer_plan.source_output_target == 800
+        assert intent.transfer_plan.receiver_input_target == 900
+
+    async def test_receiver_waits_for_measured_source_output_before_increasing_input(self, hass: Any) -> None:
+        source = make_device(hass, device_id="unproven-transfer-source")
+        receiver = make_device(hass, device_id="unproven-transfer-receiver")
+        manager = self._manager(hass, source, receiver)
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is not None
+        assert intent.transfer_plan.source_output_target == 800
+        assert intent.transfer_plan.receiver_input_target == 0
+
+    async def test_invalid_same_device_pair_falls_back_safely(self, hass: Any) -> None:
+        source = make_device(hass, device_id="same-transfer-device")
+        receiver = make_device(hass, device_id="unused-transfer-device")
+        manager = self._manager(hass, source, receiver)
+        manager.transfertarget = Mock(value=source.deviceId)
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is None
+        assert manager.operation is ManagerMode.TRANSFER
+
+    async def test_receiver_without_input_capacity_temporarily_falls_back(self, hass: Any) -> None:
+        source = make_device(hass, device_id="no-capacity-transfer-source")
+        receiver = make_device(hass, device_id="no-capacity-transfer-receiver")
+        receiver.charge_limit = 0
+        manager = self._manager(hass, source, receiver)
+
+        intent = await self._intent(manager)
+
+        assert intent.transfer_plan is None
+        assert manager.operation is ManagerMode.TRANSFER
+
+    async def test_rising_demand_reduces_receiver_before_reissuing_source_output(self, hass: Any) -> None:
+        source = make_device(
+            hass,
+            device_id="ordered-transfer-source",
+            home_output=800,
+            battery_output=800,
+        )
+        receiver = make_device(
+            hass,
+            device_id="ordered-transfer-receiver",
+            ac_mode=AcMode.INPUT,
+            home_input=500,
+            input_limit=500,
+            battery_input=500,
+        )
+        manager = self._manager(hass, source, receiver)
+        commands: list[tuple[str, int]] = []
+        receiver.power_charge = AsyncMock(side_effect=lambda power: commands.append(("receiver", power)) or power)
+        source.power_discharge = AsyncMock(side_effect=lambda power: commands.append(("source", power)) or power)
+
+        await _run_prepared_power_routing(manager, 400, datetime.now())
+
+        assert commands[:2] == [("receiver", -100), ("source", 800)]
+
+    async def test_transfer_reuses_both_physical_transition_gates(self, hass: Any) -> None:
+        source = make_device(
+            hass,
+            device_id="gated-transfer-source",
+            ac_mode=AcMode.INPUT,
+            home_input=100,
+            input_limit=100,
+            battery_input=100,
+        )
+        receiver = make_device(
+            hass,
+            device_id="gated-transfer-receiver",
+            ac_mode=AcMode.OUTPUT,
+            home_output=100,
+            output_limit=100,
+            battery_output=100,
+        )
+        manager = self._manager(hass, source, receiver)
+        manager._transition_gates_enabled = True
+
+        await _run_prepared_power_routing(manager, -200, datetime.now())
+
+        cast("AsyncMock", source.power_discharge).assert_not_awaited()
+        cast("AsyncMock", source.power_charge).assert_awaited_with(-60)
+        cast("AsyncMock", receiver.power_charge).assert_not_awaited()
+        cast("AsyncMock", receiver.power_discharge).assert_awaited_with(60)
+
+    async def test_transfer_control_changes_force_immediate_routing(self, hass: Any) -> None:
+        source = make_device(hass, device_id="update-transfer-source")
+        receiver = make_device(hass, device_id="update-transfer-receiver")
+        manager = make_manager(
+            hass,
+            devices=(source, receiver),
+            operation=ManagerMode.TRANSFER,
+            primary_device_id=source.deviceId,
+            transfer_target_id=receiver.deviceId,
+        )
+        manager._force_routing_update = AsyncMock()
+
+        await manager.update_transfer_target(manager.transfertarget, receiver.deviceId)
+        await manager.update_transfer_target_soc(manager.transfertargetsoc, 85)
+
+        assert cast("AsyncMock", manager._force_routing_update).await_count == 2

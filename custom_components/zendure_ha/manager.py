@@ -10,7 +10,7 @@ import traceback
 from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
 from math import sqrt
@@ -39,6 +39,7 @@ from .switch import ZendureSwitch
 
 SCAN_INTERVAL = timedelta(seconds=60)
 PRIMARY_DEVICE_DISABLED = "__disabled__"
+TRANSFER_TARGET_DISABLED = "__disabled__"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ PV_CHARGE_FIRST_STATES = {
 PV_CHARGE_FIRST_OPERATIONS = {
     ManagerMode.MATCHING,
     ManagerMode.MATCHING_CHARGE,
+    ManagerMode.TRANSFER,
 }
 
 P1_CHARGE_LAG_FAST_DEVIATION = 20
@@ -70,11 +72,13 @@ MODE_SWITCH_MAX_SAMPLE_GAP_SECONDS = 15
 P1_CHARGE_LAG_FAST_OPERATIONS = {
     ManagerMode.MATCHING,
     ManagerMode.MATCHING_CHARGE,
+    ManagerMode.TRANSFER,
 }
 
 P1_EXPORT_TRIM_FAST_OPERATIONS = {
     ManagerMode.MATCHING,
     ManagerMode.MATCHING_DISCHARGE,
+    ManagerMode.TRANSFER,
 }
 
 LOW_SOC_STATES = {
@@ -140,6 +144,16 @@ class _RoutingPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class _TransferPlan:
+    """Prepared source and receiver targets for one transfer cycle."""
+
+    source: ZendureDevice
+    receiver: ZendureDevice
+    source_output_target: int
+    receiver_input_target: int
+
+
+@dataclass(frozen=True, slots=True)
 class _PowerRoutingIntent:
     """
     Per-cycle input and home-output intent after mode clamps are applied.
@@ -178,6 +192,8 @@ class _PowerRoutingIntent:
     primary_output_export_trim: int
     # True when a strong-export cycle may only trim output, never start input.
     trim_home_output_only: bool
+    # Optional simultaneous source-output and receiver-input transfer targets.
+    transfer_plan: _TransferPlan | None = None
 
 
 DEFAULT_ROUTING_POLICY = _RoutingPolicy(
@@ -222,6 +238,12 @@ ROUTING_POLICIES = {
         selected_primary_output=True,
         zero_uses_charge_path=True,
     ),
+    ManagerMode.TRANSFER: _RoutingPolicy(
+        charge_allowed=True,
+        output_clamp=_OutputClamp.FULL,
+        selected_primary_charge=True,
+        selected_primary_output=True,
+    ),
     ManagerMode.OFF: DEFAULT_ROUTING_POLICY,
 }
 
@@ -262,8 +284,12 @@ class _PowerRoutingDevice:
     taper_active: bool
     # Maximum absolute AC input allowed by the device charge limit and taper headroom.
     effective_input_capacity: int
+    # Maximum absolute AC input available within the current fuse-group flows.
+    fuse_input_capacity: int
     # Current device input that should be reduced before switching direction.
     charge_floor: int
+    # Current configured AC-input limit when the device is in input mode.
+    requested_input_limit: int
     # Local production left for this device's own battery after current home output.
     charge_surplus: int
     # Explicit bypass production already passing through to home.
@@ -840,20 +866,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
-        self.operationmode = (
-            ZendureRestoreSelect(
-                self,
-                "Operation",
-                {
-                    0: "off",
-                    1: "manual",
-                    2: "smart",
-                    3: "smart_discharging",
-                    4: "smart_charging",
-                    5: "store_solar",
-                },
-                self.update_operation,
-            ),
+        self.operationmode = ZendureRestoreSelect(
+            self,
+            "Operation",
+            {
+                0: "off",
+                1: "manual",
+                2: "smart",
+                3: "smart_discharging",
+                4: "smart_charging",
+                5: "store_solar",
+                6: "transfer",
+            },
+            self.update_operation,
         )
         self.primarydevice = ZendureRestoreSelect(
             self,
@@ -861,6 +886,26 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             {PRIMARY_DEVICE_DISABLED: "none"},
             self.update_primary_device,
             PRIMARY_DEVICE_DISABLED,
+        )
+        self.transfertarget = ZendureRestoreSelect(
+            self,
+            "transfer_target_device",
+            {TRANSFER_TARGET_DISABLED: "none"},
+            self.update_transfer_target,
+            TRANSFER_TARGET_DISABLED,
+        )
+        self.transfertargetsoc = ZendureRestoreNumber(
+            self,
+            "transfer_target_soc",
+            self.update_transfer_target_soc,
+            None,
+            "%",
+            "soc",
+            100,
+            5,
+            NumberMode.BOX,
+            True,
+            initial_value=100,
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.manualpower = ZendureRestoreNumber(
@@ -982,6 +1027,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.update_p1meter(self.config_entry.data.get(CONF_P1METER, "sensor.power_actual"))
         await asyncio.sleep(1)  # allow other tasks to run
         self.refresh_primary_device_options()
+        self.refresh_transfer_target_options()
         self.register_pending_entities()
 
     async def update_fusegroups(self) -> None:
@@ -1084,6 +1130,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     d.fuseGrp = fg
                 self.fuseGroups.append(fg)
         self.refresh_primary_device_options()
+        self.refresh_transfer_target_options()
 
     async def _force_routing_update(self) -> None:
         """Force an immediate routing update using the current P1 meter value."""
@@ -1111,6 +1158,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         _LOGGER.info("Update operation: %s from: %s", operation, self.operation)
 
         self.operation = operation
+        if operation == ManagerMode.TRANSFER:
+            self.refresh_transfer_target_options()
         if operation == ManagerMode.OFF:
             self._cancel_p1_followup(clear_latest=True)
             self._transition_candidates.clear()
@@ -1132,6 +1181,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if entity is not None:
             entity.update_value(_device_id)
         _LOGGER.info("Update primary device: %s", _device_id if _device_id is not None else None)
+        self.refresh_transfer_target_options()
         if not self._operation_supports_selected_primary():
             return
 
@@ -1146,6 +1196,45 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         for device in sorted(self._managed_routing_devices(), key=lambda dev: dev.name):
             options[device.deviceId] = device.name
         self.primarydevice.setDict(options)
+
+    async def update_transfer_target(self, entity: ZendureSelect, device_id: Any) -> None:
+        """Handle updates to the selected transfer receiver."""
+        if entity is not None:
+            entity.update_value(device_id)
+        _LOGGER.info("Update transfer target device: %s", device_id if device_id is not None else None)
+        if self.operation == ManagerMode.TRANSFER:
+            await self._force_routing_update()
+
+    async def update_transfer_target_soc(self, entity: ZendureRestoreNumber, value: Any) -> None:
+        """Handle updates to the one-shot transfer cutoff."""
+        if entity is not None:
+            entity.update_value(value)
+        if self.operation == ManagerMode.TRANSFER:
+            await self._force_routing_update()
+
+    def refresh_transfer_target_options(self) -> None:
+        """Refresh transfer receivers, excluding the selected source device."""
+        if not hasattr(self, "transfertarget"):
+            return
+
+        source = self._selected_primary_device()
+        options = {TRANSFER_TARGET_DISABLED: "none"}
+        for device in sorted(self._managed_routing_devices(), key=lambda candidate: candidate.name):
+            if device is not source:
+                options[device.deviceId] = device.name
+        self.transfertarget.setDict(options)
+
+    def _selected_transfer_target(self) -> ZendureDevice | None:
+        """Return the configured managed transfer receiver."""
+        if not hasattr(self, "transfertarget"):
+            return None
+        device_id = self.transfertarget.value
+        if device_id in (None, TRANSFER_TARGET_DISABLED):
+            return None
+        return next(
+            (candidate for candidate in self._managed_routing_devices() if candidate.deviceId == device_id),
+            None,
+        )
 
     def _selected_primary_device(self, charging: bool | None = None) -> ZendureDevice | None:
         """Return the selected primary device, optionally filtered by routing direction."""
@@ -2223,6 +2312,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         trim_home_output_only: bool = False,
     ) -> tuple[_PowerRoutingIntent, _PowerRoutingSnapshot, int]:
         """Prepare one routing cycle from a polled P1 routing setpoint."""
+        if self.operation == ManagerMode.TRANSFER:
+            self._finish_transfer_at_cutoff()
         policy = self._routing_policy()
         selected_primary_routing = self._selected_primary_routing_enabled()
         pv_charge_first_mode = selected_primary_routing and self.operation in PV_CHARGE_FIRST_OPERATIONS
@@ -2233,12 +2324,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             pv_charge_first=pv_charge_first_mode,
             p1=p1,
         )
+        transfer_plan = self._prepare_transfer_plan(p1, routing)
         selected_charge_primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
         input_source = routing.input_source_summary(p1)
         unexplained_input_export = self._unexplained_export_for_primary_input(p1, routing, pv_floors)
         matching_input_switch_allowed = (
-            self.operation != ManagerMode.MATCHING
+            not self._uses_matching_routing()
             or not selected_primary_routing
             or routing.selected_primary is None
             or not routing.selected_primary.online
@@ -2253,7 +2345,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         non_empty_local_input_allowed = input_source.available or routing.has_active_local_input_source()
         input_source_available = (
-            self.operation != ManagerMode.MATCHING
+            not self._uses_matching_routing()
             or not selected_primary_routing
             or routing.selected_primary is None
             or not routing.selected_primary.online
@@ -2299,7 +2391,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             unexplained_input_export,
         )
         selected_primary_output_growth_allowed = not (
-            selected_primary_routing and self.operation == ManagerMode.MATCHING and p1 <= 0
+            selected_primary_routing and self._uses_matching_routing() and p1 <= 0
         )
         blocked_primary_taper_overflow_charge_allowed = self._blocked_primary_taper_overflow_charge_allowed(
             routing,
@@ -2323,12 +2415,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             primary_output_export_trim=primary_output_export_trim,
             trim_home_output_only=trim_home_output_only,
         )
+        if transfer_plan is not None and not trim_home_output_only:
+            intent = replace(intent, transfer_plan=transfer_plan)
 
         return intent, routing, setpoint
 
     def _primary_output_export_trim_budget(self, p1: int, routing: _PowerRoutingSnapshot) -> int:
         """Return measured export eligible to reduce selected-primary output."""
-        if self.operation != ManagerMode.MATCHING or not routing.primary_aware:
+        if not self._uses_matching_routing() or not routing.primary_aware:
             return 0
         selected_primary = routing.selected_primary
         if selected_primary is None or selected_primary not in routing.discharge_devices:
@@ -2344,7 +2438,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         unexplained_input_export: int,
     ) -> bool:
         """Return whether the selected primary may be switched into input mode."""
-        if self.operation != ManagerMode.MATCHING or not routing.primary_aware or routing.selected_primary is None:
+        if not self._uses_matching_routing() or not routing.primary_aware or routing.selected_primary is None:
             return True
         selected_primary = routing.selected_primary
         selected_primary_active_local_input = (
@@ -2470,6 +2564,116 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Return the mode-level input and home-output clamps for this cycle."""
         return ROUTING_POLICIES.get(self.operation, DEFAULT_ROUTING_POLICY)
 
+    def _uses_matching_routing(self) -> bool:
+        """Return whether this cycle uses normal Smart Matching policy."""
+        return self.operation in {ManagerMode.MATCHING, ManagerMode.TRANSFER}
+
+    def _finish_transfer_at_cutoff(self) -> None:
+        """Complete the one-shot transfer when the online receiver reaches its cutoff."""
+        source = self._selected_primary_device()
+        receiver = self._selected_transfer_target()
+        if (
+            source is None
+            or receiver is None
+            or receiver is source
+            or not receiver.online
+            or receiver.state == DeviceState.OFFLINE
+            or (
+                receiver.state != DeviceState.SOCFULL
+                and receiver.electricLevel.asInt < max(5, min(100, self.transfertargetsoc.asInt))
+            )
+        ):
+            return
+
+        _LOGGER.info(
+            "Transfer target %s reached %s%%; switching to Smart Matching",
+            receiver.name,
+            self.transfertargetsoc.asInt,
+        )
+        self.operation = ManagerMode.MATCHING
+        operationmode = getattr(self, "operationmode", None)
+        if operationmode is not None:
+            operationmode.update_value(ManagerMode.MATCHING.value)
+
+    def _prepare_transfer_plan(
+        self,
+        p1: int,
+        routing: _PowerRoutingSnapshot,
+    ) -> _TransferPlan | None:
+        """Build safe simultaneous output/input targets for an eligible transfer pair."""
+        if self.operation != ManagerMode.TRANSFER:
+            return None
+
+        source = routing.selected_primary
+        receiver = self._selected_transfer_target()
+        if (
+            source is None
+            or receiver is None
+            or receiver is source
+            or source not in routing.devices
+            or receiver not in routing.devices
+            or not source.online
+            or source.state
+            in {
+                DeviceState.OFFLINE,
+                DeviceState.SOCEMPTY,
+                DeviceState.SOCRESERVE,
+                DeviceState.RESERVE_RECOVERY,
+            }
+            or not receiver.online
+            or receiver.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}
+        ):
+            return None
+
+        source_route = routing.route(source)
+        receiver_route = routing.route(receiver)
+        source_capacity = source_route.available_discharge
+        receiver_input_capacity = min(
+            receiver_route.effective_input_capacity,
+            receiver_route.fuse_input_capacity,
+        )
+        if not receiver_route.taper_active:
+            receiver_input_capacity = max(0, receiver_input_capacity - receiver_route.charge_surplus)
+        if source_capacity <= 0 or receiver_input_capacity <= 0:
+            return None
+
+        managed_output = sum(route.home_output for route in routing.devices.values())
+        managed_input = sum(route.charge_floor for route in routing.devices.values())
+        household_balance = p1 + managed_output - managed_input
+        household_demand = max(0, household_balance)
+        external_export = max(0, -household_balance)
+        peer_produced_output = sum(
+            route.active_produced_home for device, route in routing.devices.items() if device not in {source, receiver}
+        )
+
+        source_output_target = min(
+            source_capacity,
+            max(
+                0,
+                household_demand + receiver_input_capacity - external_export - peer_produced_output,
+            ),
+        )
+        desired_receiver_input = min(
+            receiver_input_capacity,
+            external_export + max(0, peer_produced_output + source_output_target - household_demand),
+        )
+        if source_output_target <= 0 or desired_receiver_input <= 0:
+            return None
+
+        # Only measured AC-visible source output can authorize new receiver
+        # input. The requested source increase is picked up on a later cycle.
+        proven_source_output = min(source_output_target, source_route.home_output)
+        receiver_input_target = min(
+            desired_receiver_input,
+            external_export + max(0, peer_produced_output + proven_source_output - household_demand),
+        )
+        return _TransferPlan(
+            source=source,
+            receiver=receiver,
+            source_output_target=source_output_target,
+            receiver_input_target=receiver_input_target,
+        )
+
     def _operation_supports_selected_primary(self) -> bool:
         """Return whether the active mode has any selected-primary route branch."""
         policy = self._routing_policy()
@@ -2541,7 +2745,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 taper_output_floor=taper_output_floor,
                 taper_active=taper_active,
                 effective_input_capacity=effective_input_capacity,
+                fuse_input_capacity=max(0, -self._primary_charge_limit(device)),
                 charge_floor=actual_ac_input,
+                requested_input_limit=(max(0, device.limitInput.asInt) if device.acMode.value == AcMode.INPUT else 0),
                 charge_surplus=device.current_charge_surplus_limit(),
                 bypass_passthrough=bypass_passthrough,
                 available_discharge=self._available_discharge_power(device, primary_aware=primary_aware),
@@ -2586,7 +2792,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         would otherwise zero an active produced floor too early.
         """
         selected_primary = routing.selected_primary
-        matching_primary_aware = routing.primary_aware and self.operation == ManagerMode.MATCHING
+        matching_primary_aware = routing.primary_aware and self._uses_matching_routing()
         selected_primary_bypass_passthrough = routing.selected_primary_bypass_passthrough
         self.discharge_bypass += selected_primary_bypass_passthrough
         if p1 > 0 and self.charge and routing.preserves_produced_floor:
@@ -2616,7 +2822,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # in the setpoint and can reduce or eventually stop that output.
         active_output_production_without_primary = (
             sum(max(0, -device.pwr_produced) for device in routing.discharge_devices)
-            if self.operation == ManagerMode.MATCHING and selected_primary is None
+            if self._uses_matching_routing() and selected_primary is None
             else 0
         )
 
@@ -2897,6 +3103,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.operationstate.update_value(ManagerState.OFF.value)
                 return
 
+            if intent.transfer_plan is not None:
+                await self._apply_transfer(intent.transfer_plan, routing)
+                return
+
             if intent.route_input:
                 if intent.selected_primary_input:
                     await self._apply_primary_input(
@@ -2938,6 +3148,61 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         finally:
             self._finish_transition_cycle()
             self._routing_transition_time = None
+
+    async def _apply_transfer(
+        self,
+        plan: _TransferPlan,
+        routing: _PowerRoutingSnapshot,
+    ) -> None:
+        """Execute prepared transfer targets through the normal command gates."""
+        source = plan.source
+        receiver = plan.receiver
+        receiver_target = max(0, plan.receiver_input_target)
+        current_receiver_input = max(
+            routing.route(receiver).charge_floor,
+            routing.route(receiver).requested_input_limit,
+        )
+
+        # Retire obsolete charging first so rising household demand cannot turn
+        # a previously safe transfer into deliberate grid import.
+        if receiver_target < current_receiver_input:
+            await self._command_input(receiver, -receiver_target, route=routing.route(receiver))
+        for device in routing.charge_devices:
+            if device not in {source, receiver}:
+                await self._command_input(device, 0, route=routing.route(device))
+
+        await self._command_home_output(
+            source,
+            plan.source_output_target,
+            allow_bypass_zero=True,
+            route=routing.route(source),
+        )
+
+        # Preserve only production-backed output from unrelated devices while
+        # the source/receiver pair owns the battery transfer.
+        for device in routing.discharge_devices:
+            if device in {source, receiver}:
+                continue
+            route = routing.route(device)
+            await self._command_home_output(
+                device,
+                route.active_produced_home,
+                allow_bypass_zero=True,
+                route=route,
+            )
+
+        if receiver_target >= current_receiver_input:
+            await self._command_input(receiver, -receiver_target, route=routing.route(receiver))
+
+        if plan.source_output_target > 0 and receiver_target > 0:
+            state = ManagerState.TRANSFER
+        elif plan.source_output_target > 0:
+            state = ManagerState.DISCHARGE
+        elif receiver_target > 0:
+            state = ManagerState.CHARGE
+        else:
+            state = ManagerState.IDLE
+        self.operationstate.update_value(state.value)
 
     async def _apply_standard_input(
         self,
@@ -3298,7 +3563,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         primary_taper_input_target: int | None = None
         primary_taper_output_target: int | None = None
         if (
-            self.operation == ManagerMode.MATCHING
+            self._uses_matching_routing()
             and primary is not None
             and selected_primary is primary
             and primary.acMode.value != AcMode.INPUT
@@ -3384,7 +3649,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         secondary_output_replacements = (
             routing.non_primary_output_replacements(active_discharge_targets, list(self.discharge))
             if (
-                self.operation == ManagerMode.MATCHING
+                self._uses_matching_routing()
                 and selected_primary is not None
                 and active_discharge_targets.get(selected_primary, 0) > 0
             )
@@ -3483,7 +3748,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             elif setpoint < 0:
                 primary_input_limit = self._primary_charge_limit(primary)
                 primary_route = routing.route(primary)
-                if self.operation == ManagerMode.MATCHING and primary_route.taper_active:
+                if self._uses_matching_routing() and primary_route.taper_active:
                     primary_input_limit = max(primary_input_limit, -primary_route.effective_input_capacity)
                 primary_target = min(0, max(setpoint, primary_input_limit))
                 if primary_target != 0:
@@ -3500,7 +3765,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         route=routing.route(primary),
                     )
                 elif (
-                    self.operation == ManagerMode.MATCHING
+                    self._uses_matching_routing()
                     and primary_route.taper_active
                     and primary_route.effective_input_capacity == 0
                     and primary in self.charge
@@ -3843,7 +4108,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         primary_output_replacements = (
             routing.non_primary_output_replacements(active_produced_floor, remaining_active)
-            if self.operation == ManagerMode.MATCHING
+            if self._uses_matching_routing()
             else {}
         )
         for device, replacement in primary_output_replacements.items():
@@ -3910,7 +4175,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         covered_secondary_stop_evidence: dict[ZendureDevice, int] = {}
         if (
-            self.operation == ManagerMode.MATCHING
+            self._uses_matching_routing()
             and primary is not None
             and requested_setpoint > 0
             and primary_target >= requested_setpoint

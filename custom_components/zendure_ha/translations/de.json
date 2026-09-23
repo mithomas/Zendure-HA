@@ -98,6 +98,9 @@
       "discharge_recovery_margin": {
         "name": "Entlade-Wiedereinschaltschwelle"
       },
+      "transfer_target_soc": {
+        "name": "Transfer-Ziel-SoC"
+      },
       "spike_filter_threshold": {
         "name": "Spitzenfilter-Schwelle"
       },
@@ -275,7 +278,8 @@
           "0": "Ruhezustand",
           "1": "Laden",
           "2": "Entladen",
-          "3": "Aus"
+          "3": "Aus",
+          "4": "Transfer"
         }
       },
       "device_state": {
@@ -470,11 +474,18 @@
           "smart": "Smarte Leistungsregelung",
           "smart_discharging": "Smartes nur Entladen",
           "smart_charging": "Smartes nur Laden",
-          "store_solar": "Solar speichern"
+          "store_solar": "Solar speichern",
+          "transfer": "Energietransfer"
         }
       },
       "primary_device": {
         "name": "Primäres Gerät",
+        "state": {
+          "none": "Deaktiviert"
+        }
+      },
+      "transfer_target_device": {
+        "name": "Transfer-Zielgerät",
         "state": {
           "none": "Deaktiviert"
         }
