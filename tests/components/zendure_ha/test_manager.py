@@ -5944,6 +5944,70 @@ class TestSmartMatchingPrimaryAware:
         full_bypass.power_discharge.assert_not_awaited()
         full_bypass.power_bypass.assert_not_awaited()
 
+    async def test_selected_primary_bypass_loss_retires_peer_charge_immediately(self, hass):
+        """A 12:01-style bypass loss should retire peer input before replacement output starts."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-bypass-loss-primary",
+            device_name="wz balkon bypass loss primary",
+            product_model="SolarFlow 800 Pro",
+            level=100,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            home_output=711,
+        )
+        primary.solarInput.update_value(765)
+        primary.byPass.update_value(1)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-bypass-loss-secondary",
+            device_name="k balkon bypass loss secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=533,
+            home_input=533,
+            battery_input=533,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+            transition_gates=True,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        started = datetime(2026, 9, 23, 12, 1, 54, tzinfo=UTC)
+
+        await _run_prepared_power_routing(manager, -20, started)
+        primary.power_charge.reset_mock()
+        primary.power_discharge.reset_mock()
+        primary.power_bypass.reset_mock()
+        secondary.power_charge.reset_mock()
+        secondary.power_discharge.reset_mock()
+
+        primary.electricLevel.update_value(80)
+        primary.byPass.update_value(0)
+        primary.homeOutput.update_value(0)
+        primary.batteryInput.update_value(713)
+        primary.solarInput.update_value(713)
+        primary.update_device_state()
+        primary.refresh_discharge_state()
+
+        await _run_prepared_power_routing(manager, 692, started + timedelta(seconds=1))
+
+        secondary.power_charge.assert_awaited_once_with(0)
+
     async def test_positive_p1_with_healthy_secondary_pv_still_reduces_primary_charge(self, hass):
         """A healthy secondary passing PV to the home should not make charge holdoff keep a stale primary target."""
         primary = make_device(
@@ -7688,6 +7752,58 @@ class TestSmartMatchingPrimaryAware:
         actual_secondary_charge = -secondary_charge_args.args[0]
         residual_export = actual_primary_output - actual_secondary_charge - household_demand
         assert residual_export == pytest.approx(0, abs=SmartMode.POWER_TOLERANCE)
+
+    async def test_near_full_primary_adds_taper_overflow_to_active_secondary_input(self, hass):
+        """A 13:03-style taper overflow should extend an active secondary charge floor."""
+        sample_time = datetime(2026, 9, 23, 13, 3, tzinfo=timezone(timedelta(hours=2)))
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-1303-primary",
+            device_name="wz balkon 1303 primary",
+            product_model="SolarFlow 800 Pro",
+            level=99,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            output_limit=327,
+            home_output=327,
+            battery_input=83,
+            max_cell_voltage=3.55,
+        )
+        primary.solarInput.update_value(410)
+        secondary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="k-balkon-1303-secondary",
+            device_name="k balkon 1303 secondary",
+            product_model="SolarFlow 800 Pro",
+            level=60,
+            soc_set=100,
+            ac_mode=AcMode.INPUT,
+            input_limit=100,
+            home_input=100,
+            battery_input=100,
+        )
+        FuseGroup("group-1303-active-input-overflow", 800, -1200, [primary, secondary])
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        secondary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_charge = AsyncMock(side_effect=lambda power: power)
+        secondary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, -80, sample_time)
+
+        assert primary.state is DeviceState.SOCNEARLYFULL
+        primary.power_discharge.assert_awaited_once_with(330)
+        secondary.power_charge.assert_awaited_once_with(-180)
 
     async def test_primary_overflow_exports_only_after_secondary_charge_limit(self, hass):
         """Primary taper overflow may export only after the eligible secondary reaches its charge cap."""
@@ -10570,7 +10686,7 @@ class TestPowerTransitionGates:
         device.power_discharge.assert_awaited_once_with(0)
         assert not manager._transition_candidates
 
-    async def test_bypass_passthrough_zero_remains_immediate(self, hass) -> None:
+    async def test_bypass_entry_waits_for_sustained_export_evidence(self, hass) -> None:
         device = make_device(
             hass,
             device_cls=SolarFlow800Pro,
@@ -10592,6 +10708,28 @@ class TestPowerTransitionGates:
         device.power_bypass = AsyncMock(return_value=0)
         device.power_discharge = AsyncMock(side_effect=lambda power: power)
 
+        started = datetime(2026, 9, 23, 17, 48, 34, tzinfo=UTC)
+        manager._routing_transition_time = started
+        assert (
+            await manager._command_home_output(
+                device,
+                0,
+                allow_bypass_zero=True,
+                output_stop_evidence_w=100,
+            )
+            == 60
+        )
+        manager._routing_transition_time = started + timedelta(seconds=9.999)
+        assert (
+            await manager._command_home_output(
+                device,
+                0,
+                allow_bypass_zero=True,
+                output_stop_evidence_w=100,
+            )
+            == 60
+        )
+        manager._routing_transition_time = started + timedelta(seconds=10)
         assert (
             await manager._command_home_output(
                 device,
@@ -10602,9 +10740,8 @@ class TestPowerTransitionGates:
             == 0
         )
 
+        device.power_discharge.assert_has_awaits([call(60), call(60)])
         device.power_bypass.assert_awaited_once_with()
-        device.power_discharge.assert_not_awaited()
-        assert not manager._transition_candidates
 
     async def test_offline_output_zero_remains_immediate(self, hass) -> None:
         device = make_device(

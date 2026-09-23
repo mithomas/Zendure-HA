@@ -294,6 +294,8 @@ class _PowerRoutingDevice:
     charge_surplus: int
     # Explicit bypass production already passing through to home.
     bypass_passthrough: int
+    # Whether a previously observed full-bypass supply remains lost while a peer is still charging.
+    full_bypass_supply_lost: bool
     # Discharge capacity available after device, fusegroup, and primary-aware limits.
     available_discharge: int
     # Discharge capacity including production that can output even when battery discharge is blocked.
@@ -389,6 +391,26 @@ class _PowerRoutingSnapshot:
     def charge_surplus(self, device: ZendureDevice) -> int:
         """Return local production surplus that can remain on the device for charging."""
         return self.route(device).charge_surplus
+
+    def selected_primary_taper_overflow_receivers(self) -> tuple[ZendureDevice, ...]:
+        """Return non-primary devices eligible to absorb selected-primary taper overflow."""
+        if self.selected_primary is None:
+            return ()
+        return tuple(
+            device
+            for device, route in self.devices.items()
+            if device is not self.selected_primary
+            and (device in self.discharge_devices or route.charge_floor > 0)
+            and route.taper_output_floor == 0
+            and device.online
+            and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}
+            and device.effective_charge_limit < 0
+        )
+
+    @property
+    def selected_primary_full_bypass_supply_lost(self) -> bool:
+        """Return whether the selected primary lost full bypass while peer input remains active."""
+        return self.selected_primary is not None and self.route(self.selected_primary).full_bypass_supply_lost
 
     def active_taper_output_floor(self, devices: list[ZendureDevice]) -> int:
         """Return the total taper-driven output floor for active output devices."""
@@ -692,6 +714,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self._routing_transition_time: datetime | None = None
         self._transition_candidates: dict[tuple[str, _TransitionDirection], _TransitionCandidate] = {}
         self._transition_candidates_seen: set[tuple[str, _TransitionDirection]] = set()
+        self._full_bypass_device_ids: set[str] = set()
+        self._full_bypass_loss_pending_ids: set[str] = set()
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -1468,7 +1492,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if allow_bypass_zero and getattr(device, "byPass", None) is not None and device.byPass.is_on:
             return 0
         if allow_bypass_zero and device.can_bypass:
-            return await device.power_bypass()
+            if device.acMode.value == AcMode.OUTPUT and not self._flow_stop_allows(
+                device,
+                _TransitionDirection.INPUT,
+                output_stop_evidence_w,
+                protect_zero=protect_zero,
+            ):
+                hold = self._flow_hold_target(device.homeOutput.asInt)
+                result = await device.power_discharge(hold)
+            else:
+                result = await device.power_bypass()
+            return result
         if (
             device.acMode.value == AcMode.INPUT
             and self._transition_gates_enabled
@@ -2555,6 +2589,19 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
                 power += d.pwr_offgrid + home + d.pwr_produced
 
+        full_bypass_device_ids = {device.deviceId for device in devices if device.reports_full_bypass_pv()}
+        self._full_bypass_loss_pending_ids.update(self._full_bypass_device_ids - full_bypass_device_ids)
+        self._full_bypass_loss_pending_ids.difference_update(full_bypass_device_ids)
+        managed_device_ids = {device.deviceId for device in devices}
+        self._full_bypass_loss_pending_ids.intersection_update(managed_device_ids)
+        active_input_device_ids = {
+            device.deviceId for device in self.charge if self._actual_input_flow(device) > MODE_SWITCH_POWER_FLOOR_W
+        }
+        for device_id in tuple(self._full_bypass_loss_pending_ids):
+            if not any(peer_id != device_id for peer_id in active_input_device_ids):
+                self._full_bypass_loss_pending_ids.remove(device_id)
+        self._full_bypass_device_ids = full_bypass_device_ids
+
         # Update the power entities
         self.power.update_value(power)
         self.refresh_energy_kwh()
@@ -2750,6 +2797,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 requested_input_limit=(max(0, device.limitInput.asInt) if device.acMode.value == AcMode.INPUT else 0),
                 charge_surplus=device.current_charge_surplus_limit(),
                 bypass_passthrough=bypass_passthrough,
+                full_bypass_supply_lost=device.deviceId in self._full_bypass_loss_pending_ids,
                 available_discharge=self._available_discharge_power(device, primary_aware=primary_aware),
                 available_discharge_with_produced=self._available_discharge_power(
                     device,
@@ -2974,23 +3022,27 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             )
 
         if matching_primary_aware and p1 <= 0 and selected_primary_taper_overflow > 0:
+            taper_overflow_receivers = routing.selected_primary_taper_overflow_receivers()
+            active_secondary_charge_floor = sum(
+                min(routing.route(device).charge_floor, routing.route(device).effective_input_capacity)
+                for device in taper_overflow_receivers
+            )
             active_secondary_taper_overflow_capacity = sum(
-                -device.effective_charge_limit
-                for device in routing.discharge_devices
-                if (
-                    device is not selected_primary
-                    and routing.route(device).taper_output_floor == 0
-                    and device.online
-                    and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}
-                    and device.effective_charge_limit < 0
+                max(
+                    0,
+                    routing.route(device).effective_input_capacity - routing.route(device).charge_floor,
                 )
+                for device in taper_overflow_receivers
             )
             selected_primary_taper_overflow = min(
                 selected_primary_taper_overflow,
                 active_secondary_taper_overflow_capacity,
             )
             if selected_primary_taper_overflow > 0:
-                setpoint = min(setpoint, -selected_primary_taper_overflow)
+                setpoint = min(
+                    setpoint,
+                    -(active_secondary_charge_floor + selected_primary_taper_overflow),
+                )
 
         if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
             setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
@@ -3415,11 +3467,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 and selected_primary is not None
                 and selected_primary in routing.discharge_devices
                 and routing.route(selected_primary).taper_output_floor > 0
-                and device is not selected_primary
-                and (device in self.discharge or device in self.idle)
-                and device.online
-                and device.state not in {DeviceState.OFFLINE, DeviceState.SOCFULL, DeviceState.RESERVE_RECOVERY}
-                and device.effective_charge_limit < 0
+                and device in routing.selected_primary_taper_overflow_receivers()
                 and (device_may_use_input(device) or allow_blocked_primary_taper_overflow_charge)
             )
 
@@ -4016,6 +4064,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing,
             skip_devices=set(charge_produced_devices),
             allow_bypass_zero=True,
+            protect_zero=not (routing.grid_power > 0 and routing.selected_primary_full_bypass_supply_lost),
         )
 
         primary_produced_cap = routing.produced_limit(selected_primary) if selected_primary is not None else 0
@@ -4258,6 +4307,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         *,
         skip_devices: set[ZendureDevice] | None = None,
         allow_bypass_zero: bool = False,
+        protect_zero: bool = True,
     ) -> None:
         """Stop active charging devices before assigning home output."""
         skip_devices = skip_devices or set()
@@ -4272,6 +4322,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     10,
                     allow_bypass_zero=allow_bypass_zero,
                     route=routing.route(device),
+                    protect_zero=protect_zero,
                 )
             elif allow_bypass_zero and device.can_bypass:
                 await self._command_home_output(
@@ -4279,10 +4330,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     0,
                     allow_bypass_zero=allow_bypass_zero,
                     route=routing.route(device),
+                    protect_zero=protect_zero,
                 )
             else:
                 # OPTIMIZATION: Stop charging by zeroing input limit instead of switching AC mode to output
-                await self._command_input(device, 0, route=routing.route(device))
+                await self._command_input(
+                    device,
+                    0,
+                    route=routing.route(device),
+                    protect_zero=protect_zero,
+                )
 
     async def _command_home_output_targets(
         self,
