@@ -384,6 +384,42 @@ class TestPrimaryAwareModeFolding:
         assert intent.strict_home_output_stop
 
 
+class TestManualPrimaryRouting:
+    """Verify manual output targets remain total AC output targets."""
+
+    async def test_reducing_output_does_not_subtract_primary_solar(self, hass):
+        """A manual reduction must command the target without subtracting local solar."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="manual-primary-mixed-output",
+            device_name="manual primary mixed output",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            ac_mode=AcMode.OUTPUT,
+            output_limit=500,
+            home_output=500,
+            battery_output=300,
+        )
+        primary.solarInput.update_value(200)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MANUAL,
+            manual_power=250,
+            primary_device_id=primary.deviceId,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        assert primary.pwr_produced == -200
+        primary.power_discharge.assert_awaited_once_with(250)
+        primary.power_charge.assert_not_awaited()
+
+
 class TestStoreSolarRouting:
     """Verify store-solar treats home output as clamped to zero."""
 
