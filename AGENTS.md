@@ -52,6 +52,8 @@ Prefer:
 - Keep manifest runtime requirements and `requirements.txt` aligned.
 - Keep developer tooling in `requirements_dev.txt` and test-only dependencies in `requirements_test.txt`.
 - Run tests through `scripts/test`; do not call `pytest` directly.
+- Always run `scripts/test` and `scripts/check` outside the sandbox with escalated permissions. Sandboxed runs can stall during HomeAssistant fixture setup and eventually time out.
+- Do not retry a sandboxed test run with a longer timeout. Stop the stalled run, then rerun the wrapper outside the sandbox.
 
 Run at least:
 - `scripts/check`
