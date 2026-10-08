@@ -271,6 +271,7 @@ def make_manager(
         True,
         initial_value=3,
     )
+    manager.managedDeviceCount = ZendureSensor(manager, "managed_device_count", state=0)
     manager.availableKwh = ZendureSensor(manager, "available_kwh", None, "kWh", "energy", None, 1)
     manager.totalAvailableKwh = ZendureSensor(manager, "total_available_kwh", None, "kWh", "energy", None, 1)
     manager.totalKwh = ZendureSensor(manager, "total_kwh", None, "kWh", "energy", None, 2)
@@ -307,4 +308,5 @@ def attach_devices(manager: ZendureManager, *devices: ZendureDevice) -> None:
     for device in devices:
         device.on_available_kwh_changed = manager.refresh_energy_kwh
     manager.refresh_primary_device_options()
+    manager.refresh_managed_device_count()
     manager.refresh_energy_kwh()

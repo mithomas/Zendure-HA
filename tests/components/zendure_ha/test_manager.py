@@ -67,6 +67,42 @@ def _mock_prepared_power_routing(manager: ZendureManager, *, setpoint: int = 0) 
     return prepared
 
 
+class TestManagedDeviceCount:
+    async def test_tracks_configured_fuse_groups(self, hass):
+        """Count configured devices, including offline devices, as fuse groups change."""
+        manager = make_manager(hass)
+        assert manager.managedDeviceCount.asInt == 0
+
+        first = make_device(hass, device_id="managed-offline")
+        second = make_device(hass, device_id="initially-unused")
+        unresolved = make_device(hass, device_id="unresolved")
+        first.state = DeviceState.OFFLINE
+        second.fuseGroup.update_value(0)
+        unresolved.fuseGroup._selected_key = None
+        unresolved.fuseGroup._attr_current_option = "unknown"
+
+        attach_devices(manager, first, second, unresolved)
+
+        assert manager.managedDeviceCount.asInt == 1
+
+        second.fuseGroup.update_value(1)
+        await manager.update_fusegroups()
+        assert manager.managedDeviceCount.asInt == 2
+
+        first.fuseGroup.update_value(0)
+        await manager.update_fusegroups()
+        assert manager.managedDeviceCount.asInt == 1
+
+        unresolved.fuseGroup.update_value(4)
+        await manager.update_fusegroups()
+        assert manager.managedDeviceCount.asInt == 2
+
+        second.fuseGroup._selected_key = None
+        second.fuseGroup._attr_current_option = "unavailable"
+        await manager.update_fusegroups()
+        assert manager.managedDeviceCount.asInt == 1
+
+
 class TestAvailableKwh:
     def test_refresh_available_kwh_updates_when_device_thresholds_change(self, hass):
         """Two devices at 20% and 30% should update aggregate available kWh when one reserve and SoC change."""

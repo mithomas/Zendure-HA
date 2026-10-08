@@ -125,6 +125,9 @@
       "available_kwh": {
         "name": "Énergie disponible"
       },
+      "managed_device_count": {
+        "name": "Nombre d'appareils gérés"
+      },
       "total_available_kwh": {
         "name": "Énergie disponible totale"
       },

@@ -121,6 +121,9 @@
       "available_kwh": {
         "name": "Beschikbare Energie"
       },
+      "managed_device_count": {
+        "name": "Aantal beheerde apparaten"
+      },
       "total_available_kwh": {
         "name": "Totale Beschikbare Energie"
       },

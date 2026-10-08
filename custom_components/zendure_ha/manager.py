@@ -731,6 +731,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """Return devices that currently participate in manager routing."""
         return [device for device in self.devices if device.fuseGroup.value not in (None, 0)]
 
+    def refresh_managed_device_count(self) -> None:
+        """Refresh the number of devices configured for manager routing."""
+        self.managedDeviceCount.update_value(len(self._managed_routing_devices()))
+
     def _reset_power_distribution_state(self) -> None:
         """Reset per-cycle distribution state before computing a new routing pass."""
         self.zero_fast = datetime.max
@@ -983,6 +987,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             True,
             initial_value=3,
         )
+        self.managedDeviceCount = ZendureSensor(self, "managed_device_count", state=0)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalAvailableKwh = ZendureSensor(self, "total_available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", None, 2)
@@ -1155,6 +1160,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.fuseGroups.append(fg)
         self.refresh_primary_device_options()
         self.refresh_transfer_target_options()
+        self.refresh_managed_device_count()
 
     async def _force_routing_update(self) -> None:
         """Force an immediate routing update using the current P1 meter value."""
