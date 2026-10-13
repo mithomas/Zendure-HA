@@ -28,7 +28,19 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.loader import async_get_integration
 
 from .api import Api
-from .const import CONF_AUTO_MQTT_USER, CONF_P1METER, DOMAIN, AcMode, DeviceState, ManagerMode, ManagerState, SmartMode
+from .const import (
+    CONF_AUTO_MQTT_USER,
+    CONF_P1METER,
+    DOMAIN,
+    EMPTY_SOC_STATES,
+    LOW_SOC_STATES,
+    PV_CHARGE_FIRST_STATES,
+    AcMode,
+    DeviceState,
+    ManagerMode,
+    ManagerState,
+    SmartMode,
+)
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
 from .fusegroup import FuseGroup
@@ -42,15 +54,6 @@ PRIMARY_DEVICE_DISABLED = "__disabled__"
 TRANSFER_TARGET_DISABLED = "__disabled__"
 
 _LOGGER = logging.getLogger(__name__)
-
-EMPTY_SOC_STATES = {
-    DeviceState.SOCEMPTY,
-    DeviceState.SOCRESERVE,
-}
-
-PV_CHARGE_FIRST_STATES = {
-    DeviceState.SOCEMPTY,
-}
 
 PV_CHARGE_FIRST_OPERATIONS = {
     ManagerMode.MATCHING,
@@ -79,11 +82,6 @@ P1_EXPORT_TRIM_FAST_OPERATIONS = {
     ManagerMode.MATCHING,
     ManagerMode.MATCHING_DISCHARGE,
     ManagerMode.TRANSFER,
-}
-
-LOW_SOC_STATES = {
-    *EMPTY_SOC_STATES,
-    DeviceState.RESERVE_RECOVERY,
 }
 
 type ZendureConfigEntry = ConfigEntry[ZendureManager]
@@ -312,7 +310,7 @@ class _PowerRoutingDevice:
         """Return current produced power that should remain serving home output."""
         if not self.discharging or self.device.state == DeviceState.SOCFULL:
             return 0
-        if self.pv_charge_first and self.device.state in PV_CHARGE_FIRST_STATES:
+        if self.pv_charge_first:
             return 0
         return self.produced_home
 
@@ -521,7 +519,6 @@ class _PowerRoutingSnapshot:
         self,
         selected_charge_primary: ZendureDevice | None,
         *,
-        pv_charge_first_mode: bool,
         include_charge_first_home: bool,
     ) -> _LocalChargeSummary:
         """Return local-PV charge facts using the same policy for all primary-aware paths."""
@@ -537,17 +534,16 @@ class _PowerRoutingSnapshot:
         active_pv_charge_first_home = sum(
             self.chargeable_produced_home(device)
             for device in self.discharge_devices
-            if pv_charge_first_mode and device.state in PV_CHARGE_FIRST_STATES
+            if self.route(device).pv_charge_first
         )
         active_non_primary_empty_chargeable = (
             sum(
                 self.chargeable_produced_home(device)
                 for device in self.discharge_devices
                 if (
-                    pv_charge_first_mode
-                    and include_charge_first_home
+                    include_charge_first_home
                     and device is not self.selected_primary
-                    and device.state in PV_CHARGE_FIRST_STATES
+                    and self.route(device).pv_charge_first
                 )
             )
             if include_charge_first_home
@@ -609,15 +605,15 @@ class _PowerRoutingSnapshot:
         """Return whether an already-input device is consuming its own local production."""
         return any(
             device.acMode.value == AcMode.INPUT
-            and device.state not in {DeviceState.RESERVE_RECOVERY, DeviceState.SOCRESERVE}
+            and device.state not in LOW_SOC_STATES
             and (self.route(device).charge_surplus > 0 or device.reports_active_pv_charge())
             for device in self.devices
         )
 
     def has_pv_charge_first_source(self) -> bool:
-        """Return whether a SOCEMPTY device has local production that should charge first."""
+        """Return whether a device has local production that should charge first."""
         return any(
-            device.state in PV_CHARGE_FIRST_STATES
+            self.route(device).pv_charge_first
             and (self.route(device).charge_surplus > 0 or self.chargeable_produced_home(device) > 0)
             for device in self.devices
         )
@@ -960,6 +956,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             NumberMode.BOX,
             True,
         )
+        self.min_soc_safety_margin = ZendureRestoreNumber(
+            self,
+            "min_soc_safety_margin",
+            self._refresh_min_soc_safety_margin,
+            None,
+            "%",
+            "soc",
+            100,
+            0,
+            NumberMode.BOX,
+            True,
+        )
         self.spike_filter = ZendureSwitch(self, "spike_filter", self._update_spike_filter, value=False)
         self.spike_filter_threshold = ZendureRestoreNumber(
             self,
@@ -1009,6 +1017,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 prodName = dev.get("deviceName") or prodModel
                 device = init(self.hass, deviceId, prodName, dev)
                 device.set_discharge_recovery_margin(self.discharge_recovery_margin.asNumber)
+                device.set_min_soc_safety_margin(self.min_soc_safety_margin.asNumber)
                 device.discharge_start = device.discharge_limit // 10
                 device.discharge_optimal = device.discharge_limit // 4
                 Api.devices[deviceId] = device
@@ -1047,6 +1056,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         for device in self.devices:
             device.on_available_kwh_changed = self.refresh_energy_kwh
         self._refresh_discharge_recovery_margin(None, None)
+        self._refresh_min_soc_safety_margin(None, None)
         self.refresh_energy_kwh()
         _LOGGER.info("Loaded %s devices", len(self.devices))
 
@@ -1298,6 +1308,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         margin = max(0, self.discharge_recovery_margin.asNumber)
         for device in getattr(self, "devices", []):
             device.set_discharge_recovery_margin(margin)
+        self.refresh_energy_kwh()
+
+    def _refresh_min_soc_safety_margin(self, _entity: Any, _value: Any) -> None:
+        """Propagate the configured min SoC safety margin to all devices."""
+        margin = max(0, self.min_soc_safety_margin.asNumber)
+        for device in getattr(self, "devices", []):
+            device.set_min_soc_safety_margin(margin)
         self.refresh_energy_kwh()
 
     def refresh_energy_kwh(self) -> None:
@@ -2399,7 +2416,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         local_charge = routing.local_charge_summary(
             selected_charge_primary,
-            pv_charge_first_mode=pv_charge_first_mode,
             include_charge_first_home=True,
         )
         setpoint = self._shape_primary_aware_setpoint(
@@ -2409,7 +2425,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing,
             pv_floors,
             local_charge,
-            pv_charge_first_mode=pv_charge_first_mode,
             selected_primary_input_allowed=selected_primary_input_allowed_for_shaping,
         )
         if self.operation == ManagerMode.MANUAL:
@@ -2478,29 +2493,21 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         unexplained_input_export: int,
     ) -> bool:
         """Return whether the selected primary may be switched into input mode."""
-        if not self._uses_matching_routing() or not routing.primary_aware or routing.selected_primary is None:
+        primary = routing.selected_primary
+        if not self._uses_matching_routing() or not routing.primary_aware or primary is None:
             return True
-        selected_primary = routing.selected_primary
-        selected_primary_active_local_input = (
-            selected_primary.acMode.value == AcMode.INPUT
-            and selected_primary.state not in {DeviceState.RESERVE_RECOVERY, DeviceState.SOCRESERVE}
-            and (routing.route(selected_primary).charge_surplus > 0 or selected_primary.reports_active_pv_charge())
-        )
-        selected_primary_pv_charge_first = selected_primary.state in PV_CHARGE_FIRST_STATES and (
-            routing.charge_surplus(selected_primary) > 0 or routing.chargeable_produced_home(selected_primary) > 0
-        )
-        if selected_primary_pv_charge_first:
+
+        if primary.acMode.value == AcMode.INPUT:
             return True
-        if selected_primary_active_local_input:
+
+        route = routing.route(primary)
+        if route.pv_charge_first and (route.charge_surplus > 0 or routing.chargeable_produced_home(primary) > 0):
             return True
-        if selected_primary.acMode.value == AcMode.INPUT:
-            return True
-        primary_absorption_headroom = max(
-            0,
-            -self._primary_charge_limit(selected_primary) - routing.charge_surplus(selected_primary),
-        )
-        if primary_absorption_headroom <= 0:
+
+        headroom = -self._primary_charge_limit(primary) - route.charge_surplus
+        if headroom <= 0:
             return False
+
         return input_source.available or unexplained_input_export > PRIMARY_INPUT_EXPORT_THRESHOLD
 
     def _unexplained_export_for_primary_input(
@@ -2666,13 +2673,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or source not in routing.devices
             or receiver not in routing.devices
             or not source.online
-            or source.state
-            in {
-                DeviceState.OFFLINE,
-                DeviceState.SOCEMPTY,
-                DeviceState.SOCRESERVE,
-                DeviceState.RESERVE_RECOVERY,
-            }
+            or source.state in {DeviceState.OFFLINE, *LOW_SOC_STATES}
             or not receiver.online
             or receiver.state in {DeviceState.OFFLINE, DeviceState.SOCFULL}
         ):
@@ -2791,7 +2792,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             actual_ac_input = max(0, device.homeInput.asInt - max(0, device.pwr_offgrid))
             routing_devices[device] = _PowerRoutingDevice(
                 device=device,
-                pv_charge_first=pv_charge_first,
+                pv_charge_first=pv_charge_first and device.state in PV_CHARGE_FIRST_STATES,
                 discharging=device in self.discharge,
                 produced_limit=produced_limit,
                 produced_home=produced_home,
@@ -2835,7 +2836,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         pv_floors: _PvFloorSummary,
         local_charge: _LocalChargeSummary,
         *,
-        pv_charge_first_mode: bool,
         selected_primary_input_allowed: bool,
     ) -> int:
         """
@@ -3050,7 +3050,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     -(active_secondary_charge_floor + selected_primary_taper_overflow),
                 )
 
-        if pv_charge_first_mode and local_charge.active_pv_charge_first_home > 0:
+        if local_charge.active_pv_charge_first_home > 0:
             setpoint = min(setpoint, -local_charge.active_pv_charge_first_home)
 
         positive_demand_charge_lag = p1 > 0 and routing.positive_demand_charge_lag(setpoint)
@@ -3377,8 +3377,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         pv_floors = routing.pv_floor_summary()
         local_charge = routing.local_charge_summary(
             primary,
-            pv_charge_first_mode=self._selected_primary_routing_enabled()
-            and self.operation in PV_CHARGE_FIRST_OPERATIONS,
             include_charge_first_home=allow_home_pv_charge,
         )
         keeps_non_primary_local_charge = (

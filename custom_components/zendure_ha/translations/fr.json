@@ -99,6 +99,9 @@
       "discharge_recovery_margin": {
         "name": "Marge de reprise de decharge"
       },
+      "min_soc_safety_margin": {
+        "name": "Marge de securite du SOC minimum"
+      },
       "transfer_target_soc": {
         "name": "SoC cible du transfert"
       },
@@ -215,7 +218,8 @@
           "2": "Vide",
           "3": "Récupération de réserve",
           "4": "Réserve",
-          "5": "Presque plein"
+          "5": "Presque plein",
+          "6": "Marge de sécurité"
         }
       },
       "hub_state": {
@@ -281,7 +285,8 @@
           "4": "Actif",
           "5": "Récupération de réserve",
           "6": "Réserve",
-          "7": "Presque plein"
+          "7": "Presque plein",
+          "8": "Marge de sécurité"
         }
       },
       "state": {

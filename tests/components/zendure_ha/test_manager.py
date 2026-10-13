@@ -159,6 +159,33 @@ class TestAvailableKwh:
         assert manager.availableKwh.asNumber == pytest.approx(0.04)
         assert manager.totalAvailableKwh.asNumber == pytest.approx(0.04)
 
+    def test_refresh_available_kwh_updates_when_min_soc_safety_margin_changes(self, hass):
+        """A 14% device with a 10% min_soc should see available kWh decrease when safety margin increases."""
+        manager = make_manager(hass)
+        device = make_device(hass, level=14, min_soc=10, reserve=10, kwh=2.0)
+        attach_devices(manager, device)
+
+        # Baseline: floor is max(10, 10, 10+0) = 10. Available = (14 - 10) / 100 * 2.0 = 0.08 kWh.
+        assert manager.availableKwh.asNumber == pytest.approx(0.08)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.08)
+
+        # Increase safety margin to 5%: effective floor is max(10, 10, 10+5) = 15.
+        # socReserve is not reset (still 10) and device transitions to SOCSAFETYMARGIN.
+        manager.min_soc_safety_margin._attr_native_value = 5
+        manager._refresh_min_soc_safety_margin(None, None)
+        assert device.socReserve.asNumber == 10
+        assert device.state is DeviceState.SOCSAFETYMARGIN
+        assert device.discharge_floor_soc() == 15
+        assert manager.availableKwh.asNumber == pytest.approx(0)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0)
+
+        # Reset safety margin to 0: floor returns to 10 and state returns to INACTIVE.
+        manager.min_soc_safety_margin._attr_native_value = 0
+        manager._refresh_min_soc_safety_margin(None, None)
+        assert device.state is DeviceState.INACTIVE
+        assert manager.availableKwh.asNumber == pytest.approx(0.08)
+        assert manager.totalAvailableKwh.asNumber == pytest.approx(0.08)
+
     def test_refresh_available_kwh_clamps_negative_device_contributions(self, hass):
         """Manager aggregates should count any negative per-device available energy as zero."""
         manager = make_manager(hass)
@@ -815,6 +842,218 @@ class TestSmartMatchingPrimaryAware:
         )
 
         assert manager._available_discharge_power(primary, primary_aware=True, allow_produced_only=True) == expected
+
+    @pytest.mark.parametrize(
+        ("level", "margin", "expected"),
+        [
+            pytest.param(8, 0, 245, id="without-margin-reserve-allows-pv-only-output"),
+            pytest.param(8, 5, 0, id="with-safety-margin-pv-kept-for-charging"),
+            pytest.param(12, 5, 245, id="above-safety-margin-pv-allows-home-output"),
+        ],
+    )
+    async def test_low_soc_primary_pv_only_output_capacity_respects_min_soc_safety_margin(
+        self, hass, level, margin, expected
+    ):
+        """When SoC is within min_soc_safety_margin, solar is reserved for battery charging."""
+        primary = make_device(
+            hass,
+            device_id="pv-only-primary-safety-margin",
+            device_name="pv only primary safety margin",
+            level=level,
+            min_soc=5,
+            reserve=15,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_input=245,
+            input_limit=0,
+            output_limit=0,
+        )
+        primary.solarInput.update_value(245)
+        primary.pwr_produced = -245
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            min_soc_safety_margin=margin,
+        )
+
+        assert primary.socReserve.asNumber == 15
+        if margin > 0 and level <= 5 + margin:
+            assert primary.state is DeviceState.SOCSAFETYMARGIN
+        else:
+            assert primary.state is DeviceState.SOCRESERVE
+        assert manager._available_discharge_power(primary, primary_aware=True, allow_produced_only=True) == expected
+
+    async def test_min_soc_safety_margin_blocks_battery_discharge_allocation(self, hass):
+        """When device SoC is within min_soc_safety_margin, manager blocks discharge allocation."""
+        primary = make_device(
+            hass,
+            device_id="primary-safety",
+            device_name="primary safety",
+            level=14,
+            min_soc=10,
+            reserve=10,
+            home_output=100,
+            battery_output=100,
+        )
+        other = make_device(
+            hass,
+            device_id="other-normal",
+            device_name="other normal",
+            level=50,
+            min_soc=10,
+            reserve=10,
+            home_output=100,
+            battery_output=100,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary, other),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            min_soc_safety_margin=5,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        other.power_get = AsyncMock(return_value=True)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        other.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        # Primary is at 14%, below manager effective floor of 10 + 5 = 15% -> SOCSAFETYMARGIN.
+        assert primary.state is DeviceState.SOCSAFETYMARGIN
+        assert manager._available_discharge_power(primary, primary_aware=True) == 0
+        assert manager._available_discharge_power(other, primary_aware=True) > 0
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        assert primary.power_discharge.await_args_list[0] == call(0)
+        other.power_discharge.assert_awaited_once_with(200)
+
+    async def test_soc_safety_margin_included_in_local_charge_summary(self, hass):
+        """Devices in SOCSAFETYMARGIN have their chargeable produced home accounted in local_charge_summary."""
+        primary = make_device(
+            hass,
+            device_id="primary-safety-summary",
+            device_name="primary safety summary",
+            level=12,
+            min_soc=10,
+            reserve=20,
+            ac_mode=AcMode.OUTPUT,
+            home_output=200,
+            battery_input=200,
+            output_limit=800,
+        )
+        primary.solarInput.update_value(200)
+        primary.pwr_produced = -200
+
+        secondary = make_device(
+            hass,
+            device_id="secondary-safety-summary",
+            device_name="secondary safety summary",
+            level=14,
+            min_soc=10,
+            reserve=20,
+            ac_mode=AcMode.OUTPUT,
+            home_output=150,
+            battery_input=150,
+            output_limit=800,
+        )
+        secondary.solarInput.update_value(150)
+        secondary.pwr_produced = -150
+
+        # With min_soc_safety_margin=5:
+        # primary (12%) and secondary (14%) are <= 10 + 5 = 15% -> SOCSAFETYMARGIN
+        manager = make_manager(
+            hass,
+            devices=(primary, secondary),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            min_soc_safety_margin=5,
+        )
+        manager.discharge = [primary, secondary]
+
+        assert primary.state is DeviceState.SOCSAFETYMARGIN
+        assert secondary.state is DeviceState.SOCSAFETYMARGIN
+
+        routing = manager._power_routing_snapshot(
+            primary,
+            primary_aware=True,
+            pv_charge_first=True,
+            p1=0,
+        )
+        assert routing.route(primary).pv_charge_first is True
+        assert routing.route(secondary).pv_charge_first is True
+
+        local_charge = routing.local_charge_summary(primary, include_charge_first_home=True)
+        assert local_charge.active_pv_charge_first_home == 350
+        assert local_charge.active_non_primary_empty_chargeable == 150
+
+        # Now test when margin is 0: both devices are in SOCRESERVE, so pv_charge_first is False
+        manager.min_soc_safety_margin._attr_native_value = 0
+        manager._refresh_min_soc_safety_margin(None, None)
+        assert primary.state is DeviceState.SOCRESERVE
+        assert secondary.state is DeviceState.SOCRESERVE
+
+        routing_no_margin = manager._power_routing_snapshot(
+            primary,
+            primary_aware=True,
+            pv_charge_first=True,
+            p1=0,
+        )
+        assert routing_no_margin.route(primary).pv_charge_first is False
+        assert routing_no_margin.route(secondary).pv_charge_first is False
+
+        local_charge_no_margin = routing_no_margin.local_charge_summary(primary, include_charge_first_home=True)
+        assert local_charge_no_margin.active_pv_charge_first_home == 0
+        assert local_charge_no_margin.active_non_primary_empty_chargeable == 0
+
+    @pytest.mark.parametrize(
+        ("level", "reserve", "margin", "recovery_active", "state", "expected"),
+        [
+            (5, 10, 0, False, DeviceState.SOCEMPTY, False),
+            (12, 10, 5, False, DeviceState.SOCSAFETYMARGIN, False),
+            (15, 20, 0, False, DeviceState.SOCRESERVE, False),
+            (15, 10, 0, True, DeviceState.RESERVE_RECOVERY, False),
+            (50, 10, 0, False, DeviceState.INACTIVE, True),
+        ],
+    )
+    async def test_has_active_local_input_source_rejects_all_low_soc_states(
+        self, hass, level, reserve, margin, recovery_active, state, expected
+    ):
+        """Active local input source should reject all low-SoC states but accept normal states."""
+        device = make_device(
+            hass,
+            device_id=f"input-dev-{state.name.lower()}",
+            level=level,
+            min_soc=10,
+            reserve=reserve,
+            ac_mode=AcMode.INPUT,
+            home_input=200,
+            battery_input=200,
+        )
+        device.solarInput.update_value(200)
+        device.pwr_produced = -200
+        if margin > 0:
+            device.set_min_soc_safety_margin(margin)
+        if recovery_active:
+            device.set_discharge_recovery_margin(10)
+            device.discharge_recovery_active = True
+            device.refresh_discharge_state()
+        else:
+            device.update_device_state()
+
+        assert device.state is state
+
+        manager = make_manager(
+            hass,
+            devices=(device,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=device.deviceId,
+            min_soc_safety_margin=margin,
+        )
+        routing = manager._power_routing_snapshot(device, primary_aware=True, pv_charge_first=False, p1=0)
+
+        assert routing.has_active_local_input_source() is expected
 
     @pytest.mark.parametrize(
         ("level", "state", "expected_capacity"),
@@ -7116,6 +7355,123 @@ class TestSmartMatchingPrimaryAware:
         primary.power_charge.assert_not_awaited()
         primary.power_discharge.assert_awaited_once_with(0)
 
+    async def test_selected_primary_already_in_input_mode_remains_input_allowed(self, hass):
+        """A selected primary already in input mode should remain input-allowed during routing."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-already-input",
+            level=50,
+            ac_mode=AcMode.INPUT,
+            home_input=200,
+            battery_input=200,
+            input_limit=800,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        manager._execute_power_routing = AsyncMock()
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        intent = _manager_power_routing_intent(manager)
+        assert intent.selected_primary_input_allowed is True
+
+    async def test_selected_primary_in_soc_safety_margin_allows_input_mode_for_local_pv(self, hass):
+        """A selected primary in SOCSAFETYMARGIN with local PV is allowed input mode to charge battery."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-safety-input",
+            level=12,
+            min_soc=10,
+            reserve=20,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_input=200,
+            output_limit=800,
+        )
+        primary.solarInput.update_value(200)
+        primary.pwr_produced = -200
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            min_soc_safety_margin=5,
+            charge_time=datetime.min,
+        )
+        assert primary.state is DeviceState.SOCSAFETYMARGIN
+
+        primary.power_get = AsyncMock(return_value=True)
+        manager._execute_power_routing = AsyncMock()
+
+        await _run_prepared_power_routing(manager, 0, datetime.now())
+
+        intent = _manager_power_routing_intent(manager)
+        assert intent.selected_primary_input_allowed is True
+
+    async def test_selected_primary_without_absorption_headroom_blocks_input_allowed(self, hass):
+        """A selected primary with zero absorption headroom should not be allowed to switch to input mode."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-full-headroom",
+            level=100,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_output=0,
+            battery_input=0,
+        )
+        primary.charge_limit = 0
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        manager._execute_power_routing = AsyncMock()
+
+        await _run_prepared_power_routing(manager, -100, datetime.now())
+
+        intent = _manager_power_routing_intent(manager)
+        assert intent.selected_primary_input_allowed is False
+
+    async def test_selected_primary_with_available_source_allows_input_mode(self, hass):
+        """A selected primary in output mode should switch to input when unexplained export is present."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-export-input-allowed",
+            level=50,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_output=0,
+            input_limit=800,
+        )
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            charge_time=datetime.min,
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        manager._execute_power_routing = AsyncMock()
+
+        await _run_prepared_power_routing(manager, -100, datetime.now())
+
+        intent = _manager_power_routing_intent(manager)
+        assert intent.selected_primary_input_allowed is True
+
     async def test_positive_p1_charge_lag_stays_on_the_primary_aware_charge_path(self, hass):
         """A positive-demand lag cycle should stay on the charge path when both systems are still reporting charging telemetry."""
         primary = make_device(
@@ -13081,6 +13437,7 @@ class TestEnergyTransfer:
         [
             DeviceState.OFFLINE,
             DeviceState.SOCEMPTY,
+            DeviceState.SOCSAFETYMARGIN,
             DeviceState.SOCRESERVE,
             DeviceState.RESERVE_RECOVERY,
         ],
@@ -13108,7 +13465,7 @@ class TestEnergyTransfer:
 
     @pytest.mark.parametrize(
         "receiver_state",
-        [DeviceState.SOCEMPTY, DeviceState.SOCRESERVE, DeviceState.RESERVE_RECOVERY],
+        [DeviceState.SOCEMPTY, DeviceState.SOCSAFETYMARGIN, DeviceState.SOCRESERVE, DeviceState.RESERVE_RECOVERY],
     )
     async def test_low_soc_receiver_remains_transfer_eligible(
         self,

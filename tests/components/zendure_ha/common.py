@@ -164,6 +164,7 @@ def make_manager(
     operation: ManagerMode = ManagerMode.OFF,
     manual_power: float = 0,
     discharge_recovery_margin: float = 0,
+    min_soc_safety_margin: float = 0,
     primary_device_id: str | None = None,
     transfer_target_id: str | None = None,
     transfer_target_soc: int = 100,
@@ -244,6 +245,18 @@ def make_manager(
         NumberMode.BOX,
         True,
     )
+    manager.min_soc_safety_margin = ZendureRestoreNumber(
+        manager,
+        "min_soc_safety_margin",
+        manager._refresh_min_soc_safety_margin,
+        None,
+        "%",
+        "soc",
+        100,
+        0,
+        NumberMode.BOX,
+        True,
+    )
     manager.spike_filter = ZendureSwitch(manager, "spike_filter", manager._update_spike_filter, value=False)
     manager.spike_filter_threshold = ZendureRestoreNumber(
         manager,
@@ -279,6 +292,7 @@ def make_manager(
     manager.operation = operation
     manager.manualpower._attr_native_value = manual_power
     manager.discharge_recovery_margin._attr_native_value = discharge_recovery_margin
+    manager.min_soc_safety_margin._attr_native_value = min_soc_safety_margin
     if charge_time is not None:
         manager.charge_time = charge_time
     if devices is not None:
@@ -296,6 +310,8 @@ def make_manager(
         manager.idle = list(idle_devices)
     if devices is not None and discharge_recovery_margin:
         manager._refresh_discharge_recovery_margin(None, None)
+    if devices is not None and min_soc_safety_margin:
+        manager._refresh_min_soc_safety_margin(None, None)
     return manager
 
 

@@ -95,6 +95,9 @@
       "discharge_recovery_margin": {
         "name": "Ontlaadherstelmarge"
       },
+      "min_soc_safety_margin": {
+        "name": "Min-SOC veiligheidsmarge"
+      },
       "transfer_target_soc": {
         "name": "Doel-SOC overdracht"
       },
@@ -211,7 +214,8 @@
           "2": "Leeg",
           "3": "Reserveherstel",
           "4": "Reserve",
-          "5": "Bijna vol"
+          "5": "Bijna vol",
+          "6": "Veiligheidsmarge"
         }
       },
       "hub_state": {
@@ -276,7 +280,8 @@
           "4": "Actief",
           "5": "Reserveherstel",
           "6": "Reserve",
-          "7": "Bijna vol"
+          "7": "Bijna vol",
+          "8": "Veiligheidsmarge"
         }
       },
       "state": {

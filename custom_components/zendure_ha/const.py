@@ -36,6 +36,24 @@ class DeviceState(Enum):
     RESERVE_RECOVERY = 5
     SOCRESERVE = 6
     SOCNEARLYFULL = 7
+    SOCSAFETYMARGIN = 8
+
+
+EMPTY_SOC_STATES = {
+    DeviceState.SOCEMPTY,
+    DeviceState.SOCSAFETYMARGIN,
+    DeviceState.SOCRESERVE,
+}
+
+PV_CHARGE_FIRST_STATES = {
+    DeviceState.SOCEMPTY,
+    DeviceState.SOCSAFETYMARGIN,
+}
+
+LOW_SOC_STATES = {
+    *EMPTY_SOC_STATES,
+    DeviceState.RESERVE_RECOVERY,
+}
 
 
 class SocLimitState(IntEnum):
@@ -45,6 +63,7 @@ class SocLimitState(IntEnum):
     RESERVE_RECOVERY = 3
     RESERVE = 4
     NEARLY_FULL = 5
+    SAFETY_MARGIN = 6
 
 
 class ManagerMode(Enum):

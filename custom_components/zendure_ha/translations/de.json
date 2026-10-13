@@ -98,6 +98,9 @@
       "discharge_recovery_margin": {
         "name": "Entlade-Wiedereinschaltschwelle"
       },
+      "min_soc_safety_margin": {
+        "name": "Mindest-SoC-Sicherheitsmarge"
+      },
       "transfer_target_soc": {
         "name": "Transfer-Ziel-SoC"
       },
@@ -229,7 +232,8 @@
           "2": "Leer",
           "3": "Reserve-Erholung",
           "4": "Reserve",
-          "5": "Fast voll"
+          "5": "Fast voll",
+          "6": "Sicherheitsmarge"
         }
       },
       "hub_state": {
@@ -295,7 +299,8 @@
           "4": "Aktiv",
           "5": "Reserve-Erholung",
           "6": "Reserve",
-          "7": "Fast voll"
+          "7": "Fast voll",
+          "8": "Sicherheitsmarge"
         }
       },
       "state": {

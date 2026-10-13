@@ -109,6 +109,9 @@
       "discharge_recovery_margin": {
         "name": "Discharge Recovery Margin"
       },
+      "min_soc_safety_margin": {
+        "name": "Min SoC Safety Margin"
+      },
       "transfer_target_soc": {
         "name": "Transfer Target SoC"
       },
@@ -240,7 +243,8 @@
           "2": "Empty",
           "3": "Reserve recovery",
           "4": "Reserve",
-          "5": "Nearly full"
+          "5": "Nearly full",
+          "6": "Safety margin"
         }
       },
       "hub_state": {
@@ -306,7 +310,8 @@
           "4": "Active",
           "5": "Reserve recovery",
           "6": "Reserve",
-          "7": "Nearly full"
+          "7": "Nearly full",
+          "8": "Safety margin"
         }
       },
       "state": {

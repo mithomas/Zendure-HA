@@ -1287,3 +1287,86 @@ def test_reports_battery_backed_home_output(
     device.pwr_produced = pwr_produced
 
     assert device.reports_battery_backed_home_output() is expected
+
+
+@pytest.mark.parametrize(
+    ("level", "min_soc", "reserve", "margin", "expected_state", "expected_limit"),
+    [
+        (5, 10, 20, 5, DeviceState.SOCEMPTY, SocLimitState.EMPTY),
+        (10, 10, 20, 5, DeviceState.SOCEMPTY, SocLimitState.EMPTY),
+        (11, 10, 20, 5, DeviceState.SOCSAFETYMARGIN, SocLimitState.SAFETY_MARGIN),
+        (15, 10, 20, 5, DeviceState.SOCSAFETYMARGIN, SocLimitState.SAFETY_MARGIN),
+        (16, 10, 20, 5, DeviceState.SOCRESERVE, SocLimitState.RESERVE),
+        (20, 10, 20, 5, DeviceState.SOCRESERVE, SocLimitState.RESERVE),
+        (21, 10, 20, 5, DeviceState.INACTIVE, SocLimitState.NORMAL),
+        (12, 10, 20, 0, DeviceState.SOCRESERVE, SocLimitState.RESERVE),
+    ],
+)
+def test_soc_safety_margin_state_transitions(hass, level, min_soc, reserve, margin, expected_state, expected_limit):
+    """Device transitions into SOCSAFETYMARGIN within the safety zone, and SOCRESERVE above it."""
+    device = make_device(hass, level=level, min_soc=min_soc, reserve=reserve)
+    device.set_min_soc_safety_margin(margin)
+
+    assert device.state is expected_state
+    assert device.socLimit.asInt == expected_limit.value
+
+
+def test_soc_safety_margin_precedence_over_low_overlapping_reserve(hass):
+    """When reserve is lower than minSoc + margin, safety margin strictly takes precedence."""
+    # min_soc=10, reserve=12, margin=5 -> safety_floor=15
+    device = make_device(hass, level=11, min_soc=10, reserve=12)
+    device.set_min_soc_safety_margin(5)
+
+    assert device.socReserve.asNumber == 12  # unmutated!
+    assert device.state is DeviceState.SOCSAFETYMARGIN
+    assert device.discharge_floor_soc() == 15
+    assert device.is_discharge_capable() is False
+    assert device.available_kwh_contribution() == 0
+
+    device.electricLevel.update_value(12)
+    device.update_device_state()
+    assert device.state is DeviceState.SOCSAFETYMARGIN
+
+    device.electricLevel.update_value(15)
+    device.update_device_state()
+    assert device.state is DeviceState.SOCSAFETYMARGIN
+
+    # Clearing the safety margin skips SOCRESERVE because level > reserve (12)
+    device.electricLevel.update_value(16)
+    device.update_device_state()
+    assert device.state is DeviceState.INACTIVE
+    assert device.is_discharge_capable() is True
+
+
+def test_soc_safety_margin_takes_precedence_during_discharge_recovery(hass):
+    """Rising SoC through the safety margin yields SOCSAFETYMARGIN before RESERVE_RECOVERY."""
+    # min_soc=10, reserve=10, recovery_margin=10 -> baseline=20. safety_margin=5 -> safety_floor=15.
+    device = make_device(hass, level=10, min_soc=10, reserve=10)
+    device.set_discharge_recovery_margin(10)
+    device.set_min_soc_safety_margin(5)
+
+    # Trigger recovery mode at the floor
+    assert device.is_discharge_blocked() is True
+    assert device.discharge_recovery_active is True
+    assert device.state is DeviceState.SOCEMPTY
+
+    # Level 12: in safety margin -> SOCSAFETYMARGIN takes precedence
+    device.electricLevel.update_value(12)
+    device.update_device_state()
+    assert device.state is DeviceState.SOCSAFETYMARGIN
+
+    # Level 16: above safety margin (15), but below baseline (20) -> RESERVE_RECOVERY
+    device.electricLevel.update_value(16)
+    device.update_device_state()
+    assert device.state is DeviceState.RESERVE_RECOVERY
+
+    # Level 21: below baseline (15 + 10 = 25) -> still RESERVE_RECOVERY
+    device.electricLevel.update_value(21)
+    device.update_device_state()
+    assert device.state is DeviceState.RESERVE_RECOVERY
+
+    # Level 26: above baseline (25) -> normal
+    device.electricLevel.update_value(26)
+    device.refresh_recovery_state()
+    assert device.state is DeviceState.INACTIVE
+    assert device.is_discharge_blocked() is False

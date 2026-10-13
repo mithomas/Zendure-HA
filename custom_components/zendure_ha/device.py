@@ -30,7 +30,7 @@ from stringcase import camelcase
 
 from .binary_sensor import ZendureBinarySensor
 from .button import ZendureButton
-from .const import ConnectionMode, DeviceState, SmartMode, SocLimitState
+from .const import EMPTY_SOC_STATES, LOW_SOC_STATES, ConnectionMode, DeviceState, SmartMode, SocLimitState
 from .entity import EntityDevice, EntityZendure
 from .number import ZendureNumber, ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -48,6 +48,7 @@ SOC_LIMIT_BY_DEVICE_STATE = {
     DeviceState.SOCFULL: SocLimitState.FULL,
     DeviceState.SOCNEARLYFULL: SocLimitState.NEARLY_FULL,
     DeviceState.SOCEMPTY: SocLimitState.EMPTY,
+    DeviceState.SOCSAFETYMARGIN: SocLimitState.SAFETY_MARGIN,
     DeviceState.RESERVE_RECOVERY: SocLimitState.RESERVE_RECOVERY,
     DeviceState.SOCRESERVE: SocLimitState.RESERVE,
 }
@@ -162,6 +163,7 @@ class ZendureDevice(EntityDevice):
         self.on_available_kwh_changed: Callable[[], None] | None = None
         self.discharge_recovery_margin_soc: float = 0.0
         self._discharge_recovery_active: bool = False
+        self.min_soc_safety_margin_soc: float = 0.0
         self._raw_soc_limit: int = 0
         self.state: DeviceState = DeviceState.OFFLINE
 
@@ -440,16 +442,13 @@ class ZendureDevice(EntityDevice):
 
     def available_kwh_contribution(self) -> float:
         """Return the non-negative available energy contribution for manager aggregates."""
-        if self.state in {DeviceState.SOCEMPTY, DeviceState.SOCRESERVE, DeviceState.RESERVE_RECOVERY}:
+        if self.state in LOW_SOC_STATES:
             return 0
         return max(0, self.actualKwh)
 
     def is_discharge_capable(self) -> bool:
         """Return whether this device is generally capable of planned discharge."""
-        return (
-            self.state not in {DeviceState.OFFLINE, DeviceState.SOCEMPTY, DeviceState.SOCRESERVE}
-            and self.discharge_limit > 0
-        )
+        return self.state not in {DeviceState.OFFLINE, *EMPTY_SOC_STATES} and self.discharge_limit > 0
 
     def reports_pv(self) -> bool:
         """Return whether telemetry or previous routing shows current PV production."""
@@ -508,6 +507,8 @@ class ZendureDevice(EntityDevice):
             and isinstance(_value, (int, float))
         ):
             reserve = _value
+        safety_floor = min_soc + self.min_soc_safety_margin_soc
+        effective_reserve = max(min_soc, reserve, safety_floor)
         baseline = self.available_discharge_baseline_soc(_entity, _value)
         level = self.electricLevel.asNumber
 
@@ -519,7 +520,9 @@ class ZendureDevice(EntityDevice):
             self.state = DeviceState.SOCNEARLYFULL
         elif self._raw_soc_limit == SocLimitState.EMPTY or level <= min_soc:
             self.state = DeviceState.SOCEMPTY
-        elif min_soc < level <= reserve:
+        elif self.min_soc_safety_margin_soc > 0 and min_soc < level <= safety_floor:
+            self.state = DeviceState.SOCSAFETYMARGIN
+        elif min_soc < level <= effective_reserve:
             self.state = DeviceState.SOCRESERVE
         elif self.discharge_recovery_active and level < baseline:
             self.state = DeviceState.RESERVE_RECOVERY
@@ -581,12 +584,19 @@ class ZendureDevice(EntityDevice):
             and isinstance(_value, (int, float))
         ):
             reserve = _value
-        return max(self.minSoc.asNumber, reserve)
+        min_soc = self.minSoc.asNumber if hasattr(self, "minSoc") else 0
+        safety_floor = min_soc + self.min_soc_safety_margin_soc
+        return max(min_soc, reserve, safety_floor)
 
     def set_discharge_recovery_margin(self, margin: float) -> None:
         """Update the configured recovery margin and refresh dependent state."""
         self.discharge_recovery_margin_soc = max(0, margin)
         self.refresh_recovery_state(activate_margin_window=True)
+
+    def set_min_soc_safety_margin(self, margin: float) -> None:
+        """Update the configured min SoC safety margin and refresh dependent state."""
+        self.min_soc_safety_margin_soc = max(0, margin)
+        self.refresh_recovery_state()
 
     def refresh_recovery_state(
         self,
