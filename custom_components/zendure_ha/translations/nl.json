@@ -5,7 +5,11 @@
       "reconfigure_successful": "Hergroepering geslaagd"
     },
     "error": {
-      "cannot_connect": "Verbinding mislukt",
+      "cannot_connect": "De Zendure-API is niet bereikbaar. Controleer je internetverbinding en probeer het opnieuw.",
+      "malformed_token": "Het token is ongeldig. Kopieer het Home Assistant-token opnieuw uit de Zendure-app (Instellingen, Ontwikkelaar).",
+      "api_rejected": "Zendure heeft het verzoek geweigerd: {detail}",
+      "no_devices": "Token geaccepteerd, maar er zijn geen apparaten gevonden op dit account. Zorg dat je het Zendure-account gebruikt waarop het apparaat is geregistreerd, en de juiste regio.",
+      "no_mqtt": "Token geaccepteerd, maar er is geen MQTT-server teruggegeven. Schakel lokale of cloud-MQTT in voor dit account in de Zendure-app.",
       "invalid_auth": "Ongeldige authenticatie",
       "unknown": "Onverwachte fout"
     },
@@ -129,6 +133,9 @@
       },
       "total_available_kwh": {
         "name": "Totale Beschikbare Energie"
+      },
+      "global_soc": {
+        "name": "Globale batterij SOC"
       },
       "auto_model": {
         "name": "Batterijprogramma",
@@ -370,6 +377,13 @@
           "on": "Actief"
         }
       },
+      "hub_mode": {
+        "name": "Hub-modus",
+        "state": {
+          "paired": "Gekoppeld met hub",
+          "standalone": "Standalone"
+        }
+      },
       "fuse_group": {
         "name": "Device fusegroup",
         "state": {
@@ -380,7 +394,9 @@
           "group1200": "Zekeringgroep max. 1200w",
           "group2000": "Zekeringgroep max. 2000w",
           "group2400": "Zekeringgroep max. 2400w",
-          "group3600": "Zekeringgroep max. 3600w"
+          "group3600": "Zekeringgroep max. 3600w",
+          "group4000": "Zekeringgroep max. 4000w",
+          "group5000": "Zekeringgroep max. 5000w"
         }
       },
       "ble_adapter": {

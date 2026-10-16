@@ -5,7 +5,11 @@
       "reconfigure_successful": "Neukonfiguration erfolgreich"
     },
     "error": {
-      "cannot_connect": "Verbindung fehlgeschlagen",
+      "cannot_connect": "Die Zendure-API ist nicht erreichbar. Prüfe deine Internetverbindung und versuche es erneut.",
+      "malformed_token": "Der Token ist ungültig. Kopiere den Home-Assistant-Token erneut aus der Zendure-App (Einstellungen, Entwickler).",
+      "api_rejected": "Zendure hat die Anfrage abgelehnt: {detail}",
+      "no_devices": "Token akzeptiert, aber es wurden keine Geräte für dieses Konto gefunden. Stelle sicher, dass du das Zendure-Konto verwendest, bei dem das Gerät registriert ist, sowie die richtige Region.",
+      "no_mqtt": "Token akzeptiert, aber es wurde kein MQTT-Server zurückgegeben. Aktiviere lokales oder Cloud-MQTT für dieses Konto in der Zendure-App.",
       "invalid_auth": "Ungültige Authentifizierung",
       "unknown": "Unerwarteter Fehler"
     },
@@ -135,6 +139,9 @@
       },
       "total_kwh": {
         "name": "Gesamtkapazität Batterie"
+      },
+      "global_soc": {
+        "name": "Globaler Akku-SOC"
       },
       "auto_model": {
         "name": "Energieplan",
@@ -446,6 +453,13 @@
           "on": "Aktiviert"
         }
       },
+      "hub_mode": {
+        "name": "Hub-Modus",
+        "state": {
+          "paired": "Mit Hub gekoppelt",
+          "standalone": "Eigenständig"
+        }
+      },
       "fuse_group": {
         "name": "Geräte-Sicherungsgruppe",
         "state": {
@@ -456,7 +470,9 @@
           "group1200": "Sicherungsgruppe max. 1200 W",
           "group2000": "Sicherungsgruppe max. 2000 W",
           "group2400": "Sicherungsgruppe max. 2400 W",
-          "group3600": "Sicherungsgruppe max. 3600 W"
+          "group3600": "Sicherungsgruppe max. 3600 W",
+          "group4000": "Sicherungsgruppe max. 4000 W",
+          "group5000": "Sicherungsgruppe max. 5000 W"
         }
       },
       "connection": {

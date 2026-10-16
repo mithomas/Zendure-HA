@@ -1000,6 +1000,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.totalAvailableKwh = ZendureSensor(self, "total_available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", None, 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
+        self.globalSoc = ZendureSensor(self, "global_soc", None, "%", "battery", "measurement", 1)
 
         # load devices
         for dev in data["deviceList"]:
@@ -1008,7 +1009,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     continue
                 _LOGGER.info("Adding device: %s %s => %s", deviceId, prodModel, dev)
 
-                init = Api.createdevice.get(prodModel.lower().strip(), None)
+                init = Api.createdevice.get(prodModel.lower().strip(), None) or Api.createdevice.get(
+                    prodModel.lower().replace(" ", "").strip(),
+                    None,
+                )
                 if init is None:
                     _LOGGER.info("Device %s is not supported!", prodModel)
                     continue
@@ -1096,6 +1100,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         fg = FuseGroup(device.name, 2000, -2000)
                     case "group2400":
                         fg = FuseGroup(device.name, 2400, -2400)
+                    case "group4000":
+                        fg = FuseGroup(device.name, 4000, -4000)
+                    case "group5000":
+                        fg = FuseGroup(device.name, 5000, -5000)
                     case "unused":
                         # only switch off, if Manager is used
                         if self.operation != ManagerMode.OFF:
@@ -1133,6 +1141,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     5: "group2000",
                     6: "group2400",
                     7: "group3600",
+                    8: "group4000",
+                    9: "group5000",
                 }
                 for deviceId, fg in fuseGroups.items():
                     if deviceId != device.deviceId:
@@ -1323,6 +1333,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             sum(device.available_kwh_contribution() for device in self.devices if device.state != DeviceState.OFFLINE),
         )
         self.totalAvailableKwh.update_value(sum(device.available_kwh_contribution() for device in self.devices))
+        if hasattr(self, "globalSoc"):
+            total_stored_kwh = sum(
+                d.electricLevel.asNumber / 100 * d.kWh for d in self.devices if d.state != DeviceState.OFFLINE
+            )
+            online_kwh = sum(d.kWh for d in self.devices if d.state != DeviceState.OFFLINE)
+            self.globalSoc.update_value((total_stored_kwh / online_kwh * 100) if online_kwh > 0 else 0)
 
     def _available_discharge_power(
         self,

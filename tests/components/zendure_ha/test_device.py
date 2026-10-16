@@ -9,11 +9,15 @@ import pytest
 
 from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
 from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SmartMode, SocLimitState
-from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE
+from custom_components.zendure_ha.device import CONST_HEADER, CONST_HEADER_CLOSE, ZendureBattery
+from custom_components.zendure_ha.devices.ace1500 import ACE1500
+from custom_components.zendure_ha.devices.hub1200 import Hub1200
+from custom_components.zendure_ha.devices.hub2000 import Hub2000
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
+from custom_components.zendure_ha.devices.solarflow4000 import SolarFlow4000AC_Plus
 from custom_components.zendure_ha.sensor import ZendureSensor
 
-from .common import add_battery_max_cell_voltage, make_device
+from .common import add_battery_max_cell_voltage, make_device, make_device_definition
 
 TARGET_SOC_AFTER_UPDATE = 90
 MIN_SOC_AFTER_UPDATE = 8
@@ -1370,3 +1374,86 @@ def test_soc_safety_margin_takes_precedence_during_discharge_recovery(hass):
     device.refresh_recovery_state()
     assert device.state is DeviceState.INACTIVE
     assert device.is_discharge_blocked() is False
+
+
+def test_sf4000_mix_internal_battery_identification():
+    """SF4000 internal 8 kWh battery is identified by packType 70 despite serial starting with B."""
+    name, model, kwh = ZendureBattery.get_battery_type("B12345678", pack_type=70)
+    assert model == "I8000"
+    assert kwh == 8.0
+    assert "I8000" in name
+
+    # Standard AB1000S without packType 70
+    _name_std, model_std, kwh_std = ZendureBattery.get_battery_type("B12345678", pack_type=None)
+    assert model_std == "AB1000S"
+    assert kwh_std == 0.96
+
+
+async def test_solarflow_4000_device_initialization(hass):
+    """SolarFlow 4000 initializes with correct limits and offgrid sensor."""
+    definition = make_device_definition(
+        device_id="sf4000_1",
+        device_name="SF4000",
+        product_model="solarflow 4000 ac+",
+    )
+    device = SolarFlow4000AC_Plus(hass, "sf4000_1", "SF4000", definition)
+    assert device.charge_limit == -3200
+    assert device.discharge_limit == 2400
+    assert device.maxSolar == -2400
+    assert hasattr(device, "offGrid")
+    assert hasattr(device, "aggrOffGrid")
+    assert device.pwr_offgrid == 0
+
+
+async def test_hub_charge_power_is_always_zero(hass):
+    """Hub1200 and Hub2000 do not support AC charging and always report 0W charge."""
+    def1200 = make_device_definition(device_id="hub1", device_name="Hub 1200", product_model="hub 1200")
+    def2000 = make_device_definition(device_id="hub2", device_name="Hub 2000", product_model="hub 2000")
+    hub1200 = Hub1200(hass, "hub1", "Hub 1200", def1200)
+    hub2000 = Hub2000(hass, "hub2", "Hub 2000", def2000)
+
+    assert hub1200.charge_limit == 0
+    assert hub2000.charge_limit == 0
+
+    with patch.object(hub1200, "mqttInvoke") as mock_invoke_1200:
+        res1200 = await hub1200.charge(-500)
+        assert res1200 == 0
+        mock_invoke_1200.assert_called_once()
+
+    with patch.object(hub2000, "mqttInvoke") as mock_invoke_2000:
+        res2000 = await hub2000.charge(-500)
+        assert res2000 == 0
+        mock_invoke_2000.assert_called_once()
+
+
+async def test_ace1500_standalone_mode(hass):
+    """ACE1500 toggling hubMode adjusts discharge limits to 0 in standalone mode."""
+    def_ace = make_device_definition(device_id="ace1", device_name="ACE 1500", product_model="ace 1500")
+    ace = ACE1500(hass, "ace1", "ACE 1500", def_ace)
+    assert ace.charge_limit == -900
+    assert ace.discharge_limit == 800
+
+    # Flip to standalone
+    await ace._onHubModeChange(Mock(value=1), None)
+    assert ace.charge_limit == -900
+    assert ace.discharge_limit == 0
+
+    # Flip back to paired
+    await ace._onHubModeChange(Mock(value=0), None)
+    assert ace.charge_limit == -900
+    assert ace.discharge_limit == 800
+
+
+async def test_zensdk_charge_kickstart_walk_sign_logic(hass):
+    """ZenSDK kickstarts charge when limitInput >= POWER_START and homeInput == 0."""
+    device = make_device(hass)
+    device.limitInput.update_value(200)
+    assert device.homeInput.asInt == 0
+
+    with patch.object(device, "doCommand", new_callable=AsyncMock) as mock_cmd:
+        power = await device.charge(-SmartMode.POWER_START)
+        assert power == -min(200 + 4, 2 * SmartMode.POWER_START)
+        mock_cmd.assert_called_once()
+        sent_props = mock_cmd.call_args[0][0]["properties"]
+        assert sent_props["inputLimit"] == -power
+        assert sent_props["acMode"] == 1

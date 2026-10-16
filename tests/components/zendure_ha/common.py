@@ -289,6 +289,7 @@ def make_manager(
     manager.totalAvailableKwh = ZendureSensor(manager, "total_available_kwh", None, "kWh", "energy", None, 1)
     manager.totalKwh = ZendureSensor(manager, "total_kwh", None, "kWh", "energy", None, 2)
     manager.power = ZendureSensor(manager, "power", None, "W", "power", "measurement", 0)
+    manager.globalSoc = ZendureSensor(manager, "global_soc", None, "%", "battery", "measurement", 1)
     manager.operation = operation
     manager.manualpower._attr_native_value = manual_power
     manager.discharge_recovery_margin._attr_native_value = discharge_recovery_margin

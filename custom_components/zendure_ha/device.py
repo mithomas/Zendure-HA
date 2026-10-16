@@ -60,13 +60,14 @@ _HTTP_RETRYABLE_ERRORS = (
 )
 HTTP_BACKOFF_FAILURE_THRESHOLD = 2
 HTTP_RETRY_ATTEMPTS = 2
+SF4000_INTERNAL_BATTERY_PACK_TYPE = 70
 
 
 class ZendureBattery(EntityDevice):
     """Zendure Battery class for devices."""
 
     @staticmethod
-    def get_battery_type(sn: str) -> tuple[str, str, float]:
+    def get_battery_type(sn: str, pack_type: int | None = None) -> tuple[str, str, float]:
         model = "???"
         match sn[0]:
             case "A":
@@ -77,8 +78,14 @@ class ZendureBattery(EntityDevice):
                     model = "AB1000"
                     kWh = 0.96
             case "B":
-                model = "AB1000S"
-                kWh = 0.96
+                # packType 70 is the SF4000 Mix AC+'s internal 8 kWh pack, which shares
+                # its serial prefix with the unrelated 0.96 kWh AB1000S.
+                if pack_type == SF4000_INTERNAL_BATTERY_PACK_TYPE:
+                    model = "I8000"
+                    kWh = 8.0
+                else:
+                    model = "AB1000S"
+                    kWh = 0.96
             case "C":
                 # External AB2000X and internal AB2000X of SF800+/SF800Pro/SF1600AC+
                 # starting with CO4A. They are also described as additional battery
@@ -103,9 +110,9 @@ class ZendureBattery(EntityDevice):
         name = f"{model} {sn[-5:]}".strip()
         return name, model, kWh
 
-    def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice) -> None:
+    def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice, pack_type: int | None = None) -> None:
         """Initialize Device."""
-        name, model, self.kWh = ZendureBattery.get_battery_type(sn)
+        name, model, self.kWh = ZendureBattery.get_battery_type(sn, pack_type)
         super().__init__(hass, sn, name, model, "", sn, parent.deviceId)
         self.attr_device_info["serial_number"] = sn
 
@@ -257,6 +264,8 @@ class ZendureDevice(EntityDevice):
             5: "group2000",
             6: "group2400",
             7: "group3600",
+            8: "group4000",
+            9: "group5000",
         }
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
         self.acMode = ZendureSelect(self, "acMode", {1: "input", 2: "output"}, self.entityWrite, 1)
@@ -732,7 +741,7 @@ class ZendureDevice(EntityDevice):
                     continue
 
                 if (bat := self.batteries.get(sn, None)) is None:
-                    self.batteries[sn] = ZendureBattery(self.hass, sn, self)
+                    self.batteries[sn] = ZendureBattery(self.hass, sn, self, b.get("packType"))
 
                 elif bat and b:
                     for key, value in b.items():
@@ -1200,17 +1209,21 @@ class ZendureZenSdk(ZendureDevice):
     async def _refresh_http_report(self) -> bool:
         """Fetch the latest HTTP report and apply it as an HTTP-sourced update."""
         json = await self.httpGet("properties/report")
+        if not json:
+            return False
         return await self.mqttProperties(json, "http")
 
     async def charge(self, power: int, _off: bool = False) -> int:
         """Set charge power."""
         _LOGGER.info("Power charge %s => %s", self.name, power)
+        # inputLimit is always reported as a positive magnitude (range 0..abs(charge)),
+        # so walk the charge floor up using the same sign convention as discharge below.
         if (
             power == -SmartMode.POWER_START
-            and self.limitInput.asInt == -SmartMode.POWER_START
+            and self.limitInput.asInt >= SmartMode.POWER_START
             and self.homeInput.asInt == 0
         ):
-            power -= 10
+            power = -min(self.limitInput.asInt + 4, 2 * SmartMode.POWER_START)
         await self.doCommand(
             {
                 "properties": {

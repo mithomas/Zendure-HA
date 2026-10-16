@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import binascii
 import hashlib
 import json
 import logging
@@ -10,11 +11,9 @@ import traceback
 from base64 import b64decode
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from http import HTTPStatus
 from typing import Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from paho.mqtt import client as mqtt_client
@@ -42,6 +41,7 @@ from .devices.hyper2000 import Hyper2000
 from .devices.solarflow800 import SolarFlow800, SolarFlow800Plus, SolarFlow800Pro
 from .devices.solarflow1600 import SolarFlow1600
 from .devices.solarflow2400 import SolarFlow2400AC, SolarFlow2400ACPlus, SolarFlow2400Pro
+from .devices.solarflow4000 import SolarFlow4000AC_Plus
 from .devices.superbasev4600 import SuperBaseV4600
 from .devices.superbasev6400 import SuperBaseV6400
 
@@ -49,6 +49,17 @@ _LOGGER = logging.getLogger(__name__)
 
 ZENDURE_MANAGER_STORAGE_VERSION = 1
 ZENDURE_DEVICES = "devices"
+API_HTTP_SUCCESS_CODE = 200
+
+
+class ApiError(Exception):
+    """A Zendure API/setup failure with a translation key for the config flow."""
+
+    def __init__(self, key: str, detail: str = "") -> None:
+        """Initialize ApiError with error key and detail."""
+        super().__init__(key, detail)
+        self.key = key
+        self.detail = detail
 
 
 class Api:
@@ -72,6 +83,8 @@ class Api:
         "solarflow 2400 ac": SolarFlow2400AC,
         "solarflow 2400 ac+": SolarFlow2400ACPlus,
         "solarflow 2400 pro": SolarFlow2400Pro,
+        "solarflow 4000 ac+": SolarFlow4000AC_Plus,
+        "solarflow4000ac+": SolarFlow4000AC_Plus,
         "superbase v6400": SuperBaseV6400,
         "superbase v4600": SuperBaseV4600,
     }
@@ -150,9 +163,14 @@ class Api:
         """Connect to the Zendure API."""
         try:
             devices = await Api.ApiHA(hass, data)
-        except Exception:  # pylint: disable=broad-except
+        except ApiError:
+            # During a coordinator reload we must not surface the error; fall back to
+            # the last-known device list from storage. The config flow (reload=False)
+            # wants the specific ApiError so it can show a precise message.
+            if not reload:
+                raise
             _LOGGER.error("Failed to connect to Zendure API")
-            return None
+            devices = None
 
         # Open the storage
         if reload:
@@ -171,11 +189,16 @@ class Api:
     async def ApiHA(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any] | None:
         session = async_get_clientsession(hass)
 
-        if (token := data.get(CONF_APPTOKEN)) is not None and len(token) > 1:
+        if (token := data.get(CONF_APPTOKEN)) is None or len(token) <= 1:
+            err_key = "malformed_token"
+            raise ApiError(err_key)
+        try:
             base64_url = b64decode(str(token)).decode("utf-8")
             api_url, appKey = base64_url.rsplit(".", 1)
-        else:
-            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="no_zendure_token")
+        except (binascii.Error, UnicodeDecodeError, ValueError) as err:
+            _LOGGER.error("Malformed Zendure token: %s", err)
+            err_key = "malformed_token"
+            raise ApiError(err_key) from err
 
         try:
             body = {
@@ -213,24 +236,32 @@ class Api:
 
             result = await session.post(url=f"{api_url}/api/ha/deviceList", json=body, headers=headers)
             data = await result.json()
-            status_code = data.get("code")
-            if status_code != HTTPStatus.OK:
-                _LOGGER.debug("Zendure API response: %s Message: %s", status_code, data.get("msg"))
-            elif len(data["data"]["deviceList"]) == 0:
-                _LOGGER.error("Zendure API does not reply any devices: %s", data)
-                return None
-            elif len(data["data"]["mqtt"]) == 0:
-                _LOGGER.error("Zendure API does not reply any mqtt info: %s", data)
-                return None
-            if not data.get("success", False) or (result := data["data"]) is None:
-                _LOGGER.error("Zendure API returned failure or missing data: %s", data)
-                return None
-            return dict(result)
-
+        except ApiError:
+            raise
         except Exception as e:
-            _LOGGER.error("Unable to connect to Zendure %s!", e)
+            _LOGGER.error("Unable to reach Zendure API %s!", e)
             _LOGGER.error(traceback.format_exc())
-            return None
+            err_key = "cannot_connect"
+            raise ApiError(err_key, str(e)) from e
+
+        if data.get("code") != API_HTTP_SUCCESS_CODE or not data.get("success", False):
+            msg = str(data.get("msg", "")) or f"code {data.get('code')}"
+            _LOGGER.error("Zendure API rejected the request: %s", data)
+            err_key = "api_rejected"
+            raise ApiError(err_key, msg)
+        if (result := data.get("data")) is None:
+            _LOGGER.error("Zendure API returned no data: %s", data)
+            err_key = "api_rejected"
+            raise ApiError(err_key, "no data returned")
+        if len(result.get("deviceList", [])) == 0:
+            _LOGGER.error("Zendure API does not reply any devices: %s", data)
+            err_key = "no_devices"
+            raise ApiError(err_key)
+        if len(result.get("mqtt", {})) == 0:
+            _LOGGER.error("Zendure API does not reply any mqtt info: %s", data)
+            err_key = "no_mqtt"
+            raise ApiError(err_key)
+        return dict(result)
 
     def mqttInit(self, client: mqtt_client.Client, srv: str, port: str, user: str, psw: str) -> None:
         try:

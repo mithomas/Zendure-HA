@@ -5,7 +5,11 @@
       "reconfigure_successful": "Reconfiguration successful"
     },
     "error": {
-      "cannot_connect": "Failed to connect",
+      "cannot_connect": "Could not reach the Zendure API. Check your internet connection and try again.",
+      "malformed_token": "The token is not valid. Copy the Home Assistant token again from the Zendure app (Settings, Developer).",
+      "api_rejected": "Zendure rejected the request: {detail}",
+      "no_devices": "Token accepted, but no devices were found on this account. Make sure you use the Zendure account the device is registered to, and the correct region.",
+      "no_mqtt": "Token accepted, but no MQTT server was returned. Enable local or cloud MQTT for this account in the Zendure app.",
       "invalid_auth": "Invalid authentication",
       "unknown": "Unexpected error"
     },
@@ -146,6 +150,9 @@
       },
       "total_kwh": {
         "name": "Total Battery Capacity"
+      },
+      "global_soc": {
+        "name": "Global Battery SOC"
       },
       "auto_model": {
         "name": "Battery Program",
@@ -457,6 +464,13 @@
           "on": "activated"
         }
       },
+      "hub_mode": {
+        "name": "Hub Mode",
+        "state": {
+          "paired": "Paired with Hub",
+          "standalone": "Standalone"
+        }
+      },
       "fuse_group": {
         "name": "Device Fuse Group",
         "state": {
@@ -467,7 +481,9 @@
           "group1200": "FuseGroup max. 1200w",
           "group2000": "FuseGroup max. 2000w",
           "group2400": "FuseGroup max. 2400w",
-          "group3600": "FuseGroup max. 3600w"
+          "group3600": "FuseGroup max. 3600w",
+          "group4000": "FuseGroup max. 4000w",
+          "group5000": "FuseGroup max. 5000w"
         }
       },
       "connection": {

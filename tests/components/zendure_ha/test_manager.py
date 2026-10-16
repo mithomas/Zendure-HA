@@ -13627,3 +13627,16 @@ class TestEnergyTransfer:
         await manager.update_transfer_target_soc(manager.transfertargetsoc, 85)
 
         assert cast("AsyncMock", manager._force_routing_update).await_count == 2
+
+    def test_global_soc_calculation_across_devices(self, hass: Any) -> None:
+        """Global SoC calculates capacity-weighted average across online devices."""
+        dev1 = make_device(hass, device_id="dev1", level=50)
+        dev1.kWh = 2.0
+        dev2 = make_device(hass, device_id="dev2", level=100)
+        dev2.kWh = 1.0
+
+        manager = make_manager(hass, devices=(dev1, dev2))
+        manager.refresh_energy_kwh()
+
+        # Weighted SoC: (50% * 2.0 kWh + 100% * 1.0 kWh) / (2.0 + 1.0 kWh) = 2.0 / 3.0 * 100 = 66.666...%
+        assert round(manager.globalSoc.asNumber, 1) == 66.7

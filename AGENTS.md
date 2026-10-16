@@ -59,6 +59,24 @@ Run at least:
 - `scripts/check`
 
 
+## Upstream Synchronization
+- Prefer selective porting and surgical cherry-picking of upstream hardware models, bug fixes, translations, and dependency updates over rebasing or blind merging.
+- Do not rebase `custom` onto `upstream/master`: the fork's extensive routing pipeline and history will cause cascading intermediate conflicts and require force-pushing.
+- Preserve custom manager routing pipeline, routing snapshot facts, dwell times, and P1 spike coalescing; do not overwrite custom manager logic with upstream's simpler dispatch loops.
+- Retain required fork runtime dependencies in `manifest.json` and `requirements.txt` (specifically `stringcase==1.2.0`).
+- Align dependency bumps (`bleak-retry-connector`, `paho-mqtt>=2.1.0`, `ruff`, test collection pins) with upstream to maintain compatibility with newer HomeAssistant core releases.
+
+### Tracking Upstream Changes Across Syncs
+Because selective porting does not create a git merge commit, the git merge-base remains at the original fork point. To track what has already been reviewed and isolate newly added upstream commits in future syncs:
+1. Place a git tag on the audited upstream commit:
+   `git tag sync/upstream-YYYY-MM-DD <upstream-commit-sha>`
+2. In subsequent syncs, fetch upstream and review only new commits:
+   `git fetch upstream`
+   `git log --oneline sync/upstream-YYYY-MM-DD..upstream/master`
+3. Baseline ledger:
+   - 2026-10-16: Upstream audited up to `8d59bac4` (PR #1701 / tag 1.4.4+). Tag: `sync/upstream-2026-10-16`.
+
+
 ## Commit Message Style
 - Use lowercase commit subjects.
 - Prefer the format `<type>[/scope]: <summary>`.
