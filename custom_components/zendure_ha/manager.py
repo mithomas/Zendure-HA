@@ -774,16 +774,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             return False
 
         if self.p1_spike_started is not None:
-            if p1 - self.p1_spike_baseline >= threshold:
-                if time - self.p1_spike_started < duration:
-                    _LOGGER.debug(
-                        "P1 spike suppressed: p1=%sW baseline=%sW threshold=%sW duration=%s",
-                        p1,
-                        self.p1_spike_baseline,
-                        threshold,
-                        duration,
-                    )
-                    return True
+            above_threshold = p1 - self.p1_spike_baseline >= threshold
+            if above_threshold and time - self.p1_spike_started < duration:
+                _LOGGER.debug(
+                    "P1 spike suppressed: p1=%sW baseline=%sW threshold=%sW duration=%s",
+                    p1,
+                    self.p1_spike_baseline,
+                    threshold,
+                    duration,
+                )
+                return True
+
+            if above_threshold:
                 _LOGGER.debug(
                     "P1 spike released after duration: p1=%sW baseline=%sW threshold=%sW duration=%s",
                     p1,
@@ -791,15 +793,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     threshold,
                     duration,
                 )
-                self.p1_spike_started = None
-                return False
-
-            _LOGGER.debug(
-                "P1 spike ended before duration: p1=%sW baseline=%sW threshold=%sW",
-                p1,
-                self.p1_spike_baseline,
-                threshold,
-            )
+            else:
+                _LOGGER.debug(
+                    "P1 spike ended before duration: p1=%sW baseline=%sW threshold=%sW",
+                    p1,
+                    self.p1_spike_baseline,
+                    threshold,
+                )
             self.p1_spike_started = None
             return False
 
@@ -1643,13 +1643,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             else max(0, device.homeOutput.asInt)
         )
         if (
-            not protect_zero
-            or residual_w is None
+            residual_w is None
+            or not self._flow_protection_active(device, residual_w, protect_zero=protect_zero)
             or actual_flow <= MODE_SWITCH_POWER_FLOOR_W
-            or not device.online
-            or not self._transition_gates_enabled
-            or self._transition_gates_bypassed
-            or self.operation in {ManagerMode.MANUAL, ManagerMode.OFF}
         ):
             self._reset_transition_candidate(device, direction)
             return True
@@ -1874,28 +1870,32 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     ) -> tuple[dict[ZendureDevice, int], int]:
         """Assign the current solar/off-grid contribution before any battery-backed discharge."""
         targets = dict.fromkeys(devices, 0)
+        if setpoint <= 0 or not devices:
+            return targets, setpoint
+
         produced_caps = {
             device: self._current_produced_output_limit(device, primary_aware=primary_aware) for device in devices
         }
-        produced_budget = min(setpoint, sum(produced_caps.values()))
+        total_cap = sum(produced_caps.values())
+        if total_cap == 0:
+            return targets, setpoint
 
-        remaining = produced_budget
-        weight = sum(produced_caps.values())
-        limit = weight
-        for d in sorted(devices, key=lambda d: d.electricLevel.asInt, reverse=False):
+        remaining = min(setpoint, total_cap)
+        remaining_cap = total_cap
+        for d in sorted(devices, key=lambda d: d.electricLevel.asInt):
             cap = produced_caps[d]
             if cap == 0:
                 continue
-            pwr = int(remaining * cap / weight) if weight != 0 else 0
-            weight -= cap
-            limit -= cap
-            if limit < remaining - pwr:
-                pwr = max(remaining - limit, 0)
+            pwr = int(remaining * cap / remaining_cap) if remaining_cap != 0 else 0
+            remaining_cap -= cap
+            if remaining_cap < remaining - pwr:
+                pwr = max(remaining - remaining_cap, 0)
             pwr = min(pwr, remaining, cap)
             targets[d] += pwr
             remaining -= pwr
 
-        return targets, setpoint - (produced_budget - remaining)
+        allocated = min(setpoint, total_cap) - remaining
+        return targets, setpoint - allocated
 
     def _add_battery_remainder(
         self,
@@ -2108,21 +2108,30 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
     def _p1_followup_due(self, sample: _P1RoutingSample) -> datetime:
         """Return the earliest existing routing deadline for a pending sample."""
         route_floor = self._p1_last_route_finished + SmartMode.P1_MIN_UPDATE
-        transition_due = self._pending_transition_due()
         fast_deadlines: list[datetime] = []
         if self._charge_lag_fast_eligible(sample.power):
-            fast_deadlines.append(max(route_floor, self.p1_charge_lag_last_update + SmartMode.P1_MIN_UPDATE))
+            fast_deadlines.append(self.p1_charge_lag_last_update + SmartMode.P1_MIN_UPDATE)
         if self._export_trim_fast_eligible(sample.power):
-            fast_deadlines.append(max(route_floor, self.p1_export_trim_last_update + SmartMode.P1_MIN_UPDATE))
+            fast_deadlines.append(self.p1_export_trim_last_update + SmartMode.P1_MIN_UPDATE)
+
         if fast_deadlines:
-            due = min(fast_deadlines)
-            return min(due, max(route_floor, transition_due)) if transition_due is not None else due
-        if transition_due is not None:
-            transition_due = max(route_floor, transition_due)
-            if sample.generation <= self._p1_consumed_generation:
-                return transition_due
-        due = max(route_floor, self.zero_fast) if sample.fast_change else max(route_floor, self.zero_next)
-        return min(due, transition_due) if transition_due is not None else due
+            sample_due: datetime | None = min(fast_deadlines)
+        elif sample.generation <= self._p1_consumed_generation:
+            sample_due = None
+        else:
+            sample_due = self.zero_fast if sample.fast_change else self.zero_next
+
+        transition_due = self._pending_transition_due()
+        if sample_due is not None and transition_due is not None:
+            due = min(sample_due, transition_due)
+        elif sample_due is not None:
+            due = sample_due
+        elif transition_due is not None:
+            due = transition_due
+        else:
+            due = route_floor
+
+        return max(route_floor, due)
 
     def _consume_p1_sample(self, sample: _P1RoutingSample, *, routed: bool = False) -> None:
         """Mark a P1 generation handled and optionally record its routed power."""
@@ -2401,7 +2410,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         selected_charge_primary = self._selected_primary_device(charging=True)
         pv_floors = routing.pv_floor_summary()
         input_source = routing.input_source_summary(p1)
-        unexplained_input_export = self._unexplained_export_for_primary_input(p1, routing, pv_floors)
+        unexplained_input_export = self._unexplained_export_for_primary_input(
+            p1,
+            routing,
+            pv_floors,
+            input_source,
+        )
         matching_input_switch_allowed = (
             not self._uses_matching_routing()
             or not selected_primary_routing
@@ -2417,15 +2431,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             or routing.has_pv_charge_first_source()
         )
         non_empty_local_input_allowed = input_source.available or routing.has_active_local_input_source()
-        input_source_available = (
-            not self._uses_matching_routing()
-            or not selected_primary_routing
-            or routing.selected_primary is None
-            or not routing.selected_primary.online
-            or matching_input_switch_allowed
-            or non_empty_local_input_allowed
-        )
-        selected_primary_input_allowed_for_shaping = self._selected_primary_input_allowed(
+        input_source_available = matching_input_switch_allowed or non_empty_local_input_allowed
+        selected_primary_input_allowed = self._selected_primary_input_allowed(
             routing,
             input_source,
             unexplained_input_export,
@@ -2441,7 +2448,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             routing,
             pv_floors,
             local_charge,
-            selected_primary_input_allowed=selected_primary_input_allowed_for_shaping,
+            selected_primary_input_allowed=selected_primary_input_allowed,
         )
         if self.operation == ManagerMode.MANUAL:
             setpoint = int(self.manualpower.asNumber)
@@ -2456,11 +2463,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         requested_setpoint = setpoint
         setpoint, produced_only = self._clamp_setpoint_for_routing_policy(setpoint, policy)
-        selected_primary_input_allowed = self._selected_primary_input_allowed(
-            routing,
-            input_source,
-            unexplained_input_export,
-        )
         selected_primary_output_growth_allowed = not (
             selected_primary_routing and self._uses_matching_routing() and p1 <= 0
         )
@@ -2531,6 +2533,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         p1: int,
         routing: _PowerRoutingSnapshot,
         pv_floors: _PvFloorSummary,
+        input_source: _InputSourceSummary,
     ) -> int:
         """Return meter export that cannot be explained by manager-controlled output."""
         meter_export = max(0, -p1)
@@ -2549,12 +2552,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         controlled_export = min(meter_export, primary_produced_excess)
 
         remaining_export = max(0, meter_export - controlled_export)
-        battery_trim_capacity = sum(
-            max(0, device.homeOutput.asInt - routing.route(device).produced_home)
-            for device in routing.discharge_devices
-            if device.reports_battery_backed_home_output()
-        )
-        controlled_export += min(remaining_export, battery_trim_capacity)
+        controlled_export += min(remaining_export, input_source.battery_trim_capacity)
 
         return max(0, meter_export - controlled_export)
 

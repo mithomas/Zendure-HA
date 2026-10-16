@@ -13,7 +13,14 @@ import pytest
 from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, ManagerState, SmartMode
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.fusegroup import FuseGroup
-from custom_components.zendure_ha.manager import ZendureManager, _PowerRoutingIntent, _TransitionDirection
+from custom_components.zendure_ha.manager import (
+    ZendureManager,
+    _InputSourceSummary,
+    _P1RoutingSample,
+    _PowerRoutingIntent,
+    _PvFloorSummary,
+    _TransitionDirection,
+)
 
 from .common import (
     attach_devices,
@@ -13640,3 +13647,466 @@ class TestEnergyTransfer:
 
         # Weighted SoC: (50% * 2.0 kWh + 100% * 1.0 kWh) / (2.0 + 1.0 kWh) = 2.0 / 3.0 * 100 = 66.666...%
         assert round(manager.globalSoc.asNumber, 1) == 66.7
+
+
+class TestP1FollowupDuePermutations:
+    """Permutation tests for _p1_followup_due deadline calculation."""
+
+    @pytest.mark.parametrize(
+        ("charge_lag_due", "transition_due", "expected_offset"),
+        [
+            (timedelta(seconds=2), timedelta(seconds=5), timedelta(seconds=2)),
+            (timedelta(seconds=5), timedelta(seconds=2), timedelta(seconds=2)),
+            (timedelta(seconds=3), None, timedelta(seconds=3)),
+        ],
+    )
+    def test_charge_lag_fast_eligible_precedence(
+        self,
+        hass: Any,
+        charge_lag_due: timedelta,
+        transition_due: timedelta | None,
+        expected_offset: timedelta,
+    ) -> None:
+        """Charge-lag deadline combines with transition gate deadline or stands alone."""
+        manager = make_manager(hass)
+        now = datetime.now()
+        manager._p1_last_route_finished = now - timedelta(seconds=10)
+        manager.p1_charge_lag_last_update = now + charge_lag_due - SmartMode.P1_MIN_UPDATE
+        manager._charge_lag_fast_eligible = Mock(return_value=True)
+        manager._export_trim_fast_eligible = Mock(return_value=False)
+        manager._pending_transition_due = Mock(return_value=now + transition_due if transition_due else None)
+
+        sample = _P1RoutingSample(100, now, 1, False)
+        assert manager._p1_followup_due(sample) == now + expected_offset
+
+    @pytest.mark.parametrize(
+        ("export_trim_due", "transition_due", "expected_offset"),
+        [
+            (timedelta(seconds=2), timedelta(seconds=5), timedelta(seconds=2)),
+            (timedelta(seconds=5), timedelta(seconds=2), timedelta(seconds=2)),
+            (timedelta(seconds=4), None, timedelta(seconds=4)),
+        ],
+    )
+    def test_export_trim_fast_eligible_precedence(
+        self,
+        hass: Any,
+        export_trim_due: timedelta,
+        transition_due: timedelta | None,
+        expected_offset: timedelta,
+    ) -> None:
+        """Export-trim deadline combines with transition gate deadline or stands alone."""
+        manager = make_manager(hass)
+        now = datetime.now()
+        manager._p1_last_route_finished = now - timedelta(seconds=10)
+        manager.p1_export_trim_last_update = now + export_trim_due - SmartMode.P1_MIN_UPDATE
+        manager._charge_lag_fast_eligible = Mock(return_value=False)
+        manager._export_trim_fast_eligible = Mock(return_value=True)
+        manager._pending_transition_due = Mock(return_value=now + transition_due if transition_due else None)
+
+        sample = _P1RoutingSample(-100, now, 1, False)
+        assert manager._p1_followup_due(sample) == now + expected_offset
+
+    def test_both_fast_eligible_picks_earliest(self, hass: Any) -> None:
+        """When both charge lag and export trim are eligible, the earliest deadline wins."""
+        manager = make_manager(hass)
+        now = datetime.now()
+        manager._p1_last_route_finished = now - timedelta(seconds=10)
+        manager.p1_charge_lag_last_update = now + timedelta(seconds=2) - SmartMode.P1_MIN_UPDATE
+        manager.p1_export_trim_last_update = now + timedelta(seconds=4) - SmartMode.P1_MIN_UPDATE
+        manager._charge_lag_fast_eligible = Mock(return_value=True)
+        manager._export_trim_fast_eligible = Mock(return_value=True)
+        manager._pending_transition_due = Mock(return_value=None)
+
+        sample = _P1RoutingSample(50, now, 1, False)
+        assert manager._p1_followup_due(sample) == now + timedelta(seconds=2)
+
+    @pytest.mark.parametrize(
+        ("transition_offset", "route_floor_offset", "expected_offset"),
+        [
+            (timedelta(seconds=8), timedelta(seconds=2), timedelta(seconds=8)),
+            (timedelta(seconds=1), timedelta(seconds=5), timedelta(seconds=5)),
+        ],
+    )
+    def test_consumed_generation_returns_transition_due_or_floor(
+        self,
+        hass: Any,
+        transition_offset: timedelta,
+        route_floor_offset: timedelta,
+        expected_offset: timedelta,
+    ) -> None:
+        """An already-consumed sample follows transition deadline clamped to route floor."""
+        manager = make_manager(hass)
+        now = datetime.now()
+        manager._p1_last_route_finished = now + route_floor_offset - SmartMode.P1_MIN_UPDATE
+        manager._p1_consumed_generation = 5
+        manager._charge_lag_fast_eligible = Mock(return_value=False)
+        manager._export_trim_fast_eligible = Mock(return_value=False)
+        manager._pending_transition_due = Mock(return_value=now + transition_offset)
+
+        sample = _P1RoutingSample(0, now, 5, False)
+        assert manager._p1_followup_due(sample) == now + expected_offset
+
+    @pytest.mark.parametrize(
+        ("fast_change", "configured_offset", "transition_due", "expected_offset"),
+        [
+            (True, timedelta(seconds=3), timedelta(seconds=6), timedelta(seconds=3)),
+            (True, timedelta(seconds=6), timedelta(seconds=3), timedelta(seconds=3)),
+            (True, timedelta(seconds=3), None, timedelta(seconds=3)),
+            (False, timedelta(seconds=7), timedelta(seconds=4), timedelta(seconds=4)),
+            (False, timedelta(seconds=4), timedelta(seconds=7), timedelta(seconds=4)),
+            (False, timedelta(seconds=5), None, timedelta(seconds=5)),
+        ],
+    )
+    def test_unconsumed_sample_timing_permutations(
+        self,
+        hass: Any,
+        fast_change: bool,
+        configured_offset: timedelta,
+        transition_due: timedelta | None,
+        expected_offset: timedelta,
+    ) -> None:
+        """Unconsumed samples use fast/slow timing and combine with transition deadlines."""
+        manager = make_manager(hass)
+        now = datetime.now()
+        manager._p1_last_route_finished = now - timedelta(seconds=10)
+        manager._p1_consumed_generation = 0
+        manager._charge_lag_fast_eligible = Mock(return_value=False)
+        manager._export_trim_fast_eligible = Mock(return_value=False)
+        if fast_change:
+            manager.zero_fast = now + configured_offset
+            manager.zero_next = now + timedelta(seconds=20)
+        else:
+            manager.zero_fast = now + timedelta(seconds=1)
+            manager.zero_next = now + configured_offset
+        manager._pending_transition_due = Mock(return_value=now + transition_due if transition_due else None)
+
+        sample = _P1RoutingSample(50, now, 1, fast_change)
+        assert manager._p1_followup_due(sample) == now + expected_offset
+
+    def test_route_floor_clamps_all_deadlines(self, hass: Any) -> None:
+        """Any computed deadline earlier than route floor is clamped to route floor."""
+        manager = make_manager(hass)
+        now = datetime.now()
+        manager._p1_last_route_finished = now
+        manager._p1_consumed_generation = 0
+        manager._charge_lag_fast_eligible = Mock(return_value=False)
+        manager._export_trim_fast_eligible = Mock(return_value=False)
+        manager.zero_fast = now - timedelta(seconds=5)
+        manager.zero_next = now - timedelta(seconds=5)
+        manager._pending_transition_due = Mock(return_value=now - timedelta(seconds=3))
+
+        sample = _P1RoutingSample(20, now, 1, False)
+        assert manager._p1_followup_due(sample) == now + SmartMode.P1_MIN_UPDATE
+
+
+class TestP1SpikeFilterPermutations:
+    """Permutation tests for _is_p1_spike_increase."""
+
+    def test_filter_disabled_always_resets_and_returns_false(self, hass: Any) -> None:
+        """When disabled, any existing candidate is cleared and False is returned."""
+        manager = make_manager(hass)
+        manager.spike_filter.update_value(0)
+        manager.p1_spike_started = datetime.now()
+        manager.p1_spike_baseline = 100
+
+        assert manager._is_p1_spike_increase(1000, datetime.now()) is False
+        assert manager.p1_spike_started is None
+
+    @pytest.mark.parametrize(
+        ("p1", "baseline", "threshold", "expected_suppressed"),
+        [
+            (100, 0, 200, False),
+            (200, 0, 200, True),
+            (300, 0, 200, True),
+            (150, 100, 50, True),
+            (149, 100, 50, False),
+        ],
+    )
+    def test_no_candidate_initialization(
+        self,
+        hass: Any,
+        p1: int,
+        baseline: int,
+        threshold: int,
+        expected_suppressed: bool,
+    ) -> None:
+        """Starting a spike candidate depends on delta reaching the threshold."""
+        manager = make_manager(hass)
+        manager.spike_filter.update_value(1)
+        manager.spike_filter_threshold.update_value(threshold)
+        manager.spike_filter_duration.update_value(3)
+        manager.p1_history.clear()
+        manager.p1_history.append(baseline)
+        now = datetime.now()
+
+        result = manager._is_p1_spike_increase(p1, now)
+        assert result is expected_suppressed
+        if expected_suppressed:
+            assert manager.p1_spike_started == now
+            assert manager.p1_spike_baseline == baseline
+        else:
+            assert manager.p1_spike_started is None
+
+    @pytest.mark.parametrize(
+        ("p1", "elapsed_seconds", "duration", "expected_suppressed", "candidate_cleared"),
+        [
+            (1000, 1.0, 3.0, True, False),
+            (1000, 2.999, 3.0, True, False),
+            (1000, 3.0, 3.0, False, True),
+            (1000, 4.0, 3.0, False, True),
+            (50, 1.0, 3.0, False, True),
+            (50, 4.0, 3.0, False, True),
+        ],
+    )
+    def test_active_candidate_evaluations(
+        self,
+        hass: Any,
+        p1: int,
+        elapsed_seconds: float,
+        duration: float,
+        expected_suppressed: bool,
+        candidate_cleared: bool,
+    ) -> None:
+        """Active candidate suppression releases after duration or when reading drops."""
+        manager = make_manager(hass)
+        manager.spike_filter.update_value(1)
+        manager.spike_filter_threshold.update_value(800)
+        manager.spike_filter_duration.update_value(duration)
+        started = datetime.now()
+        manager.p1_spike_started = started
+        manager.p1_spike_baseline = 0
+
+        eval_time = started + timedelta(seconds=elapsed_seconds)
+        result = manager._is_p1_spike_increase(p1, eval_time)
+        assert result is expected_suppressed
+        if candidate_cleared:
+            assert manager.p1_spike_started is None
+        else:
+            assert manager.p1_spike_started == started
+
+
+class TestFlowStopAllowsPermutations:
+    """Permutation tests for _flow_stop_allows and flow-stop protection."""
+
+    @pytest.mark.parametrize(
+        ("protect_zero", "residual_w", "online", "gates_enabled", "bypassed", "operation"),
+        [
+            (False, 50, True, True, False, ManagerMode.MATCHING),
+            (True, None, True, True, False, ManagerMode.MATCHING),
+            (True, 50, False, True, False, ManagerMode.MATCHING),
+            (True, 50, True, False, False, ManagerMode.MATCHING),
+            (True, 50, True, True, True, ManagerMode.MATCHING),
+            (True, 50, True, True, False, ManagerMode.MANUAL),
+            (True, 50, True, True, False, ManagerMode.OFF),
+        ],
+    )
+    def test_inactive_flow_protection_allows_stop_and_resets(
+        self,
+        hass: Any,
+        protect_zero: bool,
+        residual_w: int | None,
+        online: bool,
+        gates_enabled: bool,
+        bypassed: bool,
+        operation: ManagerMode,
+    ) -> None:
+        """When flow protection is inactive, stop is allowed and candidate resets."""
+        device = make_device(hass, ac_mode=AcMode.OUTPUT, home_output=50)
+        device.connectionStatus.update_value(SmartMode.CONNECTED if online else 0)
+        manager = make_manager(hass, devices=(device,), operation=operation)
+        manager._transition_gates_enabled = gates_enabled
+        manager._transition_gates_bypassed = bypassed
+        manager._reset_transition_candidate = Mock()
+
+        allowed = manager._flow_stop_allows(
+            device,
+            _TransitionDirection.INPUT,
+            residual_w,
+            protect_zero=protect_zero,
+        )
+
+        assert allowed is True
+        manager._reset_transition_candidate.assert_called_once_with(device, _TransitionDirection.INPUT)
+
+    @pytest.mark.parametrize(
+        ("direction", "actual_input", "home_output"),
+        [
+            (_TransitionDirection.OUTPUT, 15, 0),
+            (_TransitionDirection.OUTPUT, 0, 0),
+            (_TransitionDirection.INPUT, 0, 15),
+            (_TransitionDirection.INPUT, 0, 0),
+        ],
+    )
+    def test_low_actual_flow_allows_stop(
+        self,
+        hass: Any,
+        direction: _TransitionDirection,
+        actual_input: int,
+        home_output: int,
+    ) -> None:
+        """When actual measured flow is at or below the floor (15W), stop is allowed."""
+        device = make_device(hass, home_input=actual_input, home_output=home_output)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        manager._reset_transition_candidate = Mock()
+
+        allowed = manager._flow_stop_allows(
+            device,
+            direction,
+            50,
+            protect_zero=True,
+        )
+
+        assert allowed is True
+        manager._reset_transition_candidate.assert_called_once_with(device, direction)
+
+    @pytest.mark.parametrize("evidence_allowed", [True, False])
+    def test_active_flow_delegates_to_transition_evidence(
+        self,
+        hass: Any,
+        evidence_allowed: bool,
+    ) -> None:
+        """Active flow with protection active delegates to _transition_evidence_allows."""
+        device = make_device(hass, ac_mode=AcMode.OUTPUT, home_output=100)
+        manager = make_manager(hass, devices=(device,), operation=ManagerMode.MATCHING, transition_gates=True)
+        manager._transition_evidence_allows = Mock(return_value=evidence_allowed)
+
+        allowed = manager._flow_stop_allows(
+            device,
+            _TransitionDirection.INPUT,
+            50,
+            protect_zero=True,
+        )
+
+        assert allowed is evidence_allowed
+        manager._transition_evidence_allows.assert_called_once()
+
+
+class TestAllocateProducedFloorPermutations:
+    """Permutation tests for _allocate_produced_floor."""
+
+    @pytest.mark.parametrize("setpoint", [0, -50])
+    def test_zero_or_negative_setpoint(self, hass: Any, setpoint: int) -> None:
+        """Non-positive setpoint returns all zero targets immediately."""
+        dev = make_device(hass, level=50)
+        manager = make_manager(hass, devices=(dev,))
+
+        targets, remaining = manager._allocate_produced_floor(setpoint, [dev])
+        assert targets == {dev: 0}
+        assert remaining == setpoint
+
+    def test_empty_devices_list(self, hass: Any) -> None:
+        """Empty device list returns empty targets and unchanged setpoint."""
+        manager = make_manager(hass)
+        targets, remaining = manager._allocate_produced_floor(100, [])
+        assert targets == {}
+        assert remaining == 100
+
+    def test_zero_produced_capacity(self, hass: Any) -> None:
+        """When total produced limit is zero, returns zero targets and unchanged setpoint."""
+        dev1 = make_device(hass, device_id="d1", level=30)
+        dev2 = make_device(hass, device_id="d2", level=70)
+        manager = make_manager(hass, devices=(dev1, dev2))
+        manager._current_produced_output_limit = Mock(return_value=0)
+
+        targets, remaining = manager._allocate_produced_floor(100, [dev1, dev2])
+        assert targets == {dev1: 0, dev2: 0}
+        assert remaining == 100
+
+    def test_setpoint_exceeds_total_capacity(self, hass: Any) -> None:
+        """When setpoint exceeds sum of caps, all devices get full capacity."""
+        dev1 = make_device(hass, device_id="d1", level=30)
+        dev2 = make_device(hass, device_id="d2", level=70)
+        manager = make_manager(hass, devices=(dev1, dev2))
+        caps = {dev1: 100, dev2: 200}
+        manager._current_produced_output_limit = Mock(side_effect=lambda d, **_kwargs: caps[d])
+
+        targets, remaining = manager._allocate_produced_floor(500, [dev1, dev2])
+        assert targets == {dev1: 100, dev2: 200}
+        assert remaining == 200
+
+    def test_partial_allocation_integer_division_and_soc_order(self, hass: Any) -> None:
+        """Partial allocation preserves exact integer budget without deficits and respects SoC order."""
+        dev1 = make_device(hass, device_id="d1", level=20)
+        dev2 = make_device(hass, device_id="d2", level=50)
+        dev3 = make_device(hass, device_id="d3", level=80)
+        manager = make_manager(hass, devices=(dev1, dev2, dev3))
+        caps = {dev1: 100, dev2: 100, dev3: 100}
+        manager._current_produced_output_limit = Mock(side_effect=lambda d, **_kwargs: caps[d])
+
+        targets, remaining = manager._allocate_produced_floor(100, [dev1, dev2, dev3])
+        assert sum(targets.values()) == 100
+        assert remaining == 0
+        assert targets[dev1] > 0
+        assert targets[dev2] > 0
+        assert targets[dev3] > 0
+
+
+class TestPreparePowerRoutingFactReuse:
+    """Tests for fact reuse in _prepare_power_routing and _unexplained_export_for_primary_input."""
+
+    def test_unexplained_export_uses_input_source_battery_trim_capacity(self, hass: Any) -> None:
+        """Unexplained export calculation subtracts battery trim capacity from input_source."""
+        manager = make_manager(hass)
+        routing = Mock()
+        routing.selected_primary = None
+        pv_floors = _PvFloorSummary(
+            active_primary_produced_floor=0,
+            active_non_primary_produced_floor=0,
+            active_serving_pv_floor=0,
+            replaceable_non_primary_serving_pv=0,
+            uncovered_chargeable_serving_pv_floor=0,
+        )
+        input_source = _InputSourceSummary(
+            source_budget=0,
+            meter_export=100,
+            battery_trim_capacity=30,
+        )
+
+        export = manager._unexplained_export_for_primary_input(
+            -100,
+            routing,
+            pv_floors,
+            input_source,
+        )
+        assert export == 70
+
+    def test_unexplained_export_zero_when_battery_trim_covers_export(self, hass: Any) -> None:
+        """Unexplained export is zero when battery trim capacity covers all meter export."""
+        manager = make_manager(hass)
+        routing = Mock()
+        routing.selected_primary = None
+        pv_floors = _PvFloorSummary(
+            active_primary_produced_floor=0,
+            active_non_primary_produced_floor=0,
+            active_serving_pv_floor=0,
+            replaceable_non_primary_serving_pv=0,
+            uncovered_chargeable_serving_pv_floor=0,
+        )
+        input_source = _InputSourceSummary(
+            source_budget=0,
+            meter_export=50,
+            battery_trim_capacity=100,
+        )
+
+        export = manager._unexplained_export_for_primary_input(
+            -50,
+            routing,
+            pv_floors,
+            input_source,
+        )
+        assert export == 0
+
+    def test_unexplained_export_zero_when_p1_non_negative(self, hass: Any) -> None:
+        """Unexplained export is zero when meter export is zero."""
+        manager = make_manager(hass)
+        routing = Mock()
+        pv_floors = Mock()
+        input_source = Mock()
+
+        export = manager._unexplained_export_for_primary_input(
+            50,
+            routing,
+            pv_floors,
+            input_source,
+        )
+        assert export == 0
