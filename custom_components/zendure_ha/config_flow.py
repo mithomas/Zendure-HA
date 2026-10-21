@@ -45,7 +45,9 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
             vol.Required(
                 CONF_P1METER,
                 description={"suggested_value": "sensor.power_actual"},
-            ): selector.EntitySelector(),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="power"),
+            ),
             vol.Optional(CONF_TOTAL_SOLAR): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor", device_class="power"),
             ),
@@ -189,7 +191,12 @@ class ZendureOptionsFlowHandler(OptionsFlow):
 
         options_schema = vol.Schema(
             {
-                vol.Required(CONF_P1METER, default=self.config_entry.data[CONF_P1METER]): str,
+                vol.Required(
+                    CONF_P1METER,
+                    default=self.config_entry.data.get(CONF_P1METER, "sensor.power_actual"),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor", device_class="power"),
+                ),
                 vol.Optional(
                     CONF_TOTAL_SOLAR,
                     default=self.config_entry.data.get(CONF_TOTAL_SOLAR, ""),
