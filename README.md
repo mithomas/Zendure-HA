@@ -24,6 +24,7 @@ This Home Assistant integration connects your Zendure devices to Home Assistant,
   - Zendure Manager
     - [Power distribution strategy](https://github.com/Zendure/Zendure-HA/wiki/Power-distribution-strategy)
     - [Detailed routing and relay-protection rules](MANAGER_RULES.md)
+  - [Custom Sensors and Energy Entities](CUSTOM_SENSORS.md)
   - [Local Mqtt (Legacy devices)](https://github.com/Zendure/Zendure-HA/wiki/Local-Mqtt-(Legacy-Devices))
   - Home Assistant Energy Dashboard
 

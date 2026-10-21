@@ -1457,3 +1457,31 @@ async def test_zensdk_charge_kickstart_walk_sign_logic(hass):
         sent_props = mock_cmd.call_args[0][0]["properties"]
         assert sent_props["inputLimit"] == -power
         assert sent_props["acMode"] == 1
+
+
+def test_aggr_grid_charge_lifecycle_ac_vs_dc_only(hass):
+    """aggrGridCharge should only be instantiated on AC-capable devices."""
+    from custom_components.zendure_ha.devices.aio2400 import AIO2400
+    from custom_components.zendure_ha.devices.hyper2000 import Hyper2000
+
+    def_hub = make_device_definition(device_id="h1", device_name="Hub 1200", product_model="hub1200")
+    hub = Hub1200(hass, "h1", "Hub 1200", def_hub)
+    assert hub.supports_ac_charge is False
+    assert hub.aggrGridCharge is None
+
+    def_aio = make_device_definition(device_id="aio1", device_name="AIO 2400", product_model="aio2400")
+    aio = AIO2400(hass, "aio1", "AIO 2400", def_aio)
+    assert aio.supports_ac_charge is False
+    assert aio.aggrGridCharge is None
+
+    def_hyper = make_device_definition(device_id="hyp1", device_name="Hyper 2000", product_model="hyper2000")
+    hyper = Hyper2000(hass, "hyp1", "Hyper 2000", def_hyper)
+    assert hyper.supports_ac_charge is True
+    assert hyper.aggrGridCharge is not None
+    assert hyper.aggrGridCharge.entity_description.native_unit_of_measurement == "kWh"
+    assert hyper.aggrGridCharge.entity_description.device_class == "energy"
+    assert hyper.aggrGridCharge.entity_description.state_class == "total_increasing"
+
+    sf = make_device(hass, device_id="sf1", device_name="SF800 Pro")
+    assert sf.supports_ac_charge is True
+    assert sf.aggrGridCharge is not None

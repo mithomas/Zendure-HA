@@ -312,6 +312,12 @@ class ZendureDevice(EntityDevice):
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
         self.aggrOffGrid: ZendureRestoreSensor | None = None
+        self.aggrGridCharge: ZendureRestoreSensor | None = None
+
+    @property
+    def supports_ac_charge(self) -> bool:
+        """Return whether the device supports AC grid charging."""
+        return self.charge_limit < 0
 
     def setLimits(self, charge: int, discharge: int) -> None:
         """Set the device limits."""
@@ -328,6 +334,16 @@ class ZendureDevice(EntityDevice):
             self.discharge_optimal = discharge // 4
             self.discharge_start = discharge // 10
             self.limitOutput.update_range(0, discharge)
+            if charge < 0 and self.aggrGridCharge is None:
+                self.aggrGridCharge = ZendureRestoreSensor(
+                    self,
+                    "aggrGridCharge",
+                    None,
+                    "kWh",
+                    "energy",
+                    "total_increasing",
+                    2,
+                )
         except Exception:
             _LOGGER.error("SetLimits error %s %s %s!", self.name, charge, discharge)
 

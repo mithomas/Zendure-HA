@@ -20,6 +20,7 @@
           "username": "Nom d'utilisateur Zendure",
           "password": "Mot de passe Zendure",
           "p1meter": "Capteur P1 pour le couplage intelligent",
+          "total_solar": "Capteur de puissance solaire totale (Optionnel)",
           "mqttlog": "Journaliser la communication MQTT",
           "mqttlocal": "Utiliser MQTT local",
           "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
@@ -44,6 +45,7 @@
           "username": "Nom d'utilisateur Zendure",
           "password": "Mot de passe Zendure",
           "p1meter": "Capteur P1 pour le couplage intelligent",
+          "total_solar": "Capteur de puissance solaire totale (Optionnel)",
           "mqttlog": "Journaliser la communication MQTT",
           "mqttlocal": "Utiliser MQTT local",
           "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
@@ -59,6 +61,7 @@
         "data": {
           "scan_interval": "Intervalle d'analyse (secondes)",
           "p1meter": "Capteur P1 pour le couplage intelligent",
+          "total_solar": "Capteur de puissance solaire totale (Optionnel)",
           "mqttlog": "Journaliser communication MQTT",
           "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT"
         },
@@ -181,6 +184,9 @@
       },
       "aggr_solar6": {
         "name": "PV6 Total solaire"
+      },
+      "aggr_grid_charge": {
+        "name": "Énergie totale de charge sur le réseau"
       },
       "plug_state": {
         "name": "Multiprise hors réseau",

@@ -14,6 +14,7 @@
         "data": {
           "token": "Token Zendure",
           "p1meter": "Czujnik P1 do inteligentnego dopasowania",
+          "total_solar": "Czujnik całkowitej mocy słonecznej (Opcjonalny)",
           "mqttlog": "Rejestruj komunikację MQTT",
           "mqttlocal": "Użyj lokalnego MQTT",
           "auto_mqtt_user": "Automatycznie zarządzaj użytkownikami MQTT",
@@ -36,6 +37,7 @@
         "data": {
           "token": "Token Zendure",
           "p1meter": "Czujnik P1 do inteligentnego dopasowania",
+          "total_solar": "Czujnik całkowitej mocy słonecznej (Opcjonalny)",
           "mqttlog": "Rejestruj komunikację MQTT",
           "mqttlocal": "Użyj lokalnego MQTT",
           "auto_mqtt_user": "Automatycznie zarządzaj użytkownikami MQTT",
@@ -50,6 +52,7 @@
       "init": {
         "data": {
           "p1meter": "Czujnik P1 do inteligentnego dopasowania",
+          "total_solar": "Czujnik całkowitej mocy słonecznej (Opcjonalny)",
           "mqttlog": "Rejestruj komunikację MQTT",
           "auto_mqtt_user": "Automatycznie zarządzaj użytkownikami MQTT"
         },
@@ -148,6 +151,9 @@
       },
       "aggr_grid_input_power": {
         "name": "Całkowita energia z sieci"
+      },
+      "aggr_grid_charge": {
+        "name": "Całkowita energia ładowania z sieci"
       },
       "aggr_grid_off_power": {
         "name": "Całkowita energia off-grid"

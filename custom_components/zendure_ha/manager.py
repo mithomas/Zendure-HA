@@ -31,6 +31,7 @@ from .api import Api
 from .const import (
     CONF_AUTO_MQTT_USER,
     CONF_P1METER,
+    CONF_TOTAL_SOLAR,
     DOMAIN,
     EMPTY_SOC_STATES,
     LOW_SOC_STATES,
@@ -2005,6 +2006,92 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if self.hass and self.hass.loop.is_running():
             self._schedule_refresh()
 
+    def _get_total_solar_power(self) -> float:
+        """Return total solar power in watts from configured sensor or Zendure PV sum."""
+        total_solar_sensor = self.config_entry.data.get(CONF_TOTAL_SOLAR) if self.config_entry else None
+        if total_solar_sensor:
+            state = self.hass.states.get(total_solar_sensor)
+            if state is not None and state.state not in (None, "", "unknown", "unavailable"):
+                try:
+                    uom = state.attributes.get("unit_of_measurement", "W")
+                    if uom in ("kWh", "Wh", "MWh", "megawatt_hour"):
+                        _LOGGER.warning(
+                            "Configured total solar sensor %s reports energy (%s) instead of power (W/kW)",
+                            total_solar_sensor,
+                            uom,
+                        )
+                    else:
+                        val = float(state.state)
+                        factor = 1000 if uom in ("kW", "kilowatt", "kilowatts") else 1
+                        return max(0.0, val * factor)
+                except (ValueError, TypeError):
+                    _LOGGER.debug("Could not parse total solar state: %s", state.state)
+
+        return float(
+            sum(
+                max(0, d.solarInput.asInt, -d.pwr_produced)
+                for d in getattr(self, "devices", [])
+                if d.online and d.state != DeviceState.OFFLINE
+            )
+        )
+
+    def _update_grid_charge_accounting(self, p1: int, time: datetime) -> None:
+        """Attribute true AC grid charging energy across AC-capable devices."""
+        devices = getattr(self, "devices", [])
+        ac_devices = [d for d in devices if getattr(d, "aggrGridCharge", None) is not None]
+        if not ac_devices:
+            return
+
+        def _ac_input(device: ZendureDevice) -> int:
+            if not device.online or device.state == DeviceState.OFFLINE or device.acMode.value != AcMode.INPUT:
+                return 0
+            return max(0, device.homeInput.asInt - max(0, device.pwr_offgrid))
+
+        charging_devices = [d for d in ac_devices if _ac_input(d) > 0]
+        if not charging_devices:
+            for d in ac_devices:
+                if d.aggrGridCharge is not None:
+                    d.aggrGridCharge.aggregate(time, 0)
+            return
+
+        primary = self._selected_primary_device()
+        ordered_charging: list[ZendureDevice] = []
+        if primary is not None and primary in charging_devices:
+            ordered_charging.append(primary)
+        ordered_charging.extend(d for d in charging_devices if d is not primary)
+
+        solar_budget = self._get_total_solar_power()
+        grid_import_budget = float(max(0, p1))
+
+        # Phase A: Solar allocation (primary first, battery-first)
+        grid_demands: dict[ZendureDevice, float] = {}
+        for d in ordered_charging:
+            ac_in = float(_ac_input(d))
+            solar_alloc = min(ac_in, solar_budget)
+            solar_budget -= solar_alloc
+            grid_demands[d] = max(0.0, ac_in - solar_alloc)
+
+        # Phase B: Grid import attribution (secondary first, bounded by physical P1 import)
+        grid_charges: dict[ZendureDevice, float] = {}
+        for d in ordered_charging:
+            if d is not primary:
+                charge = min(grid_demands[d], grid_import_budget)
+                grid_charges[d] = charge
+                grid_import_budget -= charge
+
+        if primary in ordered_charging:
+            charge = min(grid_demands[primary], grid_import_budget)
+            grid_charges[primary] = charge
+            grid_import_budget -= charge
+
+        # Phase C: Update energy counters for all AC-capable devices
+        for d in ac_devices:
+            if d.aggrGridCharge is not None:
+                try:
+                    d.aggrGridCharge.aggregate(time, grid_charges.get(d, 0.0))
+                except Exception as e:
+                    _LOGGER.error("Error updating aggrGridCharge for %s: %s", d.name, e)
+
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
         _LOGGER.debug("Updating P1 meter to: %s", p1meter)
@@ -2264,6 +2351,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         """
         if ZendureManager.simulation:
             self.writeSimulation(time, p1)
+
+        self._update_grid_charge_accounting(p1, time)
 
         input_mode_transition_possible = any(
             device.online and device.acMode.value == AcMode.INPUT for device in self._managed_routing_devices()
@@ -2632,6 +2721,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update the power entities
         self.power.update_value(power)
         self.refresh_energy_kwh()
+        self._update_grid_charge_accounting(p1, datetime.now())
         return setpoint
 
     def _routing_policy(self) -> _RoutingPolicy:

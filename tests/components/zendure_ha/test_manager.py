@@ -10,7 +10,14 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from custom_components.zendure_ha.const import AcMode, DeviceState, ManagerMode, ManagerState, SmartMode
+from custom_components.zendure_ha.const import (
+    CONF_TOTAL_SOLAR,
+    AcMode,
+    DeviceState,
+    ManagerMode,
+    ManagerState,
+    SmartMode,
+)
 from custom_components.zendure_ha.devices.solarflow800 import SolarFlow800Pro
 from custom_components.zendure_ha.fusegroup import FuseGroup
 from custom_components.zendure_ha.manager import (
@@ -14110,3 +14117,200 @@ class TestPreparePowerRoutingFactReuse:
             input_source,
         )
         assert export == 0
+
+
+class TestTrueGridLoadingCounter:
+    """Tests for true grid loading counter (aggrGridCharge) and solar accounting."""
+
+    def test_get_total_solar_power_from_configured_sensor(self, hass: Any) -> None:
+        """Total solar power should read from configured sensor with W or kW units."""
+        from .common import config_entry_data
+
+        cfg = {**config_entry_data(), CONF_TOTAL_SOLAR: "sensor.rooftop_solar"}
+        manager = make_manager(hass, config_data=cfg)
+
+        # Sensor in W
+        hass.states.async_set("sensor.rooftop_solar", "750", {"unit_of_measurement": "W"})
+        assert manager._get_total_solar_power() == 750.0
+
+        # Sensor in kW
+        hass.states.async_set("sensor.rooftop_solar", "2.4", {"unit_of_measurement": "kW"})
+        assert manager._get_total_solar_power() == 2400.0
+
+        # Sensor unavailable -> fallback to Zendure devices
+        hass.states.async_set("sensor.rooftop_solar", "unavailable", {})
+        device = make_device(hass, device_id="sf1")
+        device.solarInput.update_value(320)
+        manager.devices = [device]
+        assert manager._get_total_solar_power() == 320.0
+
+        # Sensor reporting energy in kWh -> rejected with warning, fallback to Zendure devices
+        hass.states.async_set("sensor.rooftop_solar", "150.0", {"unit_of_measurement": "kWh"})
+        assert manager._get_total_solar_power() == 320.0
+
+    @pytest.mark.parametrize("empty_solar_val", [None, ""])
+    def test_get_total_solar_power_fallback_to_zendure_pv(self, hass: Any, empty_solar_val: Any) -> None:
+        """When total solar sensor is omitted, None, or empty string, sum Zendure PV inputs."""
+        from .common import config_entry_data
+
+        cfg = {**config_entry_data()}
+        if empty_solar_val is not None:
+            cfg[CONF_TOTAL_SOLAR] = empty_solar_val
+        manager = make_manager(hass, config_data=cfg)
+        device1 = make_device(hass, device_id="sf1")
+        device1.solarInput.update_value(200)
+        device2 = make_device(hass, device_id="sf2")
+        device2.solarInput.update_value(350)
+        manager.devices = [device1, device2]
+
+        assert manager._get_total_solar_power() == 550.0
+
+    def test_grid_charge_accounting_zero_during_export(self, hass: Any) -> None:
+        """True grid loading must be 0 W when P1 is exporting (<= 0)."""
+        device = make_device(hass, device_id="sf1", home_input=600, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, devices=(device,))
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+
+        manager._update_grid_charge_accounting(-150, t0)
+
+        assert device.aggrGridCharge is not None
+        assert device.aggrGridCharge.last_value == 0.0
+
+    def test_grid_charge_accounting_gross_solar_covers_charging(self, hass: Any) -> None:
+        """When total solar >= AC charging power, grid loading is 0 W even if house imports."""
+        from .common import config_entry_data
+
+        cfg = {**config_entry_data(), CONF_TOTAL_SOLAR: "sensor.total_solar"}
+        device = make_device(hass, device_id="sf1", home_input=500, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, config_data=cfg, devices=[device])
+        hass.states.async_set("sensor.total_solar", "800", {"unit_of_measurement": "W"})
+
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+
+        # House is importing 300 W (e.g. oven running), but solar (800 W) covers battery (500 W)
+        manager._update_grid_charge_accounting(300, t0)
+
+        assert device.aggrGridCharge is not None
+        assert device.aggrGridCharge.last_value == 0.0
+
+    def test_grid_charge_accounting_unbacked_and_kwh_accumulation(self, hass: Any) -> None:
+        """Unbacked AC charge accumulates kWh correctly based on Riemann sum."""
+        device = make_device(hass, device_id="sf1", home_input=500, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, devices=(device,))
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+
+        manager._update_grid_charge_accounting(500, t0)
+        assert device.aggrGridCharge is not None
+        assert device.aggrGridCharge.last_value == 500.0
+
+        # One hour later, still charging at 500 W from grid -> 0.5 kWh added
+        t1 = t0 + timedelta(hours=1)
+        manager._update_grid_charge_accounting(500, t1)
+        val = device.aggrGridCharge._attr_native_value
+        assert isinstance(val, (int, float))
+        assert pytest.approx(float(val), rel=1e-3) == 0.5
+
+    def test_grid_charge_aggregation_multi_step_timeline(self, hass: Any) -> None:
+        """Verify dynamic aggregation across a realistic multi-step time-series."""
+        from .common import config_entry_data
+
+        cfg = {**config_entry_data(), CONF_TOTAL_SOLAR: "sensor.total_solar"}
+        device = make_device(hass, device_id="sf1", home_input=600, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, config_data=cfg, devices=[device])
+
+        def _kwh(dev: Any) -> float:
+            assert dev.aggrGridCharge is not None
+            v = dev.aggrGridCharge._attr_native_value
+            assert isinstance(v, (int, float))
+            return float(v)
+
+        # Step 0: 12:00 - Start charging 600 W, 0 W solar, 600 W P1 import
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+        hass.states.async_set("sensor.total_solar", "0", {"unit_of_measurement": "W"})
+        manager._update_grid_charge_accounting(600, t0)
+        assert device.aggrGridCharge is not None
+        assert device.aggrGridCharge.last_value == 600.0
+        assert _kwh(device) == 0.0
+
+        # Step 1: 12:30 (+30m) - 600 W drawn for 30m -> 0.30 kWh. Solar rises to 400 W, P1 drops to 200 W.
+        t1 = t0 + timedelta(minutes=30)
+        hass.states.async_set("sensor.total_solar", "400", {"unit_of_measurement": "W"})
+        manager._update_grid_charge_accounting(200, t1)
+        assert device.aggrGridCharge.last_value == 200.0
+        assert pytest.approx(_kwh(device), rel=1e-3) == 0.30
+
+        # Step 2: 13:00 (+30m) - 200 W drawn for 30m -> +0.10 kWh (Total 0.40 kWh). Solar surges to 1000 W (export).
+        t2 = t1 + timedelta(minutes=30)
+        hass.states.async_set("sensor.total_solar", "1000", {"unit_of_measurement": "W"})
+        manager._update_grid_charge_accounting(-400, t2)
+        assert device.aggrGridCharge.last_value == 0.0
+        assert pytest.approx(_kwh(device), rel=1e-3) == 0.40
+
+        # Step 3: 13:30 (+30m) - 0 W drawn -> +0.00 kWh. Device completes charging (input drops to 0 W).
+        t3 = t2 + timedelta(minutes=30)
+        device.homeInput.update_value(0)
+        manager._update_grid_charge_accounting(-400, t3)
+        assert device.aggrGridCharge.last_value == 0.0
+        assert pytest.approx(_kwh(device), rel=1e-3) == 0.40
+
+        # Step 4: Next day across midnight (08:00 UTC) - total_increasing must not reset.
+        t4 = datetime(2026, 10, 21, 8, 0, 0, tzinfo=UTC)
+        manager._update_grid_charge_accounting(100, t4)
+        assert pytest.approx(_kwh(device), rel=1e-3) == 0.40
+
+    def test_grid_charge_accounting_bounded_by_p1_import(self, hass: Any) -> None:
+        """Grid charging power cannot exceed actual P1 grid import."""
+        device = make_device(hass, device_id="sf1", home_input=800, ac_mode=AcMode.INPUT)
+        manager = make_manager(hass, devices=(device,))
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+
+        # Device draws 800 W, but grid only supplies 300 W (e.g. another local AC source supplies 500 W)
+        manager._update_grid_charge_accounting(300, t0)
+
+        assert device.aggrGridCharge is not None
+        assert device.aggrGridCharge.last_value == 300.0
+
+    def test_grid_charge_accounting_multi_device_priority(self, hass: Any) -> None:
+        """Primary device receives solar first; Secondary absorbs grid import first."""
+        from .common import config_entry_data
+
+        cfg = {**config_entry_data(), CONF_TOTAL_SOLAR: "sensor.total_solar"}
+        primary = make_device(hass, device_id="prim", home_input=400, ac_mode=AcMode.INPUT)
+        secondary = make_device(hass, device_id="sec", home_input=400, ac_mode=AcMode.INPUT)
+        manager = make_manager(
+            hass,
+            config_data=cfg,
+            devices=(primary, secondary),
+            primary_device_id="prim",
+        )
+        # 400 W solar, 400 W grid import
+        hass.states.async_set("sensor.total_solar", "400", {"unit_of_measurement": "W"})
+
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+        manager._update_grid_charge_accounting(400, t0)
+
+        assert primary.aggrGridCharge is not None
+        assert secondary.aggrGridCharge is not None
+        # Primary gets 400 W solar -> 0 W grid charge
+        assert primary.aggrGridCharge.last_value == 0.0
+        # Secondary gets 0 W solar -> absorbs all 400 W grid import
+        assert secondary.aggrGridCharge.last_value == 400.0
+
+    def test_grid_charge_accounting_dc_only_device_ignored(self, hass: Any) -> None:
+        """DC-only device (Hub1200) without aggrGridCharge is ignored safely."""
+        from custom_components.zendure_ha.devices.hub1200 import Hub1200
+
+        from .common import make_device_definition
+
+        hub = Hub1200(
+            hass,
+            "h1",
+            "Hub 1200",
+            make_device_definition(device_id="h1", device_name="Hub 1200", product_model="hub1200"),
+        )
+        manager = make_manager(hass, devices=(hub,))
+        t0 = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
+
+        # Should not raise any attribute error
+        manager._update_grid_charge_accounting(500, t0)
+        assert hub.aggrGridCharge is None

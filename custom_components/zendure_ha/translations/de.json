@@ -18,6 +18,7 @@
         "data": {
           "token": "Zendure Token",
           "p1meter": "P1 Sensor für Smart Matching",
+          "total_solar": "Gesamter Solarleistungs-Sensor (Optional)",
           "mqttlog": "MQTT-Kommunikation loggen",
           "mqttlocal": "Lokales MQTT verwenden",
           "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten",
@@ -29,6 +30,7 @@
         "data": {
           "token": "Zendure Token",
           "p1meter": "P1 Sensor für Smart Matching",
+          "total_solar": "Gesamter Solarleistungs-Sensor (Optional)",
           "mqttlog": "MQTT-Kommunikation loggen",
           "mqttlocal": "Lokales MQTT verwenden",
           "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten",
@@ -43,6 +45,7 @@
       "init": {
         "data": {
           "p1meter": "P1 Sensor für Smart Matching",
+          "total_solar": "Gesamter Solarleistungs-Sensor (Optional)",
           "mqttlog": "MQTT-Kommunikation loggen",
           "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten"
         },
@@ -186,6 +189,9 @@
       },
       "aggr_grid_input_power": {
         "name": "Gesamte Netzenergie"
+      },
+      "aggr_grid_charge": {
+        "name": "Gesamte Netz-Ladeenergie"
       },
       "aggr_grid_off_power": {
         "name": "Gesamte Off-Grid-Energie"

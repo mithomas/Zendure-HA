@@ -23,6 +23,7 @@ from .const import (
     CONF_MQTTUSER,
     CONF_P1METER,
     CONF_SIM,
+    CONF_TOTAL_SOLAR,
     CONF_WIFIPSW,
     CONF_WIFISSID,
     DOMAIN,
@@ -45,6 +46,9 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_P1METER,
                 description={"suggested_value": "sensor.power_actual"},
             ): selector.EntitySelector(),
+            vol.Optional(CONF_TOTAL_SOLAR): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor", device_class="power"),
+            ),
             vol.Required(CONF_MQTTLOG): bool,
             vol.Required(CONF_MQTTLOCAL): bool,
         },
@@ -186,6 +190,12 @@ class ZendureOptionsFlowHandler(OptionsFlow):
         options_schema = vol.Schema(
             {
                 vol.Required(CONF_P1METER, default=self.config_entry.data[CONF_P1METER]): str,
+                vol.Optional(
+                    CONF_TOTAL_SOLAR,
+                    default=self.config_entry.data.get(CONF_TOTAL_SOLAR, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor", device_class="power"),
+                ),
                 vol.Required(CONF_MQTTLOG, default=self.config_entry.data[CONF_MQTTLOG]): bool,
                 vol.Optional(CONF_AUTO_MQTT_USER, default=self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)): bool,
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
