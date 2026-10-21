@@ -160,6 +160,7 @@ def make_device(
 def make_manager(
     hass: HomeAssistant,
     *,
+    config_data: dict[str, Any] | None = None,
     devices: tuple[ZendureDevice, ...] | list[ZendureDevice] | None = None,
     operation: ManagerMode = ManagerMode.OFF,
     manual_power: float = 0,
@@ -175,7 +176,7 @@ def make_manager(
     transition_gates: bool = False,
 ) -> ZendureManager:
     """Create a manager instance with the entities needed by the tests."""
-    entry = make_config_entry()
+    entry = make_config_entry(config_data)
     manager = ZendureManager(hass, entry)
     manager._transition_gates_enabled = transition_gates
     manager.operationmode = ZendureRestoreSelect(
