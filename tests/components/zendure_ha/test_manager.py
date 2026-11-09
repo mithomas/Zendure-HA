@@ -14341,3 +14341,115 @@ class TestTrueGridLoadingCounter:
         manager._update_grid_charge_accounting(500, t0)
         assert device.aggrNetGridCharge is not None
         assert device.aggrNetGridCharge.last_value == 0.0
+
+
+class TestLoadDropExportTrimAndCharge:
+    """Regression tests for 2026-11-07 load-drop export deadlock and input eligibility."""
+
+    async def test_load_drop_export_trim_stops_output_without_flow_hold(self, hass: Any) -> None:
+        """When household load drops creating -75 W export with 60 W output, output trims to 0 W."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-load-drop-primary",
+            device_name="sf800 pro load drop primary",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=60,
+            battery_input=14,
+            input_limit=0,
+            output_limit=60,
+        )
+        primary.solarInput.update_value(74)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        now = datetime(2026, 11, 7, 12, 44, 0, tzinfo=UTC)
+        await _run_prepared_power_routing(manager, -75, now)
+
+        primary.power_charge.assert_not_awaited()
+        # Must trim output to 0 W without being held at 60 W by flow-stop protection
+        primary.power_discharge.assert_awaited_once_with(0)
+
+    async def test_load_drop_external_surplus_admits_primary_input(self, hass: Any) -> None:
+        """External solar surplus above primary output admits primary input mode."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-unexplained-export",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=60,
+            battery_input=14,
+            output_limit=60,
+        )
+        primary.solarInput.update_value(74)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        now = datetime(2026, 11, 7, 12, 44, 0, tzinfo=UTC)
+        manager._reset_power_distribution_state()
+        setpoint = await manager._poll_devices_and_prepare_routing_state(-80)
+        intent, _routing, _ = manager._prepare_power_routing(-80, now, setpoint)
+
+        # Primary should be allowed to enter input mode because 80 - 60 = 20 W > 15 W
+        assert intent.selected_primary_input_allowed is True
+
+    async def test_load_drop_follow_on_cycle_preserves_zero_output(self, hass: Any) -> None:
+        """After output is trimmed to zero, follow-on cycle with low export preserves 0 W output."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="sf800-pro-follow-on-primary",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=0,
+            battery_input=74,
+            input_limit=0,
+            output_limit=0,
+        )
+        primary.solarInput.update_value(74)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+
+        now = datetime(2026, 11, 7, 12, 44, 10, tzinfo=UTC)
+        await _run_prepared_power_routing(manager, -15, now)
+
+        primary.power_charge.assert_not_awaited()
+        # Output is already zero; no redundant discharge command should be sent
+        primary.power_discharge.assert_not_awaited()

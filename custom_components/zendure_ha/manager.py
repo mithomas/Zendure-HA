@@ -3879,11 +3879,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # full devices have nowhere to store PV; keep their pass-through running
             if strict_output_stop and d.state == DeviceState.SOCFULL:
                 continue
+            is_trimmed_primary = (
+                d is selected_primary and primary_output_export_trim > 0 and active_discharge_targets.get(d, 0) == 0
+            )
             await self._stop_home_output_for_input(
                 d,
                 allow_bypass_zero=not strict_output_stop,
                 route=routing.route(d),
-                protect_zero=not strict_output_stop,
+                protect_zero=not strict_output_stop and not is_trimmed_primary,
             )
 
         if move_primary_charge_to_secondary and primary is not None:
