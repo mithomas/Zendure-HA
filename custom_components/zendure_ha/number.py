@@ -181,8 +181,8 @@ class ZendureRestoreNumber(  # pyright: ignore[reportIncompatibleVariableOverrid
         initial_value: float = 0,
     ) -> None:
         """Initialize a number entity."""
-        super().__init__(device, uniqueid, onwrite, template, uom, deviceclass, maximum, minimum, mode, 1, doupdate)
         self._attr_native_value = initial_value
+        super().__init__(device, uniqueid, onwrite, template, uom, deviceclass, maximum, minimum, mode, 1, doupdate)
 
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""

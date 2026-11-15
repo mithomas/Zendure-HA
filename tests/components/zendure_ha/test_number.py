@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
-from homeassistant.components.number import NumberMode
+from homeassistant.components.number import NumberExtraStoredData, NumberMode
 
-from custom_components.zendure_ha.number import ZendureNumber
+from custom_components.zendure_ha.number import ZendureNumber, ZendureRestoreNumber
 
 from .common import make_device
 
@@ -86,3 +87,29 @@ async def test_async_onwrite_is_awaited(hass: Any) -> None:
     await number.async_set_native_value(500)
 
     assert calls == [500]
+
+
+async def test_restore_number_preserves_restored_value(hass: Any) -> None:
+    """ZendureRestoreNumber preserves restored value and does not overwrite it with initial_value."""
+    device = make_device(hass)
+    number = ZendureRestoreNumber(
+        device,
+        "manual_power",
+        None,
+        maximum=2400,
+        minimum=0,
+        initial_value=0,
+    )
+
+    stored_data = NumberExtraStoredData(
+        native_value=600,
+        native_unit_of_measurement="W",
+        native_max_value=2400,
+        native_min_value=0,
+        native_step=1,
+    )
+    with patch.object(number, "async_get_last_number_data", AsyncMock(return_value=stored_data)):
+        await number.async_added_to_hass()
+
+    assert number._attr_native_value == 600
+    assert number.asInt == 600

@@ -78,6 +78,7 @@ Because selective porting does not create a git merge commit, the git merge-base
    `git tag sync/upstream-YYYY-MM-DD <upstream-commit-sha>`
 5. Baseline ledger:
    - 2026-10-16: Upstream audited up to `8d59bac4` (PR #1701 / tag 1.4.4+). Tag: `sync/upstream-2026-10-16`.
+   - 2026-11-15: Upstream audited up to `e67b04e4` (PR #1760 / tag 1.4.4+). Tag: `sync/upstream-2026-11-15`.
 
 
 ## Commit Message Style

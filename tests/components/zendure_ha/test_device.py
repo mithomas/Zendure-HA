@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from homeassistant.const import EntityCategory
 
 from custom_components.zendure_ha.binary_sensor import ZendureBinarySensor
 from custom_components.zendure_ha.const import AcMode, ConnectionMode, DeviceState, SmartMode, SocLimitState
@@ -1377,16 +1378,51 @@ def test_soc_safety_margin_takes_precedence_during_discharge_recovery(hass):
 
 
 def test_sf4000_mix_internal_battery_identification():
-    """SF4000 internal 8 kWh battery is identified by packType 70 despite serial starting with B."""
-    name, model, kwh = ZendureBattery.get_battery_type("B12345678", pack_type=70)
+    """SF4000 internal 8 kWh battery is identified by packType 70 only when parent is SolarFlow4000."""
+    name, model, kwh = ZendureBattery.get_battery_type("B12345678", pack_type=70, parent_is_sf4000=True)
     assert model == "I8000"
     assert kwh == 8.0
     assert "I8000" in name
+
+    # Other devices reporting packType 70 with B serial are AB1000S
+    _name_sf800, model_sf800, kwh_sf800 = ZendureBattery.get_battery_type(
+        "B12345678", pack_type=70, parent_is_sf4000=False
+    )
+    assert model_sf800 == "AB1000S"
+    assert kwh_sf800 == 0.96
 
     # Standard AB1000S without packType 70
     _name_std, model_std, kwh_std = ZendureBattery.get_battery_type("B12345678", pack_type=None)
     assert model_std == "AB1000S"
     assert kwh_std == 0.96
+
+
+def test_raw_property_sensor_diagnostic_categorization(hass):
+    """Raw unmapped property sensors get DIAGNOSTIC category unless excluded, and explicit sensors get icons."""
+    device = make_device(hass, device_id="dev_diag", device_name="SF800", product_model="solarflow 800")
+
+    # Explicit sensor icons
+    assert device.socStatus.entity_description.icon == "mdi:battery-check"
+    assert device.socLimit.entity_description.icon == "mdi:battery-alert"
+    assert device.byPass.entity_description.icon == "mdi:electric-switch"
+    assert device.connectionStatus.entity_description.icon == "mdi:cloud-check"
+    assert device.aggrSwitchCount.entity_description.icon == "mdi:counter"
+
+    # Unmapped property gets DIAGNOSTIC category and mapped icon
+    with patch.object(device, "register_pending_entities"):
+        device.entityUpdate("acStatus", 1)
+    ac_sensor = device.entities.get("acStatus")
+    assert ac_sensor is not None
+    assert ac_sensor.entity_description.entity_category == EntityCategory.DIAGNOSTIC
+    assert ac_sensor.entity_description.icon == "mdi:current-ac"
+
+    # Excluded property stays in main category (entity_category is None)
+    with patch.object(device, "register_pending_entities"):
+        device.entityUpdate("is_error", 0)
+    err_sensor = device.entities.get("is_error")
+    assert err_sensor is not None
+    assert err_sensor.entity_description.entity_category is None
+    assert err_sensor.entity_description.icon == "mdi:alert-circle"
 
 
 async def test_solarflow_4000_device_initialization(hass):

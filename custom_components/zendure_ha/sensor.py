@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -48,6 +49,7 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
         state: Any = None,
         icon: str | None = None,
         translation_key: str | None = None,
+        entity_category: EntityCategory | None = None,
     ) -> None:
         """Initialize a Zendure entity."""
         super().__init__(device, uniqueid, "sensor", translation_key)
@@ -58,6 +60,7 @@ class ZendureSensor(  # pyright: ignore[reportIncompatibleVariableOverride]
             device_class=deviceclass,
             state_class=stateclass,
             icon=icon,
+            entity_category=entity_category,
         )
         self._value_template: Template | None = template
         if precision is not None:
@@ -186,9 +189,21 @@ class ZendureRestoreSensor(  # pyright: ignore[reportIncompatibleVariableOverrid
         deviceclass: Any | None = None,
         stateclass: Any | None = None,
         precision: int | None = None,
+        icon: str | None = None,
+        entity_category: EntityCategory | None = None,
     ) -> None:
         """Initialize a select entity."""
-        super().__init__(device, uniqueid, template, uom, deviceclass, stateclass, precision)
+        super().__init__(
+            device=device,
+            uniqueid=uniqueid,
+            template=template,
+            uom=uom,
+            deviceclass=deviceclass,
+            stateclass=stateclass,
+            precision=precision,
+            icon=icon,
+            entity_category=entity_category,
+        )
         self.last_value = 0
         self.lastValueUpdate = dt_util.utcnow()
 

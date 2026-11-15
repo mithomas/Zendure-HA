@@ -116,6 +116,22 @@ class TestManagedDeviceCount:
         await manager.update_fusegroups()
         assert manager.managedDeviceCount.asInt == 1
 
+    async def test_fusegroup_600_limits(self, hass):
+        """group600_1200 and group600_2400 set correct discharge and charge limits."""
+        manager = make_manager(hass)
+        device = make_device(hass, device_id="device-600")
+        attach_devices(manager, device)
+
+        device.fuseGroup.update_value(2)  # group600_1200
+        await manager.update_fusegroups()
+        assert device.fuseGrp.maxpower == 600
+        assert device.fuseGrp.minpower == -1200
+
+        device.fuseGroup.update_value(3)  # group600_2400
+        await manager.update_fusegroups()
+        assert device.fuseGrp.maxpower == 600
+        assert device.fuseGrp.minpower == -2400
+
 
 class TestAvailableKwh:
     def test_refresh_available_kwh_updates_when_device_thresholds_change(self, hass):

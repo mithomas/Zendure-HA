@@ -10,4 +10,4 @@ else
   PYTEST="pytest"
 fi
 
-"$PYTEST" -q
+"$PYTEST" -q "$@"

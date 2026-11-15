@@ -5,6 +5,7 @@ from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.template import Template
@@ -36,10 +37,18 @@ class ZendureBinarySensor(  # pyright: ignore[reportIncompatibleVariableOverride
         template: Template | None = None,
         deviceclass: Any | None = None,
         initial_state: bool = False,
+        icon: str | None = None,
+        entity_category: EntityCategory | None = None,
     ) -> None:
         """Initialize a binary sensor entity."""
         super().__init__(device, uniqueid, "binary_sensor")
-        self.entity_description = BinarySensorEntityDescription(key=uniqueid, name=uniqueid, device_class=deviceclass)
+        self.entity_description = BinarySensorEntityDescription(
+            key=uniqueid,
+            name=uniqueid,
+            device_class=deviceclass,
+            icon=icon,
+            entity_category=entity_category,
+        )
         self._attr_is_on = initial_state
         self._value_template: Template | None = template
 

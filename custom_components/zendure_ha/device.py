@@ -67,7 +67,11 @@ class ZendureBattery(EntityDevice):
     """Zendure Battery class for devices."""
 
     @staticmethod
-    def get_battery_type(sn: str, pack_type: int | None = None) -> tuple[str, str, float]:
+    def get_battery_type(
+        sn: str,
+        pack_type: int | None = None,
+        parent_is_sf4000: bool = False,
+    ) -> tuple[str, str, float]:
         model = "???"
         match sn[0]:
             case "A":
@@ -80,7 +84,9 @@ class ZendureBattery(EntityDevice):
             case "B":
                 # packType 70 is the SF4000 Mix AC+'s internal 8 kWh pack, which shares
                 # its serial prefix with the unrelated 0.96 kWh AB1000S.
-                if pack_type == SF4000_INTERNAL_BATTERY_PACK_TYPE:
+                # packType 70 alone is NOT unique: e.g. SF800 reports packType 70 for
+                # all packs (incl. AB1000S). Only treat it as I8000 on an SF4000.
+                if pack_type == SF4000_INTERNAL_BATTERY_PACK_TYPE and parent_is_sf4000:
                     model = "I8000"
                     kWh = 8.0
                 else:
@@ -112,7 +118,8 @@ class ZendureBattery(EntityDevice):
 
     def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice, pack_type: int | None = None) -> None:
         """Initialize Device."""
-        name, model, self.kWh = ZendureBattery.get_battery_type(sn, pack_type)
+        parent_is_sf4000 = type(parent).__name__.startswith("SolarFlow4000")
+        name, model, self.kWh = ZendureBattery.get_battery_type(sn, pack_type, parent_is_sf4000)
         super().__init__(hass, sn, name, model, "", sn, parent.deviceId)
         self.attr_device_info["serial_number"] = sn
 
@@ -250,22 +257,24 @@ class ZendureDevice(EntityDevice):
             NumberMode.SLIDER,
             True,
         )
-        self.socStatus = ZendureSensor(self, "socStatus", state=0)
-        self.socLimit = ZendureSensor(self, "socLimit", state=SocLimitState.NORMAL.value)
+        self.socStatus = ZendureSensor(self, "socStatus", state=0, icon="mdi:battery-check")
+        self.socLimit = ZendureSensor(self, "socLimit", state=SocLimitState.NORMAL.value, icon="mdi:battery-alert")
         self.deviceState = ZendureSensor(self, "state", state=self.state.value, translation_key="device_state")
-        self.byPass = ZendureBinarySensor(self, "pass")
+        self.byPass = ZendureBinarySensor(self, "pass", icon="mdi:electric-switch")
 
         fuseGroups = {
             0: "unused",
             1: "owncircuit",
-            2: "group800",
-            3: "group800_2400",
-            4: "group1200",
-            5: "group2000",
-            6: "group2400",
-            7: "group3600",
-            8: "group4000",
-            9: "group5000",
+            2: "group600_1200",
+            3: "group600_2400",
+            4: "group800",
+            5: "group800_2400",
+            6: "group1200",
+            7: "group2000",
+            8: "group2400",
+            9: "group3600",
+            10: "group4000",
+            11: "group5000",
         }
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
         self.acMode = ZendureSelect(self, "acMode", {1: "input", 2: "output"}, self.entityWrite, 1)
@@ -289,7 +298,7 @@ class ZendureDevice(EntityDevice):
         self.hemsStateUpdated = datetime.min
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", None, 2)
-        self.connectionStatus = ZendureSensor(self, "connectionStatus")
+        self.connectionStatus = ZendureSensor(self, "connectionStatus", icon="mdi:cloud-check")
         self.connection: ZendureRestoreSelect
         self.bleAdapter: ZendureRestoreSelect | None = None
         self.remainingTime = ZendureSensor(self, "remainingTime", None, "h", "duration", "measurement")
@@ -310,7 +319,16 @@ class ZendureDevice(EntityDevice):
         )
         self.aggrHomeOut = ZendureRestoreSensor(self, "aggrOutputHome", None, "kWh", "energy", "total_increasing", 2)
         self.aggrSolar = ZendureRestoreSensor(self, "aggrSolar", None, "kWh", "energy", "total_increasing", 2)
-        self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
+        self.aggrSwitchCount = ZendureRestoreSensor(
+            self,
+            "switchCount",
+            None,
+            None,
+            None,
+            "total_increasing",
+            0,
+            icon="mdi:counter",
+        )
         self.aggrOffGrid: ZendureRestoreSensor | None = None
         self.aggrNetGridCharge: ZendureRestoreSensor | None = None
 
