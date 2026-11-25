@@ -14469,3 +14469,151 @@ class TestLoadDropExportTrimAndCharge:
         primary.power_charge.assert_not_awaited()
         # Output is already zero; no redundant discharge command should be sent
         primary.power_discharge.assert_not_awaited()
+
+
+class TestNonFullPassIndicatorStability:
+    """Regression tests for 2026-11-24 non-full pass=on solar-to-battery fluctuations."""
+
+    @pytest.mark.parametrize(
+        ("p1", "solar_w"),
+        [
+            (5, 342),
+            (40, 349),
+            (92, 237),
+        ],
+    )
+    async def test_reserve_primary_with_pass_on_preserves_solar_output(
+        self,
+        hass: Any,
+        p1: int,
+        solar_w: int,
+    ) -> None:
+        """A reserve primary reporting pass=on at zero battery flow must keep its full solar output target."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-reserve-pass-on",
+            device_name="wz balkon reserve pass on",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=solar_w,
+            output_limit=solar_w,
+            input_limit=0,
+            battery_input=0,
+            battery_output=0,
+        )
+        primary.solarInput.update_value(solar_w)
+        primary.byPass.update_value(1)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+
+        now = datetime(2026, 11, 24, 13, 5, 7, tzinfo=UTC)
+        await _run_prepared_power_routing(manager, p1, now)
+
+        assert primary.state is DeviceState.SOCRESERVE
+        primary.power_charge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(solar_w)
+
+    async def test_normal_primary_with_pass_on_adds_demand_on_top_of_solar_output(
+        self,
+        hass: Any,
+    ) -> None:
+        """A normal primary reporting pass=on at zero battery flow must add positive P1 to its solar floor."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-normal-pass-on",
+            device_name="wz balkon normal pass on",
+            product_model="SolarFlow 800 Pro",
+            level=50,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=342,
+            output_limit=342,
+            input_limit=0,
+            battery_input=0,
+            battery_output=0,
+        )
+        primary.solarInput.update_value(342)
+        primary.byPass.update_value(1)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+
+        now = datetime(2026, 11, 24, 13, 5, 7, tzinfo=UTC)
+        await _run_prepared_power_routing(manager, 40, now)
+
+        assert primary.state is DeviceState.INACTIVE
+        primary.power_charge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(382)
+
+    async def test_reserve_primary_with_pass_on_trims_to_zero_under_export(
+        self,
+        hass: Any,
+    ) -> None:
+        """A reserve primary reporting pass=on must still receive a 0 W discharge command when export-trimmed to zero."""
+        primary = make_device(
+            hass,
+            device_cls=SolarFlow800Pro,
+            device_id="wz-balkon-reserve-pass-on-trim-zero",
+            device_name="wz balkon reserve pass on trim zero",
+            product_model="SolarFlow 800 Pro",
+            level=10,
+            min_soc=5,
+            reserve=10,
+            soc_set=100,
+            ac_mode=AcMode.OUTPUT,
+            home_output=60,
+            output_limit=60,
+            input_limit=0,
+            battery_input=0,
+            battery_output=0,
+        )
+        primary.solarInput.update_value(60)
+        primary.byPass.update_value(1)
+        manager = make_manager(
+            hass,
+            devices=(primary,),
+            operation=ManagerMode.MATCHING,
+            primary_device_id=primary.deviceId,
+            transition_gates=True,
+            charge_time=datetime.min.replace(tzinfo=UTC),
+        )
+        primary.power_get = AsyncMock(return_value=True)
+        primary.power_charge = AsyncMock(side_effect=lambda power: power)
+        primary.power_discharge = AsyncMock(side_effect=lambda power: power)
+        primary.power_bypass = AsyncMock(return_value=0)
+
+        now = datetime(2026, 11, 24, 13, 5, 7, tzinfo=UTC)
+        await _run_prepared_power_routing(manager, -75, now)
+
+        primary.power_charge.assert_not_awaited()
+        primary.power_bypass.assert_not_awaited()
+        primary.power_discharge.assert_awaited_once_with(0)

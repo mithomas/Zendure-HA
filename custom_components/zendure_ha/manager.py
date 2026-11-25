@@ -432,7 +432,11 @@ class _PowerRoutingSnapshot:
         if self.selected_primary not in self.discharge_devices:
             return 0
         route = self.route(self.selected_primary)
-        if route.device.state == DeviceState.SOCFULL:
+        if (
+            route.device.state == DeviceState.SOCFULL
+            or route.device.is_discharge_blocked()
+            or _pv_evidence_for_output_replacement(route.device) > 0
+        ):
             return 0
         return route.bypass_passthrough
 
@@ -1535,9 +1539,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         protect_zero: bool,
     ) -> int:
         """Apply bypass and active-flow safeguards for a zero home-output target."""
-        if allow_bypass_zero and getattr(device, "byPass", None) is not None and device.byPass.is_on:
-            return 0
         if allow_bypass_zero and device.can_bypass:
+            if getattr(device, "byPass", None) is not None and device.byPass.is_on:
+                return 0
             if device.acMode.value == AcMode.OUTPUT and not self._flow_stop_allows(
                 device,
                 _TransitionDirection.INPUT,
